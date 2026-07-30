@@ -1,30 +1,19 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
 
-func TestIdleTrackerIgnoresProbes(t *testing.T) {
-	tr := newIdleTracker(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+func TestIdleTrackerMarkResetsIdle(t *testing.T) {
+	tr := newIdleTracker()
 	tr.last.Store(time.Now().Add(-time.Hour).UnixNano())
-	old := tr.last.Load()
-
-	// A probe must NOT reset activity.
-	tr.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
-	if tr.last.Load() != old {
-		t.Fatal("/health should not count as activity")
+	if tr.idleFor() < 30*time.Minute {
+		t.Fatalf("expected large idleFor before mark, got %s", tr.idleFor())
 	}
-
-	// A real request must reset activity.
-	tr.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
-	if tr.last.Load() == old {
-		t.Fatal("real request should reset activity")
-	}
+	tr.mark()
 	if tr.idleFor() > time.Minute {
-		t.Fatalf("idleFor should be small after activity, got %s", tr.idleFor())
+		t.Fatalf("mark should reset idleFor, got %s", tr.idleFor())
 	}
 }
 

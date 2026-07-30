@@ -44,11 +44,14 @@ func requirePostAPIKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return apiKey, true
 }
 
-func newMux(routerService *router.RouterService) *http.ServeMux {
+func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	proxyHandler := func(forcedProvider string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			if idle != nil {
+				idle.mark() // real proxy traffic — resets the idle-shutdown timer
+			}
 			apiKey, ok := requirePostAPIKey(w, r)
 			if !ok {
 				return
@@ -133,14 +136,17 @@ func main() {
 	host := "0.0.0.0"
 
 	routerService := router.NewRouterService()
-	handler := newIdleTracker(newMux(routerService))
-	startIdleShutdown(handler, idleTimeoutFromEnv())
+	tracker := newIdleTracker()
+	mux := newMux(routerService, tracker)
+	startIdleShutdown(tracker, idleTimeoutFromEnv())
+	// A gRPC bind failure (e.g. the port is already in use) must not take down
+	// the HTTP proxy, which is the primary function. Log and continue.
 	if err := startGRPCServer(context.Background(), routerService, host, grpcPort); err != nil {
-		log.Fatalf("failed to start gRPC server: %v", err)
+		slog.Warn("gRPC server not started; continuing with HTTP only", "grpc_port", grpcPort, "error", err)
 	}
 
 	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
-	log.Fatal(httpx.NewServer(host+":"+port, handler).ListenAndServe())
+	log.Fatal(httpx.NewServer(host+":"+port, mux).ListenAndServe())
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

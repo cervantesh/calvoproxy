@@ -2,53 +2,40 @@ package main
 
 import (
 	"log/slog"
-	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 )
 
-// idleTracker wraps the HTTP handler and records the time of the last "real"
-// request (actual proxy traffic, not health/readiness probes) so the process
+// idleTracker records the time of the last *real* proxy request so the process
 // can self-terminate after a period of inactivity. This is what makes CalvoProxy
 // safe to run on-demand: a launcher starts it when first needed, and it exits
 // once traffic stops.
+//
+// Only genuine proxy traffic calls mark(). Health/readiness probes and unknown
+// routes (stray pollers or scanners sharing the port — e.g. a kubectl context
+// pointed at localhost:8080 hitting /api, or a monitor polling /) do NOT count
+// as activity, so they cannot keep the process alive and defeat idle shutdown.
 type idleTracker struct {
-	next http.Handler
-	last atomic.Int64 // UnixNano of last non-probe request
+	last atomic.Int64 // UnixNano of last real proxy request
 }
 
-func newIdleTracker(next http.Handler) *idleTracker {
-	t := &idleTracker{next: next}
+func newIdleTracker() *idleTracker {
+	t := &idleTracker{}
 	t.last.Store(time.Now().UnixNano())
 	return t
 }
 
-// isProbe reports whether a path is a health/readiness probe that must NOT
-// count as activity — otherwise a monitor polling /health would keep the
-// process alive forever and defeat idle shutdown.
-func isProbe(path string) bool {
-	switch path {
-	case "/health", "/ready", "/health/model-policy":
-		return true
-	default:
-		return false
-	}
-}
-
-func (t *idleTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !isProbe(r.URL.Path) {
-		t.last.Store(time.Now().UnixNano())
-	}
-	t.next.ServeHTTP(w, r)
-}
+// mark records activity. Called by the proxy request handlers (chat/messages/
+// embeddings), not by probe or unmatched routes.
+func (t *idleTracker) mark() { t.last.Store(time.Now().UnixNano()) }
 
 func (t *idleTracker) idleFor() time.Duration {
 	return time.Since(time.Unix(0, t.last.Load()))
 }
 
-// startIdleShutdown exits the process once no non-probe request has arrived
+// startIdleShutdown exits the process once no real proxy request has arrived
 // within `timeout`. A zero/negative timeout disables the watchdog (the proxy
 // then runs until killed, its original always-on behaviour).
 func startIdleShutdown(t *idleTracker, timeout time.Duration) {
