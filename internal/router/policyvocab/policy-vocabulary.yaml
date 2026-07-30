@@ -1,0 +1,56 @@
+operations:
+  chat_completion:
+    description: Normal chat completion request handled by the core backend.
+    go_name: ChatCompletion
+  tool_orchestration:
+    description: Tool-enabled orchestration request handled by the core backend.
+    go_name: ToolOrchestration
+  telegram_webhook:
+    description: Telegram webhook request handled by the bridge backend.
+    go_name: TelegramWebhook
+  secret_lookup:
+    description: Secret lookup request handled by the vault API for trusted users.
+    go_name: SecretLookup
+  planning:
+    description: Planning request handled by cervocore or an optional planning backend.
+    go_name: Planning
+  media_request:
+    description: Media automation request handled only when a media backend is configured.
+    go_name: MediaRequest
+  embedding:
+    description: Embedding request handled by the core backend.
+    go_name: Embedding
+
+targets:
+  cervocore:
+    description: Main LLM/core backend.
+    go_name: CervoCore
+  cervobridge:
+    description: Bridge backend for external chat/webhook channels.
+    go_name: CervoBridge
+  cervovault_api:
+    description: Vault API backend for secret lookup.
+    go_name: CervoVaultAPI
+  crashito_brain:
+    description: Optional dedicated planning backend.
+    go_name: CrashitoBrain
+  cervomedia:
+    description: Optional media automation backend.
+    go_name: CervoMedia
+
+executors:
+  openrouter:
+    description: OpenRouter provider.
+    go_name: OpenRouter
+  openai:
+    description: OpenAI provider.
+    go_name: OpenAI
+  anthropic:
+    description: Anthropic provider.
+    go_name: Anthropic
+  ollama:
+    description: Local Ollama provider.
+    go_name: Ollama
+  local:
+    description: Generic local provider.
+    go_name: Local

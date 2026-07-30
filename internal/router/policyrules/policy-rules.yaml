@@ -1,0 +1,70 @@
+version: cervorules.policy.v3
+name: cervoproxy.v3
+
+trusted_users:
+  - cervantes
+
+defaults:
+  executor: openrouter
+
+routes:
+  - operation: chat_completion
+    target: cervocore
+    executor: openrouter
+
+  - operation: tool_orchestration
+    target: cervocore
+    executor: openrouter
+
+  - operation: embedding
+    target: cervocore
+    executor: openrouter
+
+  - operation: telegram_webhook
+    target: cervobridge
+    executor: openrouter
+
+  - operation: secret_lookup
+    target: cervovault_api
+    executor: openrouter
+    requires_trusted_user: true
+
+  - operation: planning
+    target: cervocore
+    executor: openrouter
+
+  - operation: media_request
+    target: cervomedia
+    executor: openrouter
+    disabled_by_default: true
+    disabled_reason: media backend not configured
+
+tests:
+  - name: chat allowed
+    request:
+      id: req-chat
+      user: guest
+      operation: chat_completion
+    expect:
+      allow: true
+      target: cervocore
+      executor: openrouter
+
+  - name: secret trusted allowed
+    request:
+      id: req-secret-trusted
+      user: cervantes
+      operation: secret_lookup
+    expect:
+      allow: true
+      target: cervovault_api
+      executor: openrouter
+
+  - name: media denied
+    request:
+      id: req-media
+      user: guest
+      operation: media_request
+    expect:
+      allow: false
+      reason: media backend not configured
