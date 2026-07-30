@@ -43,6 +43,13 @@ func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reas
 		state = &modelBreakerState{}
 		s.modelBreakers[breakerKey] = state
 	}
+	// Half-open: once the cooldown has elapsed the next attempt is a probe.
+	// Reset the counter first so a single probe failure doesn't immediately
+	// re-open the circuit — it takes a full threshold of failures again.
+	if !state.OpenUntil.IsZero() && time.Now().After(state.OpenUntil) {
+		state.ConsecutiveFailures = 0
+		state.OpenUntil = time.Time{}
+	}
 	state.ConsecutiveFailures++
 	state.LastFailureCode = statusCode
 	state.LastFailureReason = truncateReason(reason)
@@ -212,24 +219,45 @@ func (s *RouterService) Ready() bool {
 	return s.Health().Ready
 }
 
-// GlobalBreakerTransport is an http.RoundTripper with a global circuit breaker.
+// GlobalBreakerTransport is an http.RoundTripper with a PER-HOST circuit
+// breaker: each upstream host (openrouter.ai, an ollama sidecar, …) has its own
+// failure counter and open state, so one dead host can't blackhole traffic to
+// the others.
 type GlobalBreakerTransport struct {
 	Base             http.RoundTripper
 	FailureThreshold int
 	Cooldown         time.Duration
 
-	mu        sync.RWMutex
+	mu    sync.Mutex
+	hosts map[string]*hostBreakerState
+}
+
+type hostBreakerState struct {
 	failures  int
 	openUntil time.Time
 }
 
-func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.mu.RLock()
-	open := time.Now().Before(t.openUntil)
-	t.mu.RUnlock()
+func (t *GlobalBreakerTransport) hostState(host string) *hostBreakerState {
+	if t.hosts == nil {
+		t.hosts = make(map[string]*hostBreakerState)
+	}
+	hb := t.hosts[host]
+	if hb == nil {
+		hb = &hostBreakerState{}
+		t.hosts[host] = hb
+	}
+	return hb
+}
 
+func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Host
+
+	t.mu.Lock()
+	hb := t.hostState(host)
+	open := time.Now().Before(hb.openUntil)
+	t.mu.Unlock()
 	if open {
-		return nil, fmt.Errorf("global circuit breaker open: host is temporarily unreachable")
+		return nil, fmt.Errorf("circuit breaker open for host %s: temporarily unreachable", host)
 	}
 
 	base := t.Base
@@ -241,25 +269,26 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	hb = t.hostState(host)
 
 	if err != nil {
-		t.failures++
-		if t.failures >= t.FailureThreshold {
-			t.openUntil = time.Now().Add(t.Cooldown)
-			slog.Error("[CalvoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is down", slog.String("open_until", t.openUntil.Format(time.RFC3339)))
+		hb.failures++
+		if hb.failures >= t.FailureThreshold {
+			hb.openUntil = time.Now().Add(t.Cooldown)
+			slog.Error("[CalvoProxy] 🚨 HOST CIRCUIT OPEN: host is down", slog.String("host", host), slog.String("open_until", hb.openUntil.Format(time.RFC3339)))
 		}
 		return resp, err
 	}
 
 	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
-		t.failures++
-		if t.failures >= t.FailureThreshold {
-			t.openUntil = time.Now().Add(t.Cooldown)
-			slog.Error("[CalvoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is returning errors", slog.Int("http_code", resp.StatusCode), slog.String("open_until", t.openUntil.Format(time.RFC3339)))
+		hb.failures++
+		if hb.failures >= t.FailureThreshold {
+			hb.openUntil = time.Now().Add(t.Cooldown)
+			slog.Error("[CalvoProxy] 🚨 HOST CIRCUIT OPEN: host is returning errors", slog.String("host", host), slog.Int("http_code", resp.StatusCode), slog.String("open_until", hb.openUntil.Format(time.RFC3339)))
 		}
 	} else if resp.StatusCode < 500 {
-		t.failures = 0
-		t.openUntil = time.Time{}
+		hb.failures = 0
+		hb.openUntil = time.Time{}
 	}
 
 	return resp, err

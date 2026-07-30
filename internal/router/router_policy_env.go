@@ -49,6 +49,17 @@ func envValue(key string) string {
 	return strings.TrimSpace(os.Getenv(key))
 }
 
+// maxRequestBodyBytes is the cap applied to incoming request bodies via
+// http.MaxBytesReader. Configurable with PROXY_MAX_BODY_BYTES; default 10 MiB.
+func maxRequestBodyBytes() int64 {
+	if raw := envValue("PROXY_MAX_BODY_BYTES"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10 << 20
+}
+
 func canonicalEnvValue(key string) string {
 	return strings.ToLower(envValue(key))
 }

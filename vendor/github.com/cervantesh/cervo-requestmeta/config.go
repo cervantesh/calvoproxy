@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	configenv "github.com/cervantesh/cervo-config"
-	"github.com/cervantesh/cervo-config/cervoclaw"
+	"github.com/cervantesh/cervo-config/calvoproxy"
 )
 
 // Config contains request metadata defaults loaded from configuration sources.
@@ -18,7 +18,7 @@ type Config struct {
 // LoadConfig loads request metadata defaults from a config loader.
 func LoadConfig(loader *configenv.Loader) (Config, error) {
 	if loader == nil {
-		loader = cervoclaw.NewLoader()
+		loader = calvoproxy.NewLoader()
 	}
 	var cfg Config
 	if err := loader.Decode(&cfg); err != nil {

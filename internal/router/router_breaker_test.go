@@ -35,10 +35,10 @@ func TestGlobalBreakerTransport_OpensAndResets(t *testing.T) {
 	if _, err := transport.RoundTrip(req); err == nil {
 		t.Fatal("expected round trip error")
 	}
-	if transport.failures != 1 {
-		t.Fatalf("expected failures=1, got %d", transport.failures)
+	if hb := transport.hosts["example.com"]; hb == nil || hb.failures != 1 {
+		t.Fatalf("expected failures=1 for host, got %+v", hb)
 	}
-	if transport.openUntil.IsZero() {
+	if transport.hosts["example.com"].openUntil.IsZero() {
 		t.Fatal("expected transport to open circuit")
 	}
 	if _, err := transport.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "open") {
@@ -46,12 +46,32 @@ func TestGlobalBreakerTransport_OpensAndResets(t *testing.T) {
 	}
 
 	transport.Base = stubTransport{resp: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}}
-	transport.openUntil = time.Time{}
+	transport.hosts["example.com"].openUntil = time.Time{}
 	if _, err := transport.RoundTrip(req); err != nil {
 		t.Fatalf("unexpected success error: %v", err)
 	}
-	if transport.failures != 0 {
-		t.Fatalf("expected failures reset, got %d", transport.failures)
+	if transport.hosts["example.com"].failures != 0 {
+		t.Fatalf("expected failures reset, got %d", transport.hosts["example.com"].failures)
+	}
+}
+
+func TestGlobalBreakerTransport_PerHostIsolation(t *testing.T) {
+	transport := &GlobalBreakerTransport{
+		Base:             stubTransport{err: errors.New("boom")},
+		FailureThreshold: 1,
+		Cooldown:         time.Minute,
+	}
+	// Trip host A.
+	reqA, _ := http.NewRequest(http.MethodGet, "http://dead-sidecar:8091", nil)
+	_, _ = transport.RoundTrip(reqA)
+	if transport.hosts["dead-sidecar:8091"].openUntil.IsZero() {
+		t.Fatal("expected host A circuit open")
+	}
+	// Host B must still be reachable (not blackholed by A).
+	transport.Base = stubTransport{resp: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}}
+	reqB, _ := http.NewRequest(http.MethodGet, "http://openrouter.ai", nil)
+	if _, err := transport.RoundTrip(reqB); err != nil {
+		t.Fatalf("host B should be unaffected by host A's open circuit, got %v", err)
 	}
 }
 

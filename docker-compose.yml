@@ -13,7 +13,9 @@ services:
     # Optional: edit chains without rebuilding by mounting your own file:
     # volumes:
     #   - ./model-policy.json:/app/model-policy.json:ro
-    restart: unless-stopped
+    # on-failure (not unless-stopped): a clean idle self-shutdown exits 0 and
+    # must NOT be auto-restarted into a loop; a crash (non-zero) still restarts.
+    restart: on-failure
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s

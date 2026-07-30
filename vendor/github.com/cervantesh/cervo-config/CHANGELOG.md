@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add `cervoclaw.NewCloudLoader` with optional Cloud Run/agentic config file
+- Add `calvoproxy.NewCloudLoader` with optional Cloud Run/agentic config file
   and mounted secret directory sources.
 - Add fail-fast `MustDecode` helpers for root loaders and `structenv`.
 - Add sensitive metadata, redacted descriptions, and Markdown config docs.
@@ -26,7 +26,7 @@
 
 - Add reusable loaders and typed helpers.
 - Add strict parsers.
-- Add `cervoclaw` compatibility subpackage.
+- Add `calvoproxy` compatibility subpackage.
 
 ## v0.1.0 - 2026-05-25
 

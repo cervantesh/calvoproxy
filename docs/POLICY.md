@@ -148,7 +148,7 @@ Runtime policy evaluation emits one versioned telemetry event:
 
 ```text
 event=cervorules.policy.decision
-schema_version=cervoclaw.calvoproxy.policy_telemetry.v1
+schema_version=calvoproxy.policy_telemetry.v1
 ```
 
 Logs, metrics and traces share the same low-cardinality policy fields:
@@ -271,7 +271,7 @@ should use environment variables instead of code changes.
 Preserved behavior:
 
 - `calvoproxy/<profile>` selects a profile.
-- `cervoclaw/<profile>` selects a profile.
+- `calvoproxy/<profile>` selects a profile.
 - bare aliases such as `coding` select a profile.
 - `auto` uses the selected profile chain.
 - explicit model names are tried before profile fallback models.
