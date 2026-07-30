@@ -24,7 +24,7 @@ func TestResolveAPIKey_PrefersAuthorizationThenEnv(t *testing.T) {
 }
 
 func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
-	mux := newMux(router.NewRouterService())
+	mux := newMux(router.NewRouterService(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
 	rec := httptest.NewRecorder()
@@ -70,7 +70,7 @@ func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
 }
 
 func TestNewMux_RejectsWrongMethodAndUnknownDynamicRoute(t *testing.T) {
-	mux := newMux(router.NewRouterService())
+	mux := newMux(router.NewRouterService(), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/messages", nil)
 	rec := httptest.NewRecorder()
