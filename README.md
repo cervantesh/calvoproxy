@@ -40,6 +40,25 @@ The server exposes an HTTP API and a gRPC API.
 | `GRPC_PORT`          | `9090`  | gRPC listen port                     |
 | `OPENROUTER_API_KEY` | —       | Upstream key for the default executor|
 | `PROXY_IDLE_TIMEOUT` | off     | Exit after this idle period (Go duration, e.g. `20m`) — enables on-demand use |
+| `PROXY_SCORING_ENABLED` | `true` | Reorder the chain by per-model reliability score (see below) |
+| `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
+| `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | How long an open circuit skips a model |
+
+### Reliability: circuit breaker + scoring
+
+Two layers keep flaky models out of the way:
+
+- **Circuit breaker** (hard gate): after `PROXY_BREAKER_FAILURE_THRESHOLD`
+  consecutive failures a model's circuit **opens** and it is skipped entirely
+  for `PROXY_BREAKER_COOLDOWN_SECONDS`; a success closes it.
+- **Reliability score** (soft ranking): every model carries a score in `[0,1]`
+  that rises on success and falls on failure — harder for rate-limits (429),
+  server errors (5xx) and timeouts, and it also drops for "model unavailable"
+  404s. The eligible chain is **reordered by score** (most reliable first)
+  before each request, so a struggling model sinks to the back without being
+  removed, and **recovers toward neutral over ~5 min** so it gets retried later.
+  Scores are visible under `circuits[].score` in `/health`. Set
+  `PROXY_SCORING_ENABLED=false` to keep the static chain order.
 
 ### On-demand operation
 

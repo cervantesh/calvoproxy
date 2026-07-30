@@ -37,6 +37,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Transport Error")
 		attErr := classifyTransportError(err)
+		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
 		}
@@ -52,6 +53,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			span.SetStatus(codes.Error, "Upstream HTTP Error")
 		}
 		attErr := classifyHTTPError(resp.StatusCode, string(respBytes))
+		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
 		}

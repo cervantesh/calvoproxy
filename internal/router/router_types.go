@@ -24,6 +24,8 @@ type modelBreakerState struct {
 	LastFailureReason   string    `json:"last_failure_reason,omitempty"`
 	LastFailureAt       time.Time `json:"last_failure_at,omitempty"`
 	OpenUntil           time.Time `json:"open_until,omitempty"`
+	Score               float64   `json:"score"`
+	ScoreUpdatedAt      time.Time `json:"score_updated_at,omitempty"`
 }
 
 type BreakerSnapshot struct {
@@ -34,6 +36,7 @@ type BreakerSnapshot struct {
 	LastFailureReason   string    `json:"last_failure_reason,omitempty"`
 	LastFailureAt       time.Time `json:"last_failure_at,omitempty"`
 	OpenUntil           time.Time `json:"open_until,omitempty"`
+	Score               float64   `json:"score"`
 	State               string    `json:"state"`
 }
 
