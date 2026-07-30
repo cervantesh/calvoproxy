@@ -1,5 +1,4 @@
 
-
 # Build output
 # Local env / logs
 # air live-reload
@@ -9,11 +8,12 @@
 *.log
 *~
 .env
-/cervoproxy
-/cervoproxy.exe
+/calvoproxy
+/calvoproxy.exe
 /tmp/
 build-errors.log
-ensure-cervoproxy.ps1
+ensure-*.ps1
+ensure-calvoproxy.ps1
 proxy.err
 proxy.out
 start-hidden.vbs

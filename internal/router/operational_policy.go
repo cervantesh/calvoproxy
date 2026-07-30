@@ -50,7 +50,7 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 
 	telemetryConfig := loadPolicyTelemetryConfig()
 	start := time.Now()
-	policyCtx, span := otel.Tracer("cervoproxy/policy").Start(ctx, "cervoproxy.policy.evaluate")
+	policyCtx, span := otel.Tracer("calvoproxy/policy").Start(ctx, "calvoproxy.policy.evaluate")
 	defer span.End()
 	result, err := s.PolicyEngine.DecideWithOptions(policyCtx, req, policyDecisionOptionsForRequest(req, telemetryConfig))
 	decision := s.proxyDecision(req, result.Decision)
@@ -60,7 +60,7 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 		span.SetStatus(codes.Error, "policy decision failed")
 		if telemetryConfig.LogEnabled {
 			attrs := append([]slog.Attr{slog.String("request_id", req.ID)}, event.LogAttrs()...)
-			slog.LogAttrs(policyCtx, slog.LevelError, "[CervoProxy] policy decision failed", attrs...)
+			slog.LogAttrs(policyCtx, slog.LevelError, "[CalvoProxy] policy decision failed", attrs...)
 		}
 		writeJSONError(w, http.StatusInternalServerError, "policy decision failed")
 		return decision, false
@@ -71,7 +71,7 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 		if !decision.Allow && decision.RequiresAudit && level < slog.LevelWarn {
 			level = slog.LevelWarn
 		}
-		slog.LogAttrs(policyCtx, level, "[CervoProxy] policy decision", event.LogAttrs()...)
+		slog.LogAttrs(policyCtx, level, "[CalvoProxy] policy decision", event.LogAttrs()...)
 	}
 
 	if !decision.Allow {

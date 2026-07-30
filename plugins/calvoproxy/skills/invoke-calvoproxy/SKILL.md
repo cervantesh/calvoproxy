@@ -1,17 +1,17 @@
 ---
-name: invoke-cervoproxy
+name: invoke-calvoproxy
 description: >-
-  Query free LLMs (OpenRouter :free models) through the local CervoProxy for
+  Query free LLMs (OpenRouter :free models) through the local CalvoProxy for
   second opinions, cheap/bulk subtasks, drafts, or offloading work from the main
-  model. Use when the user says "ask the free model", "use cervoproxy", "ask a
+  model. Use when the user says "ask the free model", "use calvoproxy", "ask a
   free model", "second opinion from a free model", "offload this to the proxy",
   or when you want a throwaway/contrast answer without spending premium tokens.
 license: MIT
 ---
 
-# Invoke CervoProxy
+# Invoke CalvoProxy
 
-Shell out to **CervoProxy** (`http://localhost:8080` by default) to get an answer
+Shell out to **CalvoProxy** (`http://localhost:8080` by default) to get an answer
 from a free OpenRouter model. The proxy applies a per-profile model chain and
 fails over automatically across `:free` models, so you get an answer without a
 premium API call.
@@ -23,10 +23,10 @@ reasoning, final review, or anything security-sensitive. Sanity-check the output
 
 ## Use
 
-Invoke explicitly with `/skill:invoke-cervoproxy <question>`, or run the helper:
+Invoke explicitly with `/skill:invoke-calvoproxy <question>`, or run the helper:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/invoke-cervoproxy/ask.sh" <profile> "<your prompt>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/invoke-calvoproxy/ask.sh" <profile> "<your prompt>"
 ```
 
 - `<profile>` — `coding` (default), `reasoning`, `simple`, `creative`, `vision`.
@@ -39,9 +39,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/invoke-cervoproxy/ask.sh" <profile> "<your pr
 
 The only requirement is a reachable proxy. Optional env vars:
 
-- `CERVOPROXY_URL` — proxy base URL (default `http://127.0.0.1:8080`). Set this
+- `CALVOPROXY_URL` — proxy base URL (default `http://127.0.0.1:8080`). Set this
   if the proxy runs elsewhere.
-- `CERVOPROXY_BIN` — path to the `cervoproxy` binary; if set, the helper starts
+- `CALVOPROXY_BIN` — path to the `calvoproxy` binary; if set, the helper starts
   the proxy on-demand when it's down (and it self-stops after ~20 min idle).
 - `OPENROUTER_API_KEY` — only needed when the helper itself starts the proxy;
   a running proxy already holds its own key.
@@ -66,4 +66,4 @@ answer must be authoritative — the free models are not.
 - It **is** an external network call (to OpenRouter) — free, but still leaves the
   machine. Don't send secrets or sensitive code in the prompt.
 - Proxy source, setup, and editable model chains (`model-policy.json`) live in
-  the CervoProxy repo this plugin ships with.
+  the CalvoProxy repo this plugin ships with.

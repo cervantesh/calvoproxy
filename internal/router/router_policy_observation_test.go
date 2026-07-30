@@ -126,7 +126,7 @@ func TestPolicyTelemetryEventForErrorRedactsAndClassifies(t *testing.T) {
 	}
 	decision := policyDecision{RuleID: "route.planning"}
 	err := cervoruntime.NewPolicyBuildError(cervoruntime.PolicyMetadata{
-		Name:       "cervoproxy.v3",
+		Name:       "calvoproxy.v3",
 		PolicyHash: "policy-hash",
 	}, cervorules.Errors{{
 		Code:     cervorules.ErrorCodeInvalidRuntimeConfig,

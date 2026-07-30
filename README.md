@@ -1,4 +1,4 @@
-# CervoProxy
+# CalvoProxy
 
 Smart OpenAI-compatible proxy that fronts multiple LLM providers behind one
 endpoint. It applies deterministic request policy (CervoRules v3), selects a
@@ -6,7 +6,7 @@ model chain per request (CervoModelPolicy), and adds gateway concerns —
 timeouts, retries, circuit breaking, limits and audit — on top of upstream
 forwarding.
 
-This repository is a **standalone extraction of CervoProxy** from the
+This repository is a **standalone extraction of CalvoProxy** from the
 `cervoclaw` monorepo. All of its dependencies are **vendored** (`vendor/`), so
 it builds and runs on its own with no access to the monorepo or to the private
 Gitea modules it originally depended on.
@@ -14,7 +14,7 @@ Gitea modules it originally depended on.
 ## Build
 
 ```bash
-go build -mod=vendor -o cervoproxy ./cmd
+go build -mod=vendor -o calvoproxy ./cmd
 ```
 
 The build is fully offline — every dependency lives under `vendor/`. You can
@@ -29,7 +29,7 @@ prove it with `GOPROXY=off go build ./cmd`.
 ## Run
 
 ```bash
-./cervoproxy
+./calvoproxy
 ```
 
 The server exposes an HTTP API and a gRPC API.
@@ -92,29 +92,81 @@ Quick check:
 curl -s http://127.0.0.1:8080/health
 ```
 
-## Docker
+## Install
+
+### Docker (recommended)
+
+Pull the published image and run it with your OpenRouter key:
 
 ```bash
-docker build -f proxy.Dockerfile -t cervoproxy .
-docker run --rm -p 8080:8080 -e OPENROUTER_API_KEY=sk-... cervoproxy
+docker run -d --name calvoproxy -p 8080:8080 \
+  -e OPENROUTER_API_KEY=sk-or-v1-... \
+  ghcr.io/cervantesh/calvoproxy:latest
 ```
+
+Or with Compose (set `OPENROUTER_API_KEY` in your shell or a `.env` file):
+
+```bash
+docker compose up -d
+```
+
+To edit the free-model chains without rebuilding, mount your own file:
+
+```bash
+docker run -d -p 8080:8080 -e OPENROUTER_API_KEY=sk-or-v1-... \
+  -v "$PWD/model-policy.json:/app/model-policy.json:ro" \
+  ghcr.io/cervantesh/calvoproxy:latest
+```
+
+Build the image locally instead of pulling: `docker build -t calvoproxy .`
+
+### Prebuilt binaries (Windows / macOS / Linux)
+
+Download the archive for your platform from the
+[Releases](https://github.com/cervantesh/calvoproxy/releases) page. Each archive
+(`calvoproxy-<version>-<os>-<arch>.zip`/`.tar.gz`) contains:
+
+- `calvoproxy` (or `calvoproxy.exe` on Windows) — the server, a single static binary;
+- `model-policy.json` — the editable free-model chains (optional; the binary has
+  an embedded default, so it runs without this file);
+- `README.md`, `LICENSE`.
+
+**Windows** (from the extracted folder):
+
+```powershell
+$env:OPENROUTER_API_KEY = "sk-or-v1-..."
+.\calvoproxy.exe
+```
+
+**macOS / Linux:**
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+./calvoproxy
+```
+
+On macOS the binary is unsigned, so the first run may need
+`xattr -d com.apple.quarantine ./calvoproxy` (or approve it in System Settings →
+Privacy & Security). The proxy then listens on `http://localhost:8080` — point
+any OpenAI-compatible client at it. Get a free OpenRouter key at
+<https://openrouter.ai/keys>.
 
 ## Claude Code plugin
 
 This repo also ships a Claude Code plugin so Claude Code (not just Hermes) can
 query the free models through the proxy — for second opinions, cheap subtasks,
-and drafts. It's under [`plugins/cervoproxy/`](plugins/cervoproxy/) and this repo
+and drafts. It's under [`plugins/calvoproxy/`](plugins/calvoproxy/) and this repo
 doubles as a plugin marketplace:
 
 ```text
-/plugin marketplace add cervantesh/cervoproxy
-/plugin install cervoproxy@cervoproxy
+/plugin marketplace add cervantesh/calvoproxy
+/plugin install calvoproxy@calvoproxy
 ```
 
 Then use `/ask-free <prompt>` or ask naturally ("second opinion from the free
-model"). Minimal config: a reachable proxy (or set `CERVOPROXY_BIN` +
+model"). Minimal config: a reachable proxy (or set `CALVOPROXY_BIN` +
 `OPENROUTER_API_KEY` to let the plugin start it on-demand). See the
-[plugin README](plugins/cervoproxy/README.md).
+[plugin README](plugins/calvoproxy/README.md).
 
 ## Layout
 

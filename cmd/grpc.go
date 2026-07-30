@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/cervantesh/cervo-requestmeta"
-	"github.com/cervoclaw/cervo-proxy/internal/router"
+	"github.com/cervantesh/calvoproxy/internal/router"
 	proxyv1 "github.com/cervoclaw/cervo-shared/gen/proto/cervoclaw/proxy/v1"
 	"google.golang.org/grpc"
 )

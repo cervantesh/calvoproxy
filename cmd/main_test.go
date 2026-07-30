@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cervoclaw/cervo-proxy/internal/router"
+	"github.com/cervantesh/calvoproxy/internal/router"
 )
 
 func TestResolveAPIKey_PrefersAuthorizationThenEnv(t *testing.T) {

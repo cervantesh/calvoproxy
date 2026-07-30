@@ -11,7 +11,7 @@ import (
 
 // idleTracker wraps the HTTP handler and records the time of the last "real"
 // request (actual proxy traffic, not health/readiness probes) so the process
-// can self-terminate after a period of inactivity. This is what makes CervoProxy
+// can self-terminate after a period of inactivity. This is what makes CalvoProxy
 // safe to run on-demand: a launcher starts it when first needed, and it exits
 // once traffic stops.
 type idleTracker struct {
@@ -55,7 +55,7 @@ func startIdleShutdown(t *idleTracker, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
-	slog.Info("CervoProxy idle shutdown armed", "timeout", timeout.String())
+	slog.Info("CalvoProxy idle shutdown armed", "timeout", timeout.String())
 	go func() {
 		interval := timeout / 4
 		if interval < 5*time.Second {
@@ -65,7 +65,7 @@ func startIdleShutdown(t *idleTracker, timeout time.Duration) {
 		defer tick.Stop()
 		for range tick.C {
 			if idle := t.idleFor(); idle >= timeout {
-				slog.Info("CervoProxy exiting after idle period", "idle", idle.Round(time.Second).String(), "timeout", timeout.String())
+				slog.Info("CalvoProxy exiting after idle period", "idle", idle.Round(time.Second).String(), "timeout", timeout.String())
 				os.Exit(0)
 			}
 		}

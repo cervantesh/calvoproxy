@@ -13,7 +13,7 @@ func loadRetryPolicyFromEnv() RetryPolicy {
 	policy := RetryPolicy{}
 	if raw := envValue("PROXY_RETRY_POLICY_JSON"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-			slog.Warn("[CervoProxy] invalid PROXY_RETRY_POLICY_JSON", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid PROXY_RETRY_POLICY_JSON", slog.Any("error", err))
 		}
 	}
 	return policy
@@ -23,7 +23,7 @@ func loadLimitsFromEnv() Limits {
 	limits := Limits{}
 	if raw := envValue("PROXY_LIMITS_JSON"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &limits); err != nil {
-			slog.Warn("[CervoProxy] invalid PROXY_LIMITS_JSON", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid PROXY_LIMITS_JSON", slog.Any("error", err))
 		}
 	}
 	if raw := envValue("PROXY_MAX_BODY_BYTES"); raw != "" {

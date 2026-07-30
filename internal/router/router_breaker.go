@@ -57,7 +57,7 @@ func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reas
 	}
 	if state.ConsecutiveFailures >= threshold {
 		state.OpenUntil = time.Now().Add(cooldown)
-		slog.Warn("[CervoProxy] 🔴 Circuit OPEN", slog.String("breaker_key", breakerKey), slog.String("open_until", state.OpenUntil.Format(time.RFC3339)))
+		slog.Warn("[CalvoProxy] 🔴 Circuit OPEN", slog.String("breaker_key", breakerKey), slog.String("open_until", state.OpenUntil.Format(time.RFC3339)))
 	}
 }
 
@@ -163,7 +163,7 @@ func (s *RouterService) Health() ProxyHealth {
 	}
 
 	return ProxyHealth{
-		Service:            "CervoProxy",
+		Service:            "CalvoProxy",
 		Status:             status,
 		Ready:              ready,
 		OpenCircuitCount:   openCount,
@@ -244,7 +244,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 		t.failures++
 		if t.failures >= t.FailureThreshold {
 			t.openUntil = time.Now().Add(t.Cooldown)
-			slog.Error("[CervoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is down", slog.String("open_until", t.openUntil.Format(time.RFC3339)))
+			slog.Error("[CalvoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is down", slog.String("open_until", t.openUntil.Format(time.RFC3339)))
 		}
 		return resp, err
 	}
@@ -253,7 +253,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 		t.failures++
 		if t.failures >= t.FailureThreshold {
 			t.openUntil = time.Now().Add(t.Cooldown)
-			slog.Error("[CervoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is returning errors", slog.Int("http_code", resp.StatusCode), slog.String("open_until", t.openUntil.Format(time.RFC3339)))
+			slog.Error("[CalvoProxy] 🚨 GLOBAL CIRCUIT OPEN: Host is returning errors", slog.Int("http_code", resp.StatusCode), slog.String("open_until", t.openUntil.Format(time.RFC3339)))
 		}
 	} else if resp.StatusCode < 500 {
 		t.failures = 0

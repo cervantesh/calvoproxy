@@ -1,4 +1,4 @@
-module github.com/cervoclaw/cervo-proxy
+module github.com/cervantesh/calvoproxy
 
 go 1.25.8
 

@@ -14,7 +14,7 @@ import (
 )
 
 func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWriter, body []byte, apiKey string, attempt modelAttempt) error {
-	tracer := otel.Tracer("cervoproxy/router")
+	tracer := otel.Tracer("calvoproxy/router")
 	ctx, span := tracer.Start(ctx, "Execute_LLM_Attempt: "+attempt.Model)
 	span.SetAttributes(
 		attribute.String("llm.model", attempt.Model),
@@ -24,7 +24,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 
 	target := s.resolveAttemptTarget(attempt, chatCompletionsPath)
 	if target.Agentic {
-		slog.InfoContext(ctx, "[CervoProxy] 🛠️ Routing agentic request to GeminiCLIAPI", slog.String("profile", attempt.Profile))
+		slog.InfoContext(ctx, "[CalvoProxy] 🛠️ Routing agentic request to GeminiCLIAPI", slog.String("profile", attempt.Profile))
 	}
 
 	proxyReq, err := newUpstreamRequest(ctx, http.MethodPost, target.URL, body, apiKey)

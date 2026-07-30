@@ -1,5 +1,5 @@
 version: cervorules.policy.v3
-name: cervoproxy.v3
+name: calvoproxy.v3
 
 trusted_users:
   - cervantes

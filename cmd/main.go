@@ -11,8 +11,8 @@ import (
 
 	httpx "github.com/cervantesh/cervo-httpkit"
 	"github.com/cervantesh/cervo-requestmeta"
-	"github.com/cervoclaw/cervo-proxy/internal/router"
-	"github.com/cervoclaw/cervo-proxy/internal/telemetry"
+	"github.com/cervantesh/calvoproxy/internal/router"
+	"github.com/cervantesh/calvoproxy/internal/telemetry"
 )
 
 var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`)
@@ -111,7 +111,7 @@ func newMux(routerService *router.RouterService) *http.ServeMux {
 }
 
 func main() {
-	tp, err := telemetry.Init("CervoProxy")
+	tp, err := telemetry.Init("CalvoProxy")
 	if err != nil {
 		log.Printf("Failed to initialize OpenTelemetry: %v", err)
 	} else {
@@ -139,7 +139,7 @@ func main() {
 		log.Fatalf("failed to start gRPC server: %v", err)
 	}
 
-	slog.Info("CervoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
+	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
 	log.Fatal(httpx.NewServer(host+":"+port, handler).ListenAndServe())
 }
 

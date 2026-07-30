@@ -44,7 +44,7 @@ func loadModelConfigFile() (cervomodelpolicy.Config, string, bool) {
 			continue
 		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
-			slog.Warn("[CervoProxy] invalid external model policy file; using embedded default",
+			slog.Warn("[CalvoProxy] invalid external model policy file; using embedded default",
 				slog.String("path", path), slog.Any("error", err))
 			return cervomodelpolicy.Config{}, path, false
 		}
@@ -75,7 +75,7 @@ func policyConfigFromModelConfig(cfg cervomodelpolicy.Config) policyConfig {
 func defaultModelConfig() cervomodelpolicy.Config {
 	var cfg cervomodelpolicy.Config
 	if err := json.Unmarshal(defaultModelConfigJSON, &cfg); err != nil {
-		slog.Error("[CervoProxy] embedded default model policy is invalid", slog.Any("error", err))
+		slog.Error("[CalvoProxy] embedded default model policy is invalid", slog.Any("error", err))
 		return cervomodelpolicy.DefaultConfig()
 	}
 	return cervomodelpolicy.NormalizeConfig(cfg)
@@ -98,7 +98,7 @@ func loadModelPolicyRuntime() modelPolicyRuntime {
 		if fileCfg.DefaultProfile != "" {
 			policy.DefaultProfile = fileCfg.DefaultProfile
 		}
-		slog.Info("[CervoProxy] loaded model policy from file", slog.String("path", path))
+		slog.Info("[CalvoProxy] loaded model policy from file", slog.String("path", path))
 	}
 	strict := envBool("CERVO_MODEL_POLICY_STRICT", false)
 	warnings := []cervomodelpolicy.ValidationIssue{}
@@ -112,7 +112,7 @@ func loadModelPolicyRuntime() modelPolicyRuntime {
 	) {
 		runtimeConfig, err := cervomodelpolicy.LoadConfig(nil)
 		if err != nil {
-			slog.Warn("[CervoProxy] invalid CERVO_MODEL policy config", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid CERVO_MODEL policy config", slog.Any("error", err))
 			warnings = append(warnings, modelPolicyRuntimeWarning("CERVO_MODEL", err.Error()))
 		} else {
 			if len(runtimeConfig.Profiles) > 0 {
@@ -129,7 +129,7 @@ func loadModelPolicyRuntime() modelPolicyRuntime {
 	if raw := envValue("PROXY_PROVIDER_PROFILES_JSON"); raw != "" {
 		candidate := map[string][]string{}
 		if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
-			slog.Warn("[CervoProxy] invalid PROXY_PROVIDER_PROFILES_JSON", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid PROXY_PROVIDER_PROFILES_JSON", slog.Any("error", err))
 			warnings = append(warnings, modelPolicyRuntimeWarning("PROXY_PROVIDER_PROFILES_JSON", err.Error()))
 		} else {
 			policy.Profiles = candidate
@@ -138,7 +138,7 @@ func loadModelPolicyRuntime() modelPolicyRuntime {
 	if raw := envValue("PROXY_PROVIDER_ALIASES_JSON"); raw != "" {
 		candidate := map[string]string{}
 		if err := json.Unmarshal([]byte(raw), &candidate); err != nil {
-			slog.Warn("[CervoProxy] invalid PROXY_PROVIDER_ALIASES_JSON", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid PROXY_PROVIDER_ALIASES_JSON", slog.Any("error", err))
 			warnings = append(warnings, modelPolicyRuntimeWarning("PROXY_PROVIDER_ALIASES_JSON", err.Error()))
 		} else {
 			policy.Aliases = candidate
@@ -149,7 +149,7 @@ func loadModelPolicyRuntime() modelPolicyRuntime {
 	}
 	warnings = append(warnings, cervomodelpolicy.ValidateConfig(policy)...)
 	for _, issue := range warnings {
-		slog.Warn("[CervoProxy] model policy config warning",
+		slog.Warn("[CalvoProxy] model policy config warning",
 			slog.String("code", string(issue.Code)),
 			slog.String("field", issue.Field),
 			slog.String("message", issue.Message),

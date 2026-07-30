@@ -9,7 +9,7 @@ import (
 
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	policyvocab "github.com/cervoclaw/cervo-proxy/internal/router/policyvocab"
+	policyvocab "github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 )
 
 type PolicyFactory struct{}
@@ -18,7 +18,7 @@ func NewPolicyFactory() PolicyFactory { return PolicyFactory{} }
 
 func (PolicyFactory) Metadata() cervoruntime.PolicyMetadata {
 	return cervoruntime.PolicyMetadata{
-		Name:           "cervoproxy.v3",
+		Name:           "calvoproxy.v3",
 		DSLVersion:     "cervorules.policy.v3",
 		GeneratedWith:  "cervorules-policygen/v3",
 		VocabularyHash: "8b062bf6de8f9e9c13afd936dafc610f4af39cc71c05116d897139c7cb205320",
