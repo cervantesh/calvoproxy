@@ -131,6 +131,9 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
+	// Reorder the breaker-eligible chain by reliability score (most reliable
+	// first) before truncating to MaxAttempts, so flaky models sink to the back.
+	availableModels = s.rankAttemptsByScore(availableModels)
 	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
 		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
 	}

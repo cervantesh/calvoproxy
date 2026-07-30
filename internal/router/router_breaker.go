@@ -77,6 +77,7 @@ func (s *RouterService) recordSuccess(attempt modelAttempt) {
 	state.LastFailureCode = 0
 	state.LastFailureReason = ""
 	state.LastFailureAt = time.Time{}
+	applyScoreSuccess(state, time.Now())
 }
 
 func (s *RouterService) breakerKey(attempt modelAttempt) string {
@@ -136,6 +137,7 @@ func (s *RouterService) Health() ProxyHealth {
 			LastFailureReason:   state.LastFailureReason,
 			LastFailureAt:       state.LastFailureAt,
 			OpenUntil:           state.OpenUntil,
+			Score:               decayedScore(state.Score, state.ScoreUpdatedAt, now),
 			State:               "closed",
 		}
 		if state.OpenUntil.After(now) {
