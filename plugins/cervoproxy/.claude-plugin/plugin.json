@@ -1,0 +1,10 @@
+{
+  "name": "cervoproxy",
+  "version": "0.1.0",
+  "description": "Query free OpenRouter models through the local CervoProxy — second opinions, cheap subtasks, and drafts — from Claude Code.",
+  "author": {
+    "name": "cervantesh"
+  },
+  "homepage": "https://github.com/cervantesh/cervoproxy",
+  "keywords": ["llm", "openrouter", "free-models", "proxy", "second-opinion"]
+}

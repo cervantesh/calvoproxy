@@ -1,0 +1,20 @@
+
+
+# Build output
+# Local env / logs
+# air live-reload
+# local ops
+*.exe
+*.exe~
+*.log
+*~
+.env
+/cervoproxy
+/cervoproxy.exe
+/tmp/
+build-errors.log
+ensure-cervoproxy.ps1
+proxy.err
+proxy.out
+start-hidden.vbs
+verify.exe

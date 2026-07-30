@@ -1,0 +1,46 @@
+{
+  "DefaultProfile": "simple",
+  "Profiles": {
+    "simple": [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "openai/gpt-oss-20b:free",
+      "google/gemma-4-26b-a4b-it:free"
+    ],
+    "coding": [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "cohere/north-mini-code:free",
+      "openai/gpt-oss-20b:free"
+    ],
+    "reasoning": [
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "openai/gpt-oss-20b:free"
+    ],
+    "agent": [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "openai/gpt-oss-20b:free"
+    ],
+    "creative": [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "google/gemma-4-31b-it:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free"
+    ],
+    "vision": [
+      "nvidia/nemotron-nano-12b-v2-vl:free",
+      "google/gemma-4-31b-it:free"
+    ]
+  },
+  "Aliases": {
+    "default": "simple",
+    "simple": "simple",
+    "coding": "coding",
+    "reasoning": "reasoning",
+    "agent": "agent",
+    "creative": "creative",
+    "vision": "vision"
+  }
+}
