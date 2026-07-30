@@ -120,6 +120,24 @@ docker run -d -p 8080:8080 -e OPENROUTER_API_KEY=sk-or-v1-... \
 
 Build the image locally instead of pulling: `docker build -t calvoproxy .`
 
+**Port already in use?** If `8080` is taken on the host (a local
+`kube-apiserver`, another service, …), map a different host port — the proxy
+still listens on `8080` inside the container:
+
+```bash
+docker run -d -p 18080:8080 -e OPENROUTER_API_KEY=sk-or-v1-... \
+  ghcr.io/cervantesh/calvoproxy:latest
+# then use http://localhost:18080
+```
+
+**`docker pull` says `denied` even though the image is public?** Your Docker is
+holding stale `ghcr.io` credentials. Clear them and pull anonymously:
+
+```bash
+docker logout ghcr.io
+docker pull ghcr.io/cervantesh/calvoproxy:latest
+```
+
 ### Prebuilt binaries (Windows / macOS / Linux)
 
 Download the archive for your platform from the
