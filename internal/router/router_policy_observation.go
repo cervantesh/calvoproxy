@@ -20,7 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const policyTelemetrySchemaVersion = "cervoclaw.cervoproxy.policy_telemetry.v1"
+const policyTelemetrySchemaVersion = "cervoclaw.calvoproxy.policy_telemetry.v1"
 
 type PolicyTelemetryEvent struct {
 	SchemaVersion string
@@ -214,17 +214,17 @@ func recordPolicyTelemetry(ctx context.Context, event PolicyTelemetryEvent, cfg 
 
 func recordPolicyMetrics(ctx context.Context, event PolicyTelemetryEvent) {
 	policyMetricsOnce.Do(func() {
-		meter := otel.Meter("cervoproxy/policy")
+		meter := otel.Meter("calvoproxy/policy")
 		var err error
-		policyDecisionCounter, err = meter.Int64Counter("cervoproxy_policy_decisions_total")
+		policyDecisionCounter, err = meter.Int64Counter("calvoproxy_policy_decisions_total")
 		if err != nil {
 			return
 		}
-		policyErrorCounter, err = meter.Int64Counter("cervoproxy_policy_errors_total")
+		policyErrorCounter, err = meter.Int64Counter("calvoproxy_policy_errors_total")
 		if err != nil {
 			return
 		}
-		policyDecisionDuration, err = meter.Float64Histogram("cervoproxy_policy_decision_duration_ms")
+		policyDecisionDuration, err = meter.Float64Histogram("calvoproxy_policy_decision_duration_ms")
 		if err != nil {
 			return
 		}

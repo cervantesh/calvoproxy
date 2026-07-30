@@ -27,7 +27,7 @@ func TestBuildPolicyFlowReturnsStructuredPolicyBuildError(t *testing.T) {
 	if !errors.As(err, &buildErr) {
 		t.Fatalf("expected PolicyBuildError, got %T: %v", err, err)
 	}
-	if buildErr.Metadata.Name != "cervoproxy.v3" {
+	if buildErr.Metadata.Name != "calvoproxy.v3" {
 		t.Fatalf("expected generated policy metadata, got %#v", buildErr.Metadata)
 	}
 
@@ -45,7 +45,7 @@ func TestBuildPolicyFlowReturnsStructuredPolicyBuildError(t *testing.T) {
 
 func TestPolicyErrorLogAttrsRedactStructuredValues(t *testing.T) {
 	err := cervoruntime.NewPolicyBuildError(cervoruntime.PolicyMetadata{
-		Name:       "cervoproxy.v3",
+		Name:       "calvoproxy.v3",
 		PolicyHash: "policy-hash",
 	}, cervorules.Errors{{
 		Code:      cervorules.ErrorCodeInvalidRuntimeConfig,
@@ -61,7 +61,7 @@ func TestPolicyErrorLogAttrsRedactStructuredValues(t *testing.T) {
 	if strings.Contains(got, "secret-token") || strings.Contains(got, "Bearer") {
 		t.Fatalf("structured error log attrs leaked sensitive value: %s", got)
 	}
-	for _, want := range []string{"policy_build", "cervoproxy.v3", "invalid_runtime_config", "authorization_header"} {
+	for _, want := range []string{"policy_build", "calvoproxy.v3", "invalid_runtime_config", "authorization_header"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected log attrs to contain %q, got %s", want, got)
 		}

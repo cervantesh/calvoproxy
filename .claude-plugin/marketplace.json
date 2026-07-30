@@ -1,19 +1,19 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "cervoproxy",
-  "description": "CervoProxy extensions for Claude Code — reach free OpenRouter models through the local smart proxy.",
+  "name": "calvoproxy",
+  "description": "CalvoProxy extensions for Claude Code — reach free OpenRouter models through the local smart proxy.",
   "owner": {
     "name": "cervantesh"
   },
   "plugins": [
     {
-      "name": "cervoproxy",
-      "description": "Query free OpenRouter models through the local CervoProxy — second opinions, cheap subtasks, drafts — from Claude Code. Ships the invoke-cervoproxy skill and the /ask-free command.",
+      "name": "calvoproxy",
+      "description": "Query free OpenRouter models through the local CalvoProxy — second opinions, cheap subtasks, drafts — from Claude Code. Ships the invoke-calvoproxy skill and the /ask-free command.",
       "author": {
         "name": "cervantesh"
       },
       "category": "productivity",
-      "source": "./plugins/cervoproxy"
+      "source": "./plugins/calvoproxy"
     }
   ]
 }

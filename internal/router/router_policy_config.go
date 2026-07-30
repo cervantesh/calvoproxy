@@ -9,7 +9,7 @@ import (
 	cervomodelpolicy "github.com/cervantesh/cervo-model-policy"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	"github.com/cervoclaw/cervo-proxy/internal/router/policyrules"
+	"github.com/cervantesh/calvoproxy/internal/router/policyrules"
 )
 
 type policyConfig = cervomodelpolicy.Config
@@ -64,7 +64,7 @@ func loadExecutorFallbacksFromEnv() map[cervorules.Executor][]cervorules.Executo
 	if raw := envValue("PROXY_PROVIDER_FALLBACKS_JSON"); raw != "" {
 		fallbacks := map[cervorules.Executor][]cervorules.Executor{}
 		if err := json.Unmarshal([]byte(raw), &fallbacks); err != nil {
-			slog.Warn("[CervoProxy] invalid PROXY_PROVIDER_FALLBACKS_JSON", slog.Any("error", err))
+			slog.Warn("[CalvoProxy] invalid PROXY_PROVIDER_FALLBACKS_JSON", slog.Any("error", err))
 		} else {
 			return fallbacks
 		}
@@ -77,7 +77,7 @@ func loadPolicyFlow(defaultTimeout time.Duration, failureThreshold int, cooldown
 	flow, err := buildPolicyFlow(cfg)
 	if err != nil {
 		attrs := append([]slog.Attr{slog.String("fallback", "deny_all")}, policyErrorLogAttrs(err)...)
-		slog.LogAttrs(context.Background(), slog.LevelError, "[CervoProxy] policy flow compile failed", attrs...)
+		slog.LogAttrs(context.Background(), slog.LevelError, "[CalvoProxy] policy flow compile failed", attrs...)
 		return denyAllPolicyEngine("policy flow compile failed"), cfg
 	}
 	return flow, cfg

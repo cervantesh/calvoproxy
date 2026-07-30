@@ -1,4 +1,4 @@
-# Runs CervoProxy locally. The real OpenRouter key lives here (server-side);
+# Runs CalvoProxy locally. The real OpenRouter key lives here (server-side);
 # callers send only a dummy key.
 # Set it once (user scope):  setx OPENROUTER_API_KEY "sk-or-v1-..."
 param(
@@ -21,11 +21,11 @@ $env:PORT = "$Port"
 $env:GRPC_PORT = "$GrpcPort"
 $env:OTEL_ENABLED = "false"   # no local jaeger/OTLP collector; keep logs clean
 
-$bin = Join-Path $root 'cervoproxy.exe'
+$bin = Join-Path $root 'calvoproxy.exe'
 if (-not (Test-Path $bin)) {
-  Write-Host "Building cervoproxy.exe ..."
+  Write-Host "Building calvoproxy.exe ..."
   & go build -o $bin ./cmd
 }
 
-Write-Host "CervoProxy on http://localhost:$Port  (health: /health)"
+Write-Host "CalvoProxy on http://localhost:$Port  (health: /health)"
 & $bin

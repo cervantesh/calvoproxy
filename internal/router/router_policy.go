@@ -4,7 +4,7 @@ import (
 	"time"
 
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
-	"github.com/cervoclaw/cervo-proxy/internal/router/policyvocab"
+	"github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 )
 
 const (

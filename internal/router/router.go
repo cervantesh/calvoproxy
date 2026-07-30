@@ -62,7 +62,7 @@ func (s *RouterService) RouteRequest(w http.ResponseWriter, r *http.Request, api
 
 func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.Request, apiKey string, provider string) {
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-	tracer := otel.Tracer("cervoproxy/router")
+	tracer := otel.Tracer("calvoproxy/router")
 	ctx, span := tracer.Start(ctx, "RouteRequest_Proxy")
 	defer span.End()
 
@@ -96,14 +96,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 			ctx, cancel = context.WithTimeout(ctx, decision.Timeout)
 			defer cancel()
 		}
-		slog.InfoContext(ctx, "[CervoProxy] 🚀 Anthropic Tunnel Active")
+		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic Tunnel Active")
 		s.tunnelToOpenRouterMessages(ctx, w, bodyBytes, apiKey)
 		return
 	}
 
 	var reqBody map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &reqBody); err != nil {
-		slog.WarnContext(ctx, "[CervoProxy] Invalid JSON received in request body")
+		slog.WarnContext(ctx, "[CalvoProxy] Invalid JSON received in request body")
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -135,7 +135,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
 	}
 
-	slog.InfoContext(ctx, "[CervoProxy] 🏷️ Resolving Route",
+	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
 		slog.String("category", category),
 		slog.String("policy_target", string(decision.Target)),
 		slog.String("executor", string(decision.Executor)),
@@ -161,7 +161,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 
 	statusCode, message := fallbackErrorResponse(err)
-	slog.ErrorContext(ctx, "[CervoProxy] 🚨 CRITICAL: All fallback models failed", slog.String("profile", category))
+	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed", slog.String("profile", category))
 	writeJSONError(w, statusCode, message)
 }
 
@@ -196,7 +196,7 @@ func (s *RouterService) resolveModelAlias(category string, requestedModel string
 		parts := strings.SplitN(reqModelStr, "/", 2)
 		if len(parts) == 2 {
 			prefix := strings.ToLower(strings.TrimSpace(parts[0]))
-			if prefix == "cervoproxy" || prefix == "cervoclaw" {
+			if prefix == "calvoproxy" || prefix == "cervoclaw" {
 				if alias, ok := s.resolveProfileAlias(parts[1]); ok {
 					return alias, "auto"
 				}

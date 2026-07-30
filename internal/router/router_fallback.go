@@ -47,7 +47,7 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 
 	var lastErr error
 	for attemptIndex, attempt := range execution.Attempts {
-		slog.DebugContext(ctx, "[CervoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
+		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
 		execution.RequestBody["model"] = attempt.Model
 		upBytes, _ := json.Marshal(execution.RequestBody)
 
@@ -55,7 +55,7 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 			return nil
 		} else {
 			lastErr = err
-			slog.WarnContext(ctx, "[CervoProxy] ⚠️ Fallback", slog.String("model", attempt.Model), slog.Any("error", err))
+			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ Fallback", slog.String("model", attempt.Model), slog.Any("error", err))
 			var attErr *attemptError
 			if errors.As(err, &attErr) {
 				// Model-specific unavailability (e.g. a retired OpenRouter

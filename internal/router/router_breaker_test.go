@@ -69,7 +69,7 @@ func TestHealthIncludesGeneratedPolicyMetadata(t *testing.T) {
 	svc := NewRouterService()
 	health := svc.Health()
 
-	if health.PolicyName != "cervoproxy.v3" {
+	if health.PolicyName != "calvoproxy.v3" {
 		t.Fatalf("expected generated policy name in health, got %+v", health)
 	}
 	if health.PolicyDSLVersion != "cervorules.policy.v3" {

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Query a free model through CervoProxy (OpenRouter :free, OpenAI-compatible).
+# Query a free model through CalvoProxy (OpenRouter :free, OpenAI-compatible).
 #
 # Config (all optional — the only requirement is a reachable proxy):
-#   CERVOPROXY_URL      base URL of the proxy      (default http://127.0.0.1:8080)
-#   CERVOPROXY_BIN      path to the cervoproxy binary. If set and the proxy is
+#   CALVOPROXY_URL      base URL of the proxy      (default http://127.0.0.1:8080)
+#   CALVOPROXY_BIN      path to the calvoproxy binary. If set and the proxy is
 #                       down, it is started on-demand (with idle self-shutdown).
 #   OPENROUTER_API_KEY  used only when THIS script has to start the proxy;
 #                       when the proxy is already running it holds its own key.
@@ -12,7 +12,7 @@
 # Profiles: coding (default) | reasoning | simple | creative | vision
 set -uo pipefail
 
-URL="${CERVOPROXY_URL:-http://127.0.0.1:8080}"
+URL="${CALVOPROXY_URL:-http://127.0.0.1:8080}"
 PY=python; command -v python >/dev/null 2>&1 || PY=python3
 
 profile="${1:-coding}"; shift || true
@@ -23,22 +23,22 @@ if [ -z "$prompt" ]; then echo "usage: ask.sh <profile> <prompt>" >&2; exit 2; f
 up() { curl -s -m 2 -o /dev/null "$URL/health" 2>/dev/null; }
 
 # On-demand start (best effort) when a local binary is provided.
-if ! up && [ -n "${CERVOPROXY_BIN:-}" ] && [ -e "${CERVOPROXY_BIN}" ]; then
+if ! up && [ -n "${CALVOPROXY_BIN:-}" ] && [ -e "${CALVOPROXY_BIN}" ]; then
   export PORT="${PORT:-8080}" GRPC_PORT="${GRPC_PORT:-19090}" OTEL_ENABLED=false PROXY_IDLE_TIMEOUT="${PROXY_IDLE_TIMEOUT:-20m}"
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-      powershell.exe -NoProfile -Command "Start-Process -FilePath '${CERVOPROXY_BIN}' -WindowStyle Hidden" >/dev/null 2>&1 || true
+      powershell.exe -NoProfile -Command "Start-Process -FilePath '${CALVOPROXY_BIN}' -WindowStyle Hidden" >/dev/null 2>&1 || true
       ;;
     *)
-      nohup "${CERVOPROXY_BIN}" >/dev/null 2>&1 & disown 2>/dev/null || true
+      nohup "${CALVOPROXY_BIN}" >/dev/null 2>&1 & disown 2>/dev/null || true
       ;;
   esac
   for _ in $(seq 1 20); do up && break; sleep 0.5; done
 fi
 
 if ! up; then
-  echo "ERROR: CervoProxy not reachable at ${URL}." >&2
-  echo "  Start it (see the repo README) or set CERVOPROXY_URL / CERVOPROXY_BIN." >&2
+  echo "ERROR: CalvoProxy not reachable at ${URL}." >&2
+  echo "  Start it (see the repo README) or set CALVOPROXY_URL / CALVOPROXY_BIN." >&2
   exit 1
 fi
 
@@ -51,7 +51,7 @@ curl -s -m 180 "${URL}/v1/chat/completions" \
 try:
     d=json.load(sys.stdin)
 except Exception as e:
-    print("ERROR: no/invalid response from CervoProxy:", e); sys.exit(1)
+    print("ERROR: no/invalid response from CalvoProxy:", e); sys.exit(1)
 if "choices" in d:
     print((d["choices"][0]["message"].get("content") or "").strip())
     print("\n[model: %s]" % d.get("model",""), file=sys.stderr)

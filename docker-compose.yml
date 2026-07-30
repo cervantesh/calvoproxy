@@ -1,0 +1,21 @@
+services:
+  calvoproxy:
+    # Use the published image:
+    image: ghcr.io/cervantesh/calvoproxy:latest
+    # ...or build locally instead (comment out `image:` above and uncomment):
+    # build: .
+    container_name: calvoproxy
+    ports:
+      - "8080:8080"
+    environment:
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in your env or a .env file}"
+      PROXY_IDLE_TIMEOUT: "${PROXY_IDLE_TIMEOUT:-}"   # e.g. 20m to self-stop when idle
+    # Optional: edit chains without rebuilding by mounting your own file:
+    # volumes:
+    #   - ./model-policy.json:/app/model-policy.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

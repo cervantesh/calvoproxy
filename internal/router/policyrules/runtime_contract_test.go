@@ -6,7 +6,7 @@ import (
 
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	"github.com/cervoclaw/cervo-proxy/internal/router/policyvocab"
+	"github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 )
 
 func TestGeneratedRuntimePolicyContract(t *testing.T) {

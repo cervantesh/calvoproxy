@@ -1,11 +1,11 @@
-# CervoProxy Policy Integration
+# CalvoProxy Policy Integration
 
-CervoProxy uses CervoRules v3 for deterministic request policy decisions and
+CalvoProxy uses CervoRules v3 for deterministic request policy decisions and
 CervoModelPolicy for model profile/model-chain selection.
 
 ## CervoRules v3 Usage
 
-CervoProxy imports the v3 modular packages directly:
+CalvoProxy imports the v3 modular packages directly:
 
 - `github.com/cervantesh/cervo-rules/v3/core`
 - `github.com/cervantesh/cervo-rules/v3/runtime`
@@ -20,7 +20,7 @@ Generated vocabulary uses CervoRules v3 primitives:
 - `Target`: the logical backend selected by policy.
 - `Executor`: the execution/provider choice selected by policy.
 
-CervoProxy stays responsible for gateway operations that are intentionally not
+CalvoProxy stays responsible for gateway operations that are intentionally not
 part of the v3 core runtime:
 
 - HTTP request parsing and body-derived facts.
@@ -34,17 +34,17 @@ part of the v3 core runtime:
 
 ```text
 HTTP request
-  -> CervoProxy HTTP adapter extracts request facts
+  -> CalvoProxy HTTP adapter extracts request facts
   -> CervoRules v3 evaluates Operation -> Target/Executor
-  -> CervoProxy enriches the v3 decision with gateway operational policy
-  -> CervoProxy denies or continues
+  -> CalvoProxy enriches the v3 decision with gateway operational policy
+  -> CalvoProxy denies or continues
   -> CervoModelPolicy selects the model chain
-  -> CervoProxy executes provider/model attempts
+  -> CalvoProxy executes provider/model attempts
 ```
 
 The hot path calls `Engine.DecideWithOptions` with trace and observation
 disabled. CervoRules v3 still owns the allow/deny, target, executor and fallback
-executor decision. CervoProxy owns operational metadata around that decision.
+executor decision. CalvoProxy owns operational metadata around that decision.
 
 ## Policy Construction
 
@@ -72,7 +72,7 @@ metadata := factory.Metadata()
 `internal/router/router_policy_config.go` loads startup environment into a local
 `ruleRuntimeConfig`. The embedded `runtime.PolicyRuntimeConfig` is passed to the
 generated v3 policy factory. Gateway-only fields such as retry, breaker, limits
-and timeout remain local to CervoProxy.
+and timeout remain local to CalvoProxy.
 
 ## Runtime Overrides
 
@@ -103,7 +103,7 @@ Supported overrides:
 - `PROXY_TRUSTED_USERS`
 
 Generated CervoRules v3 policy validates operation, target and executor
-vocabulary. CervoProxy validates and applies gateway-owned runtime behavior.
+vocabulary. CalvoProxy validates and applies gateway-owned runtime behavior.
 
 Model policy precedence is:
 
@@ -120,7 +120,7 @@ deployments. New deployments should prefer `CERVO_MODEL_*`.
 
 ## Structured Policy Errors
 
-CervoProxy treats CervoRules errors as operational diagnostics, not response
+CalvoProxy treats CervoRules errors as operational diagnostics, not response
 payloads. Generated policy build failures now surface as
 `runtime.PolicyBuildError` with policy metadata plus structured `core.Errors`.
 
@@ -130,7 +130,7 @@ Startup behavior:
 - logs include policy name, DSL version, policy hash and vocabulary hash;
 - logs include stable error codes and field paths such as
   `operation_targets[planning].target`;
-- CervoProxy falls back to a deny-all policy engine when startup policy build is
+- CalvoProxy falls back to a deny-all policy engine when startup policy build is
   not trustworthy.
 
 Request-time behavior:
@@ -148,7 +148,7 @@ Runtime policy evaluation emits one versioned telemetry event:
 
 ```text
 event=cervorules.policy.decision
-schema_version=cervoclaw.cervoproxy.policy_telemetry.v1
+schema_version=cervoclaw.calvoproxy.policy_telemetry.v1
 ```
 
 Logs, metrics and traces share the same low-cardinality policy fields:
@@ -170,7 +170,7 @@ Metrics are intentionally stricter than logs. Metric labels never include
 `request_id`, `user`, `reason`, prompt/body/content, auth headers, token-like
 values, model names, profile names or arbitrary metadata.
 
-OpenTelemetry uses a lightweight span named `cervoproxy.policy.evaluate`.
+OpenTelemetry uses a lightweight span named `calvoproxy.policy.evaluate`.
 The span is marked as error only when the CervoRules engine returns `err != nil`.
 Policy denials are normal business decisions and do not mark the span as error.
 
@@ -188,7 +188,7 @@ Operational controls:
 Before merging policy changes, run:
 
 ```bash
-bash ../scripts/check_cervoproxy_policy.sh
+bash ../scripts/check_calvoproxy_policy.sh
 ```
 
 The check validates policy YAML and fails if generated policy files are stale.
@@ -238,7 +238,7 @@ CervoModelPolicy owns model selection:
 - explicit requested model prepending
 - fallback model chain
 
-CervoProxy calls:
+CalvoProxy calls:
 
 ```go
 routerService.activeModelPolicy().Select(...)
@@ -246,7 +246,7 @@ routerService.activeModelPolicy().Select(...)
 
 This happens only after CervoRules has allowed the request.
 
-At startup, CervoProxy loads model policy through CervoModelPolicy-compatible
+At startup, CalvoProxy loads model policy through CervoModelPolicy-compatible
 runtime configuration. Prefer:
 
 ```env
@@ -270,7 +270,7 @@ should use environment variables instead of code changes.
 
 Preserved behavior:
 
-- `cervoproxy/<profile>` selects a profile.
+- `calvoproxy/<profile>` selects a profile.
 - `cervoclaw/<profile>` selects a profile.
 - bare aliases such as `coding` select a profile.
 - `auto` uses the selected profile chain.
