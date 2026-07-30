@@ -20,7 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const policyTelemetrySchemaVersion = "cervoclaw.calvoproxy.policy_telemetry.v1"
+const policyTelemetrySchemaVersion = "calvoproxy.policy_telemetry.v1"
 
 type PolicyTelemetryEvent struct {
 	SchemaVersion string

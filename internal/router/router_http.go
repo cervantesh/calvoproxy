@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
-const proxyTitleHeader = "CervoClaw Smart Proxy"
+const proxyTitleHeader = "CalvoProxy Smart Proxy"
 
 func newUpstreamRequest(ctx context.Context, method string, targetURL string, body []byte, apiKey string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewBuffer(body))

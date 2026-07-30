@@ -2,8 +2,6 @@ package router
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/http"
 )
 
@@ -21,9 +19,7 @@ func (s *RouterService) tunnelToOpenRouterMessages(ctx context.Context, w http.R
 	}
 	defer func() { _ = resp.Body.Close() }()
 	streamProxyResponse(w, resp)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		slog.WarnContext(ctx, "[CalvoProxy] message tunnel copy failed", slog.Any("error", err))
-	}
+	streamCopy(ctx, w, resp.Body)
 }
 
 func (s *RouterService) tunnelToOpenRouterEmbeddings(ctx context.Context, w http.ResponseWriter, body []byte, apiKey string) {
@@ -40,7 +36,5 @@ func (s *RouterService) tunnelToOpenRouterEmbeddings(ctx context.Context, w http
 	}
 	defer func() { _ = resp.Body.Close() }()
 	streamProxyResponse(w, resp)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		slog.WarnContext(ctx, "[CalvoProxy] embeddings tunnel copy failed", slog.Any("error", err))
-	}
+	streamCopy(ctx, w, resp.Body)
 }

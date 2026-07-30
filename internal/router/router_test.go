@@ -127,7 +127,7 @@ func TestResolveModelAlias(t *testing.T) {
 		{"normal model passes through", "simple", "openai/gpt-4", "simple", "openai/gpt-4"},
 		{"bare capability sets category", "simple", "coding", "coding", "auto"},
 		{"prefixed capability sets category", "simple", "calvoproxy/coding", "coding", "auto"},
-		{"cervoclaw capability sets category", "simple", "cervoclaw/simple", "simple", "auto"},
+		{"calvoproxy capability sets category", "simple", "calvoproxy/simple", "simple", "auto"},
 		{"unknown prefix passes through", "simple", "anthropic/coding", "simple", "anthropic/coding"},
 		{"unknown bare passes through", "simple", "unknown-model", "simple", "unknown-model"},
 		{"empty model passes through", "simple", "", "simple", ""},

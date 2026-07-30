@@ -40,7 +40,7 @@ func NewRouterService() *RouterService {
 	modelPolicy := cervomodelpolicy.NewPolicy(providerPolicy)
 	return &RouterService{
 		Client:         &http.Client{Timeout: config.RequestTimeout, Transport: transport},
-		SideEffects:    NewWorkspaceSideEffectExtractor(),
+		SideEffects:    sideEffectsFromEnv(),
 		TargetResolver: DefaultAttemptTargetResolver{},
 		PolicyEngine:   policyEngine,
 		config:         config,
@@ -66,7 +66,15 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	ctx, span := tracer.Start(ctx, "RouteRequest_Proxy")
 	defer span.End()
 
-	bodyBytes, _ := io.ReadAll(r.Body)
+	// Bound the request body before reading it into memory, so an oversized or
+	// malicious payload can't OOM the process. Configurable via
+	// PROXY_MAX_BODY_BYTES (default 10 MiB).
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Request body too large or unreadable", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	if strings.Contains(r.URL.Path, "embeddings") {
 		decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
@@ -118,8 +126,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	policyFacts := requestPolicyFacts(reqBody, category, requestedModel, stream, hasTools, hasImages, int64(len(bodyBytes)))
 
 	decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
-		Stream:   stream,
-		Metadata: policyFacts.Metadata,
+		// Force the chat-completion operation so profile-in-path routes
+		// (/v1/coding/chat/completions, /v1/agent/..., …) are classified the
+		// same as /v1/chat/completions. Without this hint the policy derives
+		// the operation from the path prefix and denies every profile route
+		// with "no route for operation".
+		OperationHint: capChatCompletion,
+		Stream:        stream,
+		Metadata:      policyFacts.Metadata,
 	}, bodyBytes, policyFacts.RequestedLimits)
 	if !ok {
 		return
@@ -153,7 +167,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err := s.executeFallbacks(ctx, w, FallbackExecution{
+	err = s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody: reqBody,
 		APIKey:      apiKey,
 		Attempts:    availableModels,
@@ -199,7 +213,7 @@ func (s *RouterService) resolveModelAlias(category string, requestedModel string
 		parts := strings.SplitN(reqModelStr, "/", 2)
 		if len(parts) == 2 {
 			prefix := strings.ToLower(strings.TrimSpace(parts[0]))
-			if prefix == "calvoproxy" || prefix == "cervoclaw" {
+			if prefix == "calvoproxy" {
 				if alias, ok := s.resolveProfileAlias(parts[1]); ok {
 					return alias, "auto"
 				}

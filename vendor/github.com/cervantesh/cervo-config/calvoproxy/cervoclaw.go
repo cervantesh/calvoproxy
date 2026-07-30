@@ -1,5 +1,5 @@
-// Package cervoclaw provides CervoClaw/OpenClaw compatibility helpers.
-package cervoclaw
+// Package calvoproxy provides CervoClaw/OpenClaw compatibility helpers.
+package calvoproxy
 
 import (
 	"fmt"
@@ -12,8 +12,8 @@ const (
 	PrimaryPrefix = "CERVOCLAW_"
 	LegacyPrefix  = "OPENCLAW_"
 
-	DefaultConfigFilePath = "/etc/cervoclaw/config.json"
-	DefaultSecretsDir     = "/var/secrets/cervoclaw"
+	DefaultConfigFilePath = "/etc/calvoproxy/config.json"
+	DefaultSecretsDir     = "/var/secrets/calvoproxy"
 )
 
 // CloudLoaderOptions configures the CervoClaw cloud-ready loader preset.

@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	tp, err := cervoobserve.Init("cervoclaw-api")
+	tp, err := cervoobserve.Init("calvoproxy-api")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func main() {
 For local development with an OTLP HTTP collector:
 
 ```powershell
-$env:OTEL_SERVICE_NAME = "cervoclaw-api"
+$env:OTEL_SERVICE_NAME = "calvoproxy-api"
 $env:OTEL_EXPORTER_OTLP_ENDPOINT = "localhost:4318"
 $env:OTEL_EXPORTER_OTLP_INSECURE = "true"
 $env:OTEL_ENABLED = "true"
@@ -57,7 +57,7 @@ For Cloud Run, set service identity and endpoint through deployment
 configuration:
 
 ```powershell
-$env:OTEL_SERVICE_NAME = "cervoclaw-api"
+$env:OTEL_SERVICE_NAME = "calvoproxy-api"
 $env:OTEL_EXPORTER_OTLP_ENDPOINT = "otel-collector.internal:4318"
 $env:OTEL_EXPORTER_OTLP_INSECURE = "false"
 $env:OTEL_ENABLED = "true"

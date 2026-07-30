@@ -1,7 +1,7 @@
 # github.com/cervantesh/cervo-config v0.3.0 => ./third_party/cervo-config
 ## explicit; go 1.25.6
 github.com/cervantesh/cervo-config
-github.com/cervantesh/cervo-config/cervoclaw
+github.com/cervantesh/cervo-config/calvoproxy
 # github.com/cervantesh/cervo-contracts v0.0.0-00010101000000-000000000000 => ./third_party/cervo-contracts
 ## explicit; go 1.25.6
 github.com/cervantesh/cervo-contracts/proxy
@@ -31,9 +31,6 @@ github.com/cervantesh/cervo-rules/v3/runtime
 # github.com/cenkalti/backoff/v5 v5.0.3
 ## explicit; go 1.23
 github.com/cenkalti/backoff/v5
-# github.com/cervoclaw/cervo-shared v0.0.0-00010101000000-000000000000 => ./third_party/cervo-shared
-## explicit; go 1.25.6
-github.com/cervoclaw/cervo-shared/gen/proto/cervoclaw/proxy/v1
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
@@ -257,4 +254,3 @@ google.golang.org/protobuf/types/known/wrapperspb
 # github.com/cervantesh/cervo-requestmeta => ./third_party/cervo-requestmeta
 # github.com/cervantesh/cervo-retry => ./third_party/cervo-retry
 # github.com/cervantesh/cervo-rules/v3 => ./third_party/cervo-rules
-# github.com/cervoclaw/cervo-shared => ./third_party/cervo-shared

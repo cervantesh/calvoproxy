@@ -5,7 +5,6 @@ go 1.25.8
 require (
 	github.com/cervantesh/cervo-contracts v0.0.0-00010101000000-000000000000
 	github.com/cervantesh/cervo-requestmeta v0.0.0-00010101000000-000000000000
-	github.com/cervoclaw/cervo-shared v0.0.0-00010101000000-000000000000
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
 )
@@ -69,4 +68,3 @@ replace github.com/cervantesh/cervo-retry => ./third_party/cervo-retry
 
 replace github.com/cervantesh/cervo-rules/v3 => ./third_party/cervo-rules
 
-replace github.com/cervoclaw/cervo-shared => ./third_party/cervo-shared

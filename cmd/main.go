@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
+	"time"
 
 	httpx "github.com/cervantesh/cervo-httpkit"
 	"github.com/cervantesh/cervo-requestmeta"
@@ -110,7 +114,39 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeJSON(w, health)
 	})
 
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		writeMetrics(w, routerService.Health())
+	})
+
 	return mux
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// writeMetrics emits per-model reliability/breaker state in Prometheus text
+// exposition format — score, consecutive failures, successes and circuit state
+// per model, plus readiness and open-circuit count.
+func writeMetrics(w http.ResponseWriter, h router.ProxyHealth) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "# HELP calvoproxy_up Proxy readiness (1=ready)\n# TYPE calvoproxy_up gauge\ncalvoproxy_up %d\n", boolToInt(h.Ready))
+	fmt.Fprintf(w, "# HELP calvoproxy_open_circuits Open model circuits\n# TYPE calvoproxy_open_circuits gauge\ncalvoproxy_open_circuits %d\n", h.OpenCircuitCount)
+	fmt.Fprintln(w, "# HELP calvoproxy_model_score Per-model reliability score [0,1]\n# TYPE calvoproxy_model_score gauge")
+	for _, c := range h.Circuits {
+		fmt.Fprintf(w, "calvoproxy_model_score{model=%q,state=%q} %.4f\n", c.Model, c.State, c.Score)
+	}
+	fmt.Fprintln(w, "# HELP calvoproxy_model_consecutive_failures Consecutive failures per model\n# TYPE calvoproxy_model_consecutive_failures gauge")
+	for _, c := range h.Circuits {
+		fmt.Fprintf(w, "calvoproxy_model_consecutive_failures{model=%q} %d\n", c.Model, c.ConsecutiveFailures)
+	}
+	fmt.Fprintln(w, "# HELP calvoproxy_model_successes Successful attempts per model\n# TYPE calvoproxy_model_successes counter")
+	for _, c := range h.Circuits {
+		fmt.Fprintf(w, "calvoproxy_model_successes{model=%q} %d\n", c.Model, c.Successes)
+	}
 }
 
 func main() {
@@ -125,28 +161,67 @@ func main() {
 		}()
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	grpcPort := os.Getenv("GRPC_PORT")
-	if grpcPort == "" {
-		grpcPort = "9090"
-	}
-	host := "0.0.0.0"
+	port := envOrDefault("PORT", "8080")
+	// Bind address. Default 0.0.0.0 (needed so a container is reachable via
+	// -p). For a host install set HOST=127.0.0.1 to keep the proxy — and the
+	// env OpenRouter key it spends — off the network.
+	host := envOrDefault("HOST", "0.0.0.0")
 
 	routerService := router.NewRouterService()
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
-	startIdleShutdown(tracker, idleTimeoutFromEnv())
-	// A gRPC bind failure (e.g. the port is already in use) must not take down
-	// the HTTP proxy, which is the primary function. Log and continue.
-	if err := startGRPCServer(context.Background(), routerService, host, grpcPort); err != nil {
-		slog.Warn("gRPC server not started; continuing with HTTP only", "grpc_port", grpcPort, "error", err)
+
+	srv := httpx.NewServer(host+":"+port, mux)
+	// LLM responses can be long or streamed — a fixed write deadline would cut
+	// them off. Disable write/read timeouts here; ReadHeaderTimeout still
+	// guards against slow-header attacks, and request bodies are bounded by
+	// MaxBytesReader in the router.
+	srv.WriteTimeout = 0
+	srv.ReadTimeout = 0
+
+	// Run the server; report its exit to main so we can shut down in-band and,
+	// crucially, WAIT for the drain to finish before the process exits.
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServe() }()
+
+	// SIGINT/SIGTERM (e.g. `docker stop`) and idle both trigger the same drain.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	idleCh := make(chan struct{}, 1)
+	startIdleShutdown(tracker, idleTimeoutFromEnv(), func() {
+		select {
+		case idleCh <- struct{}{}:
+		default:
+		}
+	})
+
+	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port)
+
+	var reason string
+	select {
+	case err := <-srvErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		return
+	case sig := <-sigCh:
+		reason = "signal:" + sig.String()
+	case <-idleCh:
+		reason = "idle"
 	}
 
-	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
-	log.Fatal(httpx.NewServer(host+":"+port, mux).ListenAndServe())
+	slog.Info("CalvoProxy shutting down", "reason", reason)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx) // blocks until in-flight requests drain
+	slog.Info("CalvoProxy stopped")
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

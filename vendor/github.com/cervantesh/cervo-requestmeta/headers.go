@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cervantesh/cervo-config/cervoclaw"
+	"github.com/cervantesh/cervo-config/calvoproxy"
 )
 
 const (
@@ -13,7 +13,7 @@ const (
 )
 
 func TenantIDFromEnv() string {
-	tenantID := strings.TrimSpace(cervoclaw.String("CERVOCLAW_TENANT_ID"))
+	tenantID := strings.TrimSpace(calvoproxy.String("CERVOCLAW_TENANT_ID"))
 	if tenantID == "" {
 		return "default"
 	}

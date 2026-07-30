@@ -39,12 +39,12 @@ func main() {
 Sources are checked in order. This keeps precedence explicit and predictable.
 
 ```go
-fileSource, err := configenv.JSONFileSource("/etc/cervoclaw/config.json")
+fileSource, err := configenv.JSONFileSource("/etc/calvoproxy/config.json")
 if err != nil {
 	return err
 }
 
-secretSource, err := configenv.DirectorySource("/var/secrets/cervoclaw")
+secretSource, err := configenv.DirectorySource("/var/secrets/calvoproxy")
 if err != nil {
 	return err
 }
@@ -222,13 +222,13 @@ Default helpers:
 
 ## CervoClaw Compatibility
 
-CervoClaw/OpenClaw compatibility lives in the `cervoclaw` subpackage:
+CervoClaw/OpenClaw compatibility lives in the `calvoproxy` subpackage:
 
 ```go
-import "github.com/cervantesh/cervo-config/cervoclaw"
+import "github.com/cervantesh/cervo-config/calvoproxy"
 
-tenantID := cervoclaw.String("CERVOCLAW_TENANT_ID")
-loader := cervoclaw.NewLoader()
+tenantID := calvoproxy.String("CERVOCLAW_TENANT_ID")
+loader := calvoproxy.NewLoader()
 ```
 
 For Cloud Run, workers, agents, and local CervoClaw services, use the cloud
@@ -237,10 +237,10 @@ loader preset:
 ```go
 import (
 	configenv "github.com/cervantesh/cervo-config"
-	"github.com/cervantesh/cervo-config/cervoclaw"
+	"github.com/cervantesh/cervo-config/calvoproxy"
 )
 
-loader, err := cervoclaw.NewCloudLoader(cervoclaw.CloudLoaderOptions{
+loader, err := calvoproxy.NewCloudLoader(calvoproxy.CloudLoaderOptions{
 	Sources: []configenv.Source{
 		configenv.SourceFunc(func(key string) (string, bool) {
 			// Adapt a remote store, control plane, or Google Secret Manager
@@ -258,8 +258,8 @@ The preset checks sources in this order:
 
 1. Caller-provided sources.
 2. Environment variables.
-3. Optional flat JSON config at `/etc/cervoclaw/config.json`.
-4. Optional mounted secrets under `/var/secrets/cervoclaw`.
+3. Optional flat JSON config at `/etc/calvoproxy/config.json`.
+4. Optional mounted secrets under `/var/secrets/calvoproxy`.
 
 The conventional file and secret paths are optional. Missing paths are skipped;
 existing invalid config files or unreadable secret directories return an error.

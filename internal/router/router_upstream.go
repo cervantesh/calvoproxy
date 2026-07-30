@@ -60,9 +60,25 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		return attErr
 	}
 
-	s.recordSuccess(attempt)
+	// Streaming responses (stream:true → text/event-stream) are piped straight
+	// through with flushing so tokens arrive incrementally. We can't fall back
+	// once bytes are on the wire, so record success on the 200 and stream.
+	if isEventStream(resp) {
+		s.recordSuccess(attempt)
+		streamProxyResponse(w, resp)
+		streamCopy(ctx, w, resp.Body)
+		return nil
+	}
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		// A truncated upstream read must not be written back as a 200. Treat it
+		// as a failure so the fallback chain can try the next model.
+		attErr := &attemptError{StatusCode: http.StatusBadGateway, Message: "truncated upstream response: " + readErr.Error()}
+		s.penalizeScore(attempt, attErr.StatusCode)
+		return attErr
+	}
+	s.recordSuccess(attempt)
 	respBytes = s.transformResponse(ctx, respBytes)
 
 	writeProxyResponse(w, resp, respBytes)

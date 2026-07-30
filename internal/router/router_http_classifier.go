@@ -52,7 +52,12 @@ func mergeRequestFacts(base, override requestFacts) requestFacts {
 	if override.Risk != "" {
 		out.Risk = override.Risk
 	}
-	if override.OperationHint != "" {
+	// The caller's OperationHint is a FALLBACK: it fills in only when the
+	// request itself didn't determine an operation (e.g. a profile-in-path
+	// route like /v1/coding/chat/completions that matches no path rule). An
+	// explicit X-Cervo-Capability header on the request must still win, so it
+	// is not overridden here.
+	if override.OperationHint != "" && out.OperationHint == "" {
 		out.OperationHint = override.OperationHint
 	}
 	if override.Stream {

@@ -13,7 +13,7 @@ COPY --from=builder /app/calvoproxy .
 # Editable model chains — override by mounting your own over /app/model-policy.json.
 COPY --from=builder /app/model-policy.json .
 EXPOSE 8080
-ENV PORT=8080 GRPC_PORT=9090
+ENV PORT=8080
 # OPENROUTER_API_KEY must be supplied at runtime:
 #   docker run -e OPENROUTER_API_KEY=sk-or-v1-... -p 8080:8080 calvoproxy
 CMD ["./calvoproxy"]

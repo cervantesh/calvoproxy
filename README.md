@@ -1,15 +1,12 @@
 # CalvoProxy
 
-Smart OpenAI-compatible proxy that fronts multiple LLM providers behind one
-endpoint. It applies deterministic request policy (CervoRules v3), selects a
-model chain per request (CervoModelPolicy), and adds gateway concerns —
-timeouts, retries, circuit breaking, limits and audit — on top of upstream
-forwarding.
+Smart OpenAI-compatible proxy that fronts free OpenRouter models behind one
+endpoint. It applies deterministic request policy, selects a model chain per
+request, and adds gateway concerns — timeouts, retries, circuit breaking,
+reliability scoring, limits and audit — on top of upstream forwarding.
 
-This repository is a **standalone extraction of CalvoProxy** from the
-`cervoclaw` monorepo. All of its dependencies are **vendored** (`vendor/`), so
-it builds and runs on its own with no access to the monorepo or to the private
-Gitea modules it originally depended on.
+CalvoProxy is **fully self-contained**: all of its dependencies are **vendored**
+(`vendor/`), so it builds and runs offline with no external module access.
 
 ## Build
 
@@ -32,17 +29,26 @@ prove it with `GOPROXY=off go build ./cmd`.
 ./calvoproxy
 ```
 
-The server exposes an HTTP API and a gRPC API.
+The server exposes an OpenAI-compatible HTTP API. Streaming (`stream: true`)
+is piped through with flushing; `SIGINT`/`SIGTERM` drain in-flight requests
+before exit.
 
 | Env var              | Default | Description                          |
 |----------------------|---------|--------------------------------------|
+| `HOST`               | `0.0.0.0` | Bind address. Set `127.0.0.1` on a host install to keep the proxy off the network |
 | `PORT`               | `8080`  | HTTP listen port                     |
-| `GRPC_PORT`          | `9090`  | gRPC listen port                     |
 | `OPENROUTER_API_KEY` | —       | Upstream key for the default executor|
 | `PROXY_IDLE_TIMEOUT` | off     | Exit after this idle period (Go duration, e.g. `20m`) — enables on-demand use |
+| `PROXY_MAX_BODY_BYTES` | `10485760` | Max request body (10 MiB) — guards against oversized payloads |
 | `PROXY_SCORING_ENABLED` | `true` | Reorder the chain by per-model reliability score (see below) |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
 | `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | How long an open circuit skips a model |
+| `PROXY_OPENROUTER_URL` | OpenRouter | Override the OpenRouter chat endpoint (e.g. a mock) |
+| `PROXY_AGENTIC_URL`  | off     | If set, `agent`/`plan` profiles route here; unset → normal OpenRouter routing |
+| `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Opt-in monorepo git/sqlite extractor (off by default) |
+
+Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
+successes, open-circuit count, readiness).
 
 ### Reliability: circuit breaker + scoring
 
@@ -207,7 +213,7 @@ model"). Minimal config: a reachable proxy (or set `CALVOPROXY_BIN` +
 
 ## Layout
 
-- `cmd/` — server entrypoint (HTTP + gRPC wiring).
+- `cmd/` — server entrypoint (HTTP wiring, idle shutdown, metrics).
 - `internal/router/` — request classification, policy evaluation, model
   attempts, retries, circuit breaker.
 - `internal/telemetry/` — OpenTelemetry setup.

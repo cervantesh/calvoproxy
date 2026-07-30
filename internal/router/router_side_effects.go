@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	defaultWorkspaceRoot = "/workspace/cervoclaw"
+	defaultWorkspaceRoot = "/workspace/calvoproxy"
 	defaultOpenCodeDB    = "/workspace/opencode_state/share/opencode.db"
 )
 
@@ -23,6 +23,18 @@ func NewWorkspaceSideEffectExtractor() WorkspaceSideEffectExtractor {
 		WorkspaceRoot: defaultWorkspaceRoot,
 		OpenCodeDB:    defaultOpenCodeDB,
 	}
+}
+
+// sideEffectsFromEnv returns the workspace side-effect extractor ONLY when
+// explicitly enabled via PROXY_WORKSPACE_SIDE_EFFECTS. This is a monorepo-only
+// feature that runs git (including `git add .`) and reads a sqlite DB in a
+// workspace on every successful response. It is DISABLED by default so a
+// standalone proxy never touches the filesystem on the hot path.
+func sideEffectsFromEnv() SideEffectExtractor {
+	if !envBool("PROXY_WORKSPACE_SIDE_EFFECTS", false) {
+		return nil
+	}
+	return NewWorkspaceSideEffectExtractor()
 }
 
 func (e WorkspaceSideEffectExtractor) Extract(ctx context.Context, content string) map[string]any {

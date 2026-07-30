@@ -35,10 +35,11 @@ func (t *idleTracker) idleFor() time.Duration {
 	return time.Since(time.Unix(0, t.last.Load()))
 }
 
-// startIdleShutdown exits the process once no real proxy request has arrived
+// startIdleShutdown invokes onIdle once no real proxy request has arrived
 // within `timeout`. A zero/negative timeout disables the watchdog (the proxy
-// then runs until killed, its original always-on behaviour).
-func startIdleShutdown(t *idleTracker, timeout time.Duration) {
+// then runs until killed, its original always-on behaviour). onIdle is expected
+// to drain and exit; the watchdog stops after firing once.
+func startIdleShutdown(t *idleTracker, timeout time.Duration, onIdle func()) {
 	if timeout <= 0 {
 		return
 	}
@@ -53,7 +54,8 @@ func startIdleShutdown(t *idleTracker, timeout time.Duration) {
 		for range tick.C {
 			if idle := t.idleFor(); idle >= timeout {
 				slog.Info("CalvoProxy exiting after idle period", "idle", idle.Round(time.Second).String(), "timeout", timeout.String())
-				os.Exit(0)
+				onIdle()
+				return
 			}
 		}
 	}()
