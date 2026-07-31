@@ -10,7 +10,7 @@ import (
 
 // Config contains request metadata defaults loaded from configuration sources.
 type Config struct {
-	TenantID      string `config:"CERVOCLAW_TENANT_ID" alias:"OPENCLAW_TENANT_ID" default:"default" desc:"Tenant identifier propagated to downstream services"`
+	TenantID      string `config:"CALVOPROXY_TENANT_ID" alias:"OPENCLAW_TENANT_ID" default:"default" desc:"Tenant identifier propagated to downstream services"`
 	ForwardAuth   bool   `config:"CERVO_FORWARD_AUTH" default:"true" desc:"Whether default bearer auth should be applied"`
 	DefaultBearer string `config:"CERVO_DEFAULT_BEARER" desc:"Optional bearer token for downstream service calls"`
 }

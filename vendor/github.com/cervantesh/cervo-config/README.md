@@ -1,6 +1,6 @@
 # cervo-config
 
-`cervo-config` is a zero-dependency Go configuration package for CervoClaw
+`cervo-config` is a zero-dependency Go configuration package for CalvoProxy
 services, cloud deployments, and agentic workers.
 
 It focuses on operational configuration that commonly comes from environment
@@ -56,7 +56,7 @@ loader := configenv.New(configenv.Options{
 		secretSource,
 	},
 	PrefixAliases: []configenv.PrefixAlias{
-		{PrimaryPrefix: "CERVOCLAW_", AliasPrefix: "OPENCLAW_"},
+		{PrimaryPrefix: "CALVOPROXY_", AliasPrefix: "OPENCLAW_"},
 	},
 	WarnOnAlias: true,
 })
@@ -83,7 +83,7 @@ Use struct tags for service startup config:
 
 ```go
 type Config struct {
-	Port     int               `config:"CERVOCLAW_PORT" default:"8080" desc:"HTTP port"`
+	Port     int               `config:"CALVOPROXY_PORT" default:"8080" desc:"HTTP port"`
 	Endpoint string            `config:"AGENT_ENDPOINT" required:"true"`
 	Timeout  time.Duration     `config:"AGENT_TIMEOUT" default:"10s"`
 	Scopes   []string          `config:"AGENT_SCOPES" default:"read,write" sep:","`
@@ -220,18 +220,18 @@ Default helpers:
 - `URLDefault`
 - `StringSliceDefault`
 
-## CervoClaw Compatibility
+## CalvoProxy Compatibility
 
-CervoClaw/OpenClaw compatibility lives in the `calvoproxy` subpackage:
+CalvoProxy/OpenClaw compatibility lives in the `calvoproxy` subpackage:
 
 ```go
 import "github.com/cervantesh/cervo-config/calvoproxy"
 
-tenantID := calvoproxy.String("CERVOCLAW_TENANT_ID")
+tenantID := calvoproxy.String("CALVOPROXY_TENANT_ID")
 loader := calvoproxy.NewLoader()
 ```
 
-For Cloud Run, workers, agents, and local CervoClaw services, use the cloud
+For Cloud Run, workers, agents, and local CalvoProxy services, use the cloud
 loader preset:
 
 ```go

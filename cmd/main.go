@@ -204,6 +204,7 @@ func main() {
 	}
 
 	port := envOrDefault("PORT", "8080")
+	grpcPort := envOrDefault("GRPC_PORT", "9090")
 	// Bind address. Default 0.0.0.0 (needed so a container is reachable via
 	// -p). For a host install set HOST=127.0.0.1 to keep the proxy — and the
 	// env OpenRouter key it spends — off the network.
@@ -212,6 +213,14 @@ func main() {
 	routerService := router.NewRouterService()
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
+
+	// gRPC transport (unary ChatCompletion + GetHealth over the same router).
+	// A cancellable context lets shutdown GracefulStop it; a bind failure is
+	// non-fatal so the HTTP proxy keeps serving.
+	grpcCtx, cancelGRPC := context.WithCancel(context.Background())
+	if err := startGRPCServer(grpcCtx, routerService, host, grpcPort); err != nil {
+		slog.Warn("gRPC server not started; continuing with HTTP only", "grpc_port", grpcPort, "error", err)
+	}
 
 	// SIGHUP → hot-reload model-policy.json without a restart (Unix; the signal
 	// is never delivered on Windows, where /admin/reload is the way).
@@ -251,11 +260,12 @@ func main() {
 		}
 	})
 
-	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port)
+	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
 
 	var reason string
 	select {
 	case err := <-srvErr:
+		cancelGRPC()
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
@@ -267,6 +277,7 @@ func main() {
 	}
 
 	slog.Info("CalvoProxy shutting down", "reason", reason)
+	cancelGRPC() // GracefulStop the gRPC server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx) // blocks until in-flight requests drain
