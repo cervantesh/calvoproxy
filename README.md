@@ -47,6 +47,7 @@ before exit.
 | `PROXY_AGENTIC_URL`  | off     | If set, `agent`/`plan` profiles route here; unset → normal OpenRouter routing |
 | `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Opt-in monorepo git/sqlite extractor (off by default) |
 | `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token |
+| `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
 successes, open-circuit count, readiness). When `PROXY_ADMIN_TOKEN` is set, the
@@ -108,9 +109,40 @@ curl -s https://openrouter.ai/api/v1/models -H "Authorization: Bearer $OPENROUTE
   | jq -r '.data[] | select(.id|endswith(":free")) | select((.pricing.prompt|tonumber)==0) | .id'
 ```
 
+### Updates (self-update + notice)
+
+CalvoProxy knows its own version and checks GitHub Releases for a newer one.
+
+- **On startup** (versioned builds only) it does one best-effort, non-blocking
+  check and, if a newer release exists, logs a recommendation — `run
+  calvoproxy update` for a binary install, or a `docker pull` line when it
+  detects it's running in a container. Disable with `PROXY_UPDATE_CHECK=false`.
+- **`GET /version`** reports the running build and the cached check result:
+  `{"version":"v0.2.2","latest":"v0.2.3","update_available":true,"checked":true}`.
+- **`calvoproxy update`** (binary installs) upgrades in place: it downloads the
+  release archive for your OS/arch, **verifies its SHA-256** against the
+  release's `SHA256SUMS.txt`, extracts the binary and swaps it atomically
+  (on Windows the old exe is moved aside to `calvoproxy.exe.old` and cleaned up
+  on next start). Restart afterwards to run the new version. `--force`
+  re-installs even when already current. `calvoproxy version` just prints the
+  version.
+
+  ```bash
+  calvoproxy update
+  ```
+
+  Inside a container self-update is intentionally refused (an image is
+  immutable) — pull a new tag and recreate instead:
+
+  ```bash
+  docker pull ghcr.io/cervantesh/calvoproxy:latest
+  docker compose up -d   # or: docker rm -f calvoproxy && docker run … :latest
+  ```
+
 ### HTTP endpoints
 
 - `GET /health` — service status, active policy hashes, configured profiles.
+- `GET /version` — running build + whether a newer release is available.
 - `POST /v1/chat/completions` — OpenAI-compatible chat completions.
 - Per-profile routes: `/v1/{simple,coding,reasoning,agent,creative,vision}/chat/completions`.
 - `POST /v1/messages` — Anthropic-compatible messages.
