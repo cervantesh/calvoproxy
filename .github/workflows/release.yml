@@ -41,6 +41,17 @@ jobs:
           build linux amd64
           build linux arm64
           (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Sign checksums (Ed25519)
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "RELEASE_SIGNING_KEY not set — skipping release signing (checksums only)."
+            exit 0
+          fi
+          go run ./tools/sign dist/SHA256SUMS.txt > dist/SHA256SUMS.txt.sig
+          echo "Signed dist/SHA256SUMS.txt -> dist/SHA256SUMS.txt.sig"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

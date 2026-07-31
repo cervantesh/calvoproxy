@@ -30,7 +30,11 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "recovery probe already in flight for " + attempt.Model}
 	}
 
-	target := s.resolveAttemptTarget(attempt, chatCompletionsPath)
+	opPath := attempt.Path
+	if opPath == "" {
+		opPath = chatCompletionsPath
+	}
+	target := s.resolveAttemptTarget(attempt, opPath)
 	if target.Agentic {
 		slog.InfoContext(ctx, "[CalvoProxy] 🛠️ Routing agentic request to GeminiCLIAPI", slog.String("profile", attempt.Profile))
 	}
@@ -99,7 +103,11 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		return attErr
 	}
 	s.recordSuccess(attempt)
-	respBytes = s.transformResponse(ctx, respBytes)
+	// Only the chat-completions response shape is transformed; pass other
+	// operations (e.g. Anthropic /messages) through untouched.
+	if opPath == chatCompletionsPath {
+		respBytes = s.transformResponse(ctx, respBytes)
+	}
 
 	writeProxyResponse(w, resp, respBytes)
 	return nil

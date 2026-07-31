@@ -144,13 +144,23 @@ func TestLoad_NoDeadlockUnderConcurrency(t *testing.T) {
 		}()
 	}
 
-	deadline := time.AfterFunc(60*time.Second, func() { panic("load test deadlocked: did not finish in 60s") })
 	for i := 0; i < n; i++ {
 		jobs <- i
 	}
 	close(jobs)
-	wg.Wait()
-	deadline.Stop()
+
+	// Deadlock failsafe scaled to the workload (heavy manual runs raise LOAD_N):
+	// signal completion on a channel and fail from the test goroutine — no panic,
+	// so t cleanup still runs and a legitimately long run isn't killed.
+	budget := time.Duration(n)*2*time.Millisecond + 30*time.Second
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(budget):
+		t.Fatalf("load test did not finish within %v (deadlock?): %d/%d completed",
+			budget, success.Load()+errStatus.Load()+transportErrs.Load(), n)
+	}
 	close(stopHealth)
 	hwg.Wait()
 

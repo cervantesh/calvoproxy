@@ -163,4 +163,8 @@ type modelAttempt struct {
 	Model         string
 	Provider      cervorules.Executor
 	BreakerPolicy BreakerPolicy
+	// Path is the upstream operation path (empty ⇒ chat completions). Set to the
+	// messages path to route an Anthropic-compatible request through the same
+	// model chain / breaker / scoring / fallback machinery as chat.
+	Path string
 }
