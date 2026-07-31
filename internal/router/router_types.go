@@ -14,7 +14,8 @@ import (
 type breakerConfig struct {
 	FailureThreshold int
 	Cooldown         time.Duration
-	RequestTimeout   time.Duration
+	RequestTimeout   time.Duration // per-attempt timeout (one upstream call)
+	TotalTimeout     time.Duration // overall wall-clock budget across the chain
 }
 
 type modelBreakerState struct {
@@ -24,8 +25,14 @@ type modelBreakerState struct {
 	LastFailureReason   string    `json:"last_failure_reason,omitempty"`
 	LastFailureAt       time.Time `json:"last_failure_at,omitempty"`
 	OpenUntil           time.Time `json:"open_until,omitempty"`
-	Score               float64   `json:"score"`
-	ScoreUpdatedAt      time.Time `json:"score_updated_at,omitempty"`
+	// ProbeUntil single-flights the half-open recovery probe: when a circuit's
+	// cooldown elapses, exactly one caller claims the probe (setting this to a
+	// short TTL) and the rest are skipped until the probe resolves or the TTL
+	// expires, instead of every concurrent request stampeding the recovering
+	// model at once.
+	ProbeUntil     time.Time `json:"-"`
+	Score          float64   `json:"score"`
+	ScoreUpdatedAt time.Time `json:"score_updated_at,omitempty"`
 }
 
 type BreakerSnapshot struct {
@@ -75,6 +82,10 @@ type attemptError struct {
 	Retryable       bool
 	Timeout         bool
 	EOF             bool
+	// SkipModel marks a soft, model-specific skip (e.g. a half-open probe already
+	// in flight): the fallback loop advances to the next model immediately with no
+	// backoff and no score/breaker penalty, exactly like a model-unavailable 404.
+	SkipModel bool
 }
 
 func (e *attemptError) Error() string { return e.Message }
@@ -132,6 +143,13 @@ type FallbackExecution struct {
 	APIKey      string
 	Attempts    []modelAttempt
 	RetryPolicy RetryPolicy
+	// Stream marks a streamed (SSE) request: such attempts are not wrapped in a
+	// per-attempt deadline (streaming is bounded by header + idle timeouts
+	// instead), so a long-but-live stream is never cut mid-response.
+	Stream bool
+	// PerAttemptTimeout bounds a single non-streaming upstream call; zero leaves
+	// the attempt bounded only by the parent context.
+	PerAttemptTimeout time.Duration
 }
 
 type AttemptTarget struct {

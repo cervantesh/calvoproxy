@@ -25,12 +25,70 @@ import (
 
 func (s *RouterService) isModelAvailable(attempt modelAttempt) bool {
 	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+	return s.isModelAvailableLocked(attempt)
+}
+
+// isModelAvailableLocked is the lock-free core: the caller MUST already hold
+// breakerMu (read or write). Used both by isModelAvailable (request path, its
+// own RLock) and by Health (which holds one RLock for the whole snapshot), so
+// availability is never computed via a second, re-entrant RLock — Go's RWMutex
+// is not recursive and a nested RLock deadlocks whenever a writer is waiting.
+func (s *RouterService) isModelAvailableLocked(attempt modelAttempt) bool {
 	state := s.modelBreakers[s.breakerKey(attempt)]
-	s.breakerMu.RUnlock()
 	if state == nil {
 		return true
 	}
 	return !state.OpenUntil.After(time.Now())
+}
+
+// tryStartAttempt single-flights the half-open recovery probe. It is called on
+// the hot request path immediately before an attempt actually runs (NOT from
+// Health/filter, which stay read-only). Return values:
+//   - closed circuit  → true  (full concurrency, no probe bookkeeping)
+//   - open (cooling)   → false (should already be filtered out; belt-and-braces)
+//   - half-open window → true for exactly ONE caller, which claims the probe with
+//     a short TTL; concurrent callers get false until the probe resolves (any
+//     record/penalize path clears it) or the TTL lapses and re-arms it.
+//
+// The common case (closed/nil circuit) is served under a READ lock so normal
+// traffic isn't serialized; only the rare half-open claim upgrades to a write
+// lock, re-checking state under it (double-checked locking).
+func (s *RouterService) tryStartAttempt(attempt modelAttempt) bool {
+	key := s.breakerKey(attempt)
+
+	s.breakerMu.RLock()
+	state := s.modelBreakers[key]
+	if state == nil || state.OpenUntil.IsZero() {
+		s.breakerMu.RUnlock()
+		return true // closed → fully concurrent, no write lock needed
+	}
+	if time.Now().Before(state.OpenUntil) {
+		s.breakerMu.RUnlock()
+		return false // still cooling down
+	}
+	s.breakerMu.RUnlock()
+
+	// Half-open: claim the single probe under the write lock, re-checking state.
+	s.breakerMu.Lock()
+	defer s.breakerMu.Unlock()
+	state = s.modelBreakers[key]
+	if state == nil || state.OpenUntil.IsZero() {
+		return true
+	}
+	now := time.Now()
+	if now.Before(state.OpenUntil) {
+		return false
+	}
+	if now.Before(state.ProbeUntil) {
+		return false // another caller already claimed the probe
+	}
+	ttl := s.config.RequestTimeout
+	if ttl <= 0 {
+		ttl = 45 * time.Second
+	}
+	state.ProbeUntil = now.Add(ttl)
+	return true
 }
 
 func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reason string) {
@@ -50,6 +108,7 @@ func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reas
 		state.ConsecutiveFailures = 0
 		state.OpenUntil = time.Time{}
 	}
+	state.ProbeUntil = time.Time{} // probe (if any) resolved
 	state.ConsecutiveFailures++
 	state.LastFailureCode = statusCode
 	state.LastFailureReason = truncateReason(reason)
@@ -81,6 +140,7 @@ func (s *RouterService) recordSuccess(attempt modelAttempt) {
 	state.ConsecutiveFailures = 0
 	state.Successes++
 	state.OpenUntil = time.Time{}
+	state.ProbeUntil = time.Time{} // probe resolved successfully
 	state.LastFailureCode = 0
 	state.LastFailureReason = ""
 	state.LastFailureAt = time.Time{}
@@ -162,7 +222,17 @@ func (s *RouterService) Health() ProxyHealth {
 	if openCount > 0 {
 		status = "degraded"
 	}
-	if len(s.filterAvailableAttempts(s.allKnownAttempts())) == 0 {
+	// Compute readiness under the read lock we already hold, using the lock-free
+	// availability check — NOT filterAvailableAttempts, whose isModelAvailable
+	// would take a second (re-entrant) RLock and deadlock if a writer is waiting.
+	anyAvailable := false
+	for _, attempt := range s.allKnownAttempts() {
+		if s.isModelAvailableLocked(attempt) {
+			anyAvailable = true
+			break
+		}
+	}
+	if !anyAvailable {
 		ready = false
 		status = "unavailable"
 	}

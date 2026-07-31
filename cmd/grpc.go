@@ -7,12 +7,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 
-	"github.com/cervantesh/cervo-requestmeta"
-	"github.com/cervantesh/calvoproxy/internal/router"
 	proxyv1 "github.com/cervantesh/calvoproxy/gen/proto/proxyv1"
+	"github.com/cervantesh/calvoproxy/internal/router"
+	"github.com/cervantesh/cervo-requestmeta"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type proxyTransportGRPCServer struct {
@@ -78,7 +82,34 @@ func (s *proxyTransportGRPCServer) ChatCompletion(ctx context.Context, req *prox
 	}, nil
 }
 
+// grpcAdminAuthorized mirrors the HTTP admin gate for gRPC: when
+// PROXY_ADMIN_TOKEN is set, the caller must present it as gRPC metadata
+// "authorization: Bearer <token>" or "x-admin-token: <token>" (constant-time).
+// When unset, the endpoint is open (unchanged default).
+func grpcAdminAuthorized(ctx context.Context) bool {
+	token := os.Getenv("PROXY_ADMIN_TOKEN")
+	if token == "" {
+		return true
+	}
+	md, _ := metadata.FromIncomingContext(ctx)
+	got := ""
+	if vals := md.Get("authorization"); len(vals) > 0 {
+		got = strings.TrimPrefix(vals[0], "Bearer ")
+	}
+	if got == "" {
+		if vals := md.Get("x-admin-token"); len(vals) > 0 {
+			got = vals[0]
+		}
+	}
+	return constantTimeEqual(got, token)
+}
+
 func (s *proxyTransportGRPCServer) GetHealth(ctx context.Context, req *proxyv1.GetHealthRequest) (*proxyv1.GetHealthResponse, error) {
+	// Health leaks internals (model chains, breaker reasons, policy hashes) — gate
+	// it behind the admin token, same as HTTP /health.
+	if !grpcAdminAuthorized(ctx) {
+		return nil, status.Error(codes.Unauthenticated, "admin token required")
+	}
 	payload, err := json.Marshal(s.routerService.health())
 	if err != nil {
 		return nil, err

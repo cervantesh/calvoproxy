@@ -3,8 +3,8 @@ package router
 import (
 	"time"
 
-	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	"github.com/cervantesh/calvoproxy/internal/router/policyvocab"
+	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 )
 
 const (

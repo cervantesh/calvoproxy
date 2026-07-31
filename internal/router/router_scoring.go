@@ -99,6 +99,12 @@ func (s *RouterService) penalizeScore(attempt modelAttempt, statusCode int) {
 		state = &modelBreakerState{}
 		s.modelBreakers[key] = state
 	}
+	// Clear any half-open probe claim: penalizeScore runs on EVERY failure,
+	// including non-breaker-eligible ones (4xx, truncated/oversize) that never
+	// reach recordFailure. Without this, a probe that failed on such an error
+	// would keep the model soft-skipped until its TTL lapses (~45s) instead of
+	// immediately re-arming the next probe.
+	state.ProbeUntil = time.Time{}
 	applyScoreFailure(state, statusCode, time.Now())
 }
 

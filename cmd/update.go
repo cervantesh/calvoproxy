@@ -350,9 +350,13 @@ func announceUpdate() {
 // extract the binary and swap it in place. Returns a process exit code.
 func runUpdate(args []string) int {
 	force := false
+	insecure := false
 	for _, a := range args {
-		if a == "--force" || a == "-f" {
+		switch a {
+		case "--force", "-f":
 			force = true
+		case "--insecure":
+			insecure = true
 		}
 	}
 
@@ -396,8 +400,17 @@ func runUpdate(args []string) int {
 		return 1
 	}
 
-	// Verify against SHA256SUMS.txt when the release publishes it.
-	if sumsURL, ok := rel.assetURL("SHA256SUMS.txt"); ok {
+	// Verify against SHA256SUMS.txt. This is fail-CLOSED: a self-replacing binary
+	// must not install unverified bytes. If the release has no SHA256SUMS.txt (or
+	// no matching line) we refuse unless the operator passes --insecure.
+	sumsURL, hasSums := rel.assetURL("SHA256SUMS.txt")
+	if !hasSums {
+		if !insecure {
+			fmt.Fprintln(os.Stderr, "refusing to update: release has no SHA256SUMS.txt to verify against (pass --insecure to override — unsafe).")
+			return 1
+		}
+		fmt.Println("WARNING: --insecure set; installing without checksum verification.")
+	} else {
 		sums, err := download(ctx, sumsURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "download checksums: %v\n", err)
@@ -405,16 +418,18 @@ func runUpdate(args []string) int {
 		}
 		want, ok := sha256FromSums(string(sums), name)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "checksum for %s not found in SHA256SUMS.txt\n", name)
-			return 1
+			if !insecure {
+				fmt.Fprintf(os.Stderr, "refusing to update: checksum for %s not found in SHA256SUMS.txt (pass --insecure to override — unsafe).\n", name)
+				return 1
+			}
+			fmt.Println("WARNING: --insecure set; checksum entry missing, installing anyway.")
+		} else {
+			if err := verifySHA256(archive, want); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				return 1
+			}
+			fmt.Println("Checksum verified.")
 		}
-		if err := verifySHA256(archive, want); err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
-			return 1
-		}
-		fmt.Println("Checksum verified.")
-	} else {
-		fmt.Println("Warning: release has no SHA256SUMS.txt; skipping checksum verification.")
 	}
 
 	newBin, err := extractBinary(archive, isZip, binaryNameFor(runtime.GOOS))

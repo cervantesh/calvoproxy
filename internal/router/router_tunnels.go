@@ -19,7 +19,7 @@ func (s *RouterService) tunnelToOpenRouterMessages(ctx context.Context, w http.R
 	}
 	defer func() { _ = resp.Body.Close() }()
 	streamProxyResponse(w, resp)
-	streamCopy(ctx, w, resp.Body)
+	streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
 }
 
 func (s *RouterService) tunnelToOpenRouterEmbeddings(ctx context.Context, w http.ResponseWriter, body []byte, apiKey string) {
@@ -36,5 +36,5 @@ func (s *RouterService) tunnelToOpenRouterEmbeddings(ctx context.Context, w http
 	}
 	defer func() { _ = resp.Body.Close() }()
 	streamProxyResponse(w, resp)
-	streamCopy(ctx, w, resp.Body)
+	streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
 }

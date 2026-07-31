@@ -22,6 +22,14 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	)
 	defer span.End()
 
+	// Single-flight the half-open recovery probe: if this model's circuit just
+	// entered its half-open window and another request already claimed the probe,
+	// skip to the next model instead of stampeding the recovering upstream. This
+	// is a soft skip (retryable, not breaker-eligible, no score penalty).
+	if !s.tryStartAttempt(attempt) {
+		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "recovery probe already in flight for " + attempt.Model}
+	}
+
 	target := s.resolveAttemptTarget(attempt, chatCompletionsPath)
 	if target.Agentic {
 		slog.InfoContext(ctx, "[CalvoProxy] 🛠️ Routing agentic request to GeminiCLIAPI", slog.String("profile", attempt.Profile))
@@ -47,7 +55,9 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 
 	if resp.StatusCode != http.StatusOK {
-		respBytes, _ := io.ReadAll(resp.Body)
+		// Error bodies are only used for classification/logging — cap the read so
+		// a hostile/broken upstream can't flood memory with a giant error body.
+		respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes()))
 		if resp.StatusCode >= 500 {
 			span.RecordError(errors.New(string(respBytes)))
 			span.SetStatus(codes.Error, "Upstream HTTP Error")
@@ -66,15 +76,24 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	if isEventStream(resp) {
 		s.recordSuccess(attempt)
 		streamProxyResponse(w, resp)
-		streamCopy(ctx, w, resp.Body)
+		streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
 		return nil
 	}
 
-	respBytes, readErr := io.ReadAll(resp.Body)
+	// Cap the buffered non-streaming body so a huge/malformed upstream response
+	// can't OOM the process. Read one byte past the limit to detect overflow.
+	limit := maxResponseBytes()
+	respBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if readErr != nil {
-		// A truncated upstream read must not be written back as a 200. Treat it
-		// as a failure so the fallback chain can try the next model.
-		attErr := &attemptError{StatusCode: http.StatusBadGateway, Message: "truncated upstream response: " + readErr.Error()}
+		// A truncated upstream read must not be written back as a 200. Mark it
+		// retryable so the fallback chain tries the next model rather than
+		// aborting (nothing was written to the client yet).
+		attErr := &attemptError{StatusCode: http.StatusBadGateway, Retryable: true, Message: "truncated upstream response: " + readErr.Error()}
+		s.penalizeScore(attempt, attErr.StatusCode)
+		return attErr
+	}
+	if int64(len(respBytes)) > limit {
+		attErr := &attemptError{StatusCode: http.StatusBadGateway, Retryable: true, Message: "upstream response exceeds PROXY_MAX_RESPONSE_BYTES"}
 		s.penalizeScore(attempt, attErr.StatusCode)
 		return attErr
 	}
