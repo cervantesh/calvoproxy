@@ -11,6 +11,9 @@ import (
 )
 
 func TestResolveAPIKey_PrefersAuthorizationThenEnv(t *testing.T) {
+	// On a loopback bind the env key fallback applies (unchanged behaviour); the
+	// public-bind gate is exercised separately in security_test.go.
+	bindHost = "127.0.0.1"
 	t.Setenv("OPENROUTER_API_KEY", "env-key")
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	if got := resolveAPIKey(req); got != "env-key" {

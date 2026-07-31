@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/cervantesh/calvoproxy/internal/router/policyrules"
 	cervomodelpolicy "github.com/cervantesh/cervo-model-policy"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	"github.com/cervantesh/calvoproxy/internal/router/policyrules"
 )
 
 type policyConfig = cervomodelpolicy.Config

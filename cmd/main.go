@@ -25,6 +25,14 @@ var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`
 func resolveAPIKey(r *http.Request) string {
 	apiKey := requestmeta.AuthorizationFromRequest(r)
 	if apiKey == "" || apiKey == "dummy" {
+		// Don't silently spend the env OpenRouter key for a keyless request when
+		// bound to a public interface — that turns an exposed instance into an
+		// open relay on someone else's dime. Loopback binds keep the old
+		// behaviour; a public bind requires PROXY_ALLOW_ENV_KEY_PUBLIC=true.
+		if boundToPublicInterface() && !allowEnvKeyOnPublicBind() {
+			slog.Warn("Refusing env OPENROUTER_API_KEY for a keyless request on a public bind; set PROXY_ALLOW_ENV_KEY_PUBLIC=true to allow, or pass a key")
+			return ""
+		}
 		envKey := os.Getenv("OPENROUTER_API_KEY")
 		if envKey != "" {
 			slog.Info("Using API key from environment (header was empty or dummy)")
@@ -57,11 +65,16 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 			if idle != nil {
 				idle.mark() // real proxy traffic — resets the idle-shutdown timer
 			}
-			apiKey, ok := requirePostAPIKey(w, r)
+			// Wrap to capture status + latency for /metrics. The recorder forwards
+			// http.Flusher so streaming still flushes token-by-token.
+			rec := newStatusRecorder(w)
+			start := time.Now()
+			defer func() { metrics.observe(rec.status, time.Since(start).Nanoseconds()) }()
+			apiKey, ok := requirePostAPIKey(rec, r)
 			if !ok {
 				return
 			}
-			routerService.RouteRequestWithProvider(w, r, apiKey, forcedProvider)
+			routerService.RouteRequestWithProvider(rec, r, apiKey, forcedProvider)
 		}
 	}
 
@@ -107,7 +120,7 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeJSON(w, routerService.ModelPolicyHealth())
 	}))
 
-	mux.HandleFunc("/metrics", admin(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/metrics", metricsAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeMetrics(w, routerService.Health())
 	}))
 
@@ -151,23 +164,47 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 	return mux
 }
 
+// presentedToken extracts the caller's token from a Bearer Authorization header
+// or the X-Admin-Token header.
+func presentedToken(r *http.Request) string {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if got == "" {
+		got = r.Header.Get("X-Admin-Token")
+	}
+	return got
+}
+
 // admin gates a handler behind PROXY_ADMIN_TOKEN. When the env var is unset the
 // endpoint is open (unchanged default); when set, callers must present it as a
-// Bearer token or X-Admin-Token header.
+// Bearer token or X-Admin-Token header. The comparison is constant-time.
 func admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := os.Getenv("PROXY_ADMIN_TOKEN")
-		if token != "" {
-			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if got == "" {
-				got = r.Header.Get("X-Admin-Token")
-			}
-			if got != token {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if token != "" && !constantTimeEqual(presentedToken(r), token) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 		h(w, r)
+	}
+}
+
+// metricsAuth gates /metrics. If PROXY_METRICS_TOKEN is set, /metrics accepts it
+// OR the admin token, decoupling a Prometheus scraper's credential from the
+// admin credential. If it is unset, /metrics follows the admin gate as before.
+func metricsAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		metricsToken := os.Getenv("PROXY_METRICS_TOKEN")
+		if metricsToken == "" {
+			admin(h)(w, r)
+			return
+		}
+		got := presentedToken(r)
+		adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
+		if constantTimeEqual(got, metricsToken) || (adminToken != "" && constantTimeEqual(got, adminToken)) {
+			h(w, r)
+			return
+		}
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	}
 }
 
@@ -197,6 +234,21 @@ func writeMetrics(w http.ResponseWriter, h router.ProxyHealth) {
 	for _, c := range h.Circuits {
 		fmt.Fprintf(w, "calvoproxy_model_successes{model=%q} %d\n", c.Model, c.Successes)
 	}
+
+	// Request-level counters an operator alerts on: rate, error classes, latency.
+	fmt.Fprintln(w, "# HELP calvoproxy_requests_total Proxy requests handled\n# TYPE calvoproxy_requests_total counter")
+	fmt.Fprintf(w, "calvoproxy_requests_total %d\n", metrics.requestsTotal.Load())
+	fmt.Fprintln(w, "# HELP calvoproxy_requests_by_status Proxy requests by HTTP status class\n# TYPE calvoproxy_requests_by_status counter")
+	fmt.Fprintf(w, "calvoproxy_requests_by_status{class=\"2xx\"} %d\n", metrics.status2xx.Load())
+	fmt.Fprintf(w, "calvoproxy_requests_by_status{class=\"4xx\"} %d\n", metrics.status4xx.Load())
+	fmt.Fprintf(w, "calvoproxy_requests_by_status{class=\"5xx\"} %d\n", metrics.status5xx.Load())
+	fmt.Fprintf(w, "calvoproxy_requests_by_status{class=\"other\"} %d\n", metrics.statusOther.Load())
+	fmt.Fprintln(w, "# HELP calvoproxy_request_latency_seconds_sum Total handler latency\n# TYPE calvoproxy_request_latency_seconds_sum counter")
+	fmt.Fprintf(w, "calvoproxy_request_latency_seconds_sum %.6f\n", float64(metrics.latencyNanos.Load())/1e9)
+	fmt.Fprintln(w, "# HELP calvoproxy_request_latency_count Handler latency observations\n# TYPE calvoproxy_request_latency_count counter")
+	fmt.Fprintf(w, "calvoproxy_request_latency_count %d\n", metrics.latencyCount.Load())
+	fmt.Fprintln(w, "# HELP calvoproxy_build_info Build version (value always 1)\n# TYPE calvoproxy_build_info gauge")
+	fmt.Fprintf(w, "calvoproxy_build_info{version=%q} 1\n", version)
 }
 
 func main() {
@@ -213,6 +265,11 @@ func main() {
 	// Remove any leftover <exe>.old from a prior Windows self-update.
 	cleanupStaleUpdate()
 
+	// Registered first so it runs LAST (after telemetry flush) — lets us exit
+	// non-zero on a fatal server error without a bare os.Exit skipping defers.
+	exitCode := 0
+	defer func() { os.Exit(exitCode) }()
+
 	tp, err := telemetry.Init("CalvoProxy")
 	if err != nil {
 		log.Printf("Failed to initialize OpenTelemetry: %v", err)
@@ -226,10 +283,18 @@ func main() {
 
 	port := envOrDefault("PORT", "8080")
 	grpcPort := envOrDefault("GRPC_PORT", "9090")
-	// Bind address. Default 0.0.0.0 (needed so a container is reachable via
-	// -p). For a host install set HOST=127.0.0.1 to keep the proxy — and the
-	// env OpenRouter key it spends — off the network.
-	host := envOrDefault("HOST", "0.0.0.0")
+	// Bind address. Defaults to loopback (127.0.0.1) so a host install keeps the
+	// proxy — and the env OpenRouter key it spends — off the network by default.
+	// The Docker image sets HOST=0.0.0.0 so a container stays reachable via -p.
+	host := envOrDefault("HOST", "127.0.0.1")
+	bindHost = host
+
+	// Loud warning when exposed on a public interface without an admin token:
+	// /health, /metrics and /admin/reload are open by default and leak internals.
+	if boundToPublicInterface() && os.Getenv("PROXY_ADMIN_TOKEN") == "" {
+		slog.Warn("CalvoProxy is bound to a PUBLIC interface with no PROXY_ADMIN_TOKEN — /health, /metrics and /admin/reload are open. Set PROXY_ADMIN_TOKEN, or bind HOST=127.0.0.1.",
+			"host", host)
+	}
 
 	routerService := router.NewRouterService()
 	tracker := newIdleTracker()
@@ -293,7 +358,10 @@ func main() {
 	case err := <-srvErr:
 		cancelGRPC()
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+			// Return (don't log.Fatal) so the deferred telemetry/OTel shutdown
+			// still runs and flushes before the process exits.
+			slog.Error("HTTP server exited with error", "error", err)
+			exitCode = 1
 		}
 		return
 	case sig := <-sigCh:

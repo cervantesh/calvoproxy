@@ -51,17 +51,30 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 		execution.RequestBody["model"] = attempt.Model
 		upBytes, _ := json.Marshal(execution.RequestBody)
 
-		if err := e.AttemptExecutor.ExecuteAttempt(ctx, w, upBytes, execution.APIKey, attempt); err == nil {
+		// Each non-streaming attempt gets its own deadline so a slow model is cut
+		// at PerAttemptTimeout, leaving the rest of the overall budget for the
+		// fallbacks. Streaming attempts are NOT capped here — they run under the
+		// parent context, bounded by header + idle timeouts (see streamCopy).
+		attemptCtx := ctx
+		var cancel context.CancelFunc
+		if !execution.Stream && execution.PerAttemptTimeout > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, execution.PerAttemptTimeout)
+		}
+		err := e.AttemptExecutor.ExecuteAttempt(attemptCtx, w, upBytes, execution.APIKey, attempt)
+		if cancel != nil {
+			cancel()
+		}
+		if err == nil {
 			return nil
 		} else {
 			lastErr = err
 			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ Fallback", slog.String("model", attempt.Model), slog.Any("error", err))
 			var attErr *attemptError
 			if errors.As(err, &attErr) {
-				// Model-specific unavailability (e.g. a retired OpenRouter
-				// :free slug → 404): skip straight to the next model in the
-				// chain, no backoff — the failure is not the request's fault.
-				if isModelUnavailable(attErr) {
+				// Model-specific unavailability (a retired OpenRouter :free slug
+				// → 404) or a soft skip (half-open probe already in flight): jump
+				// straight to the next model, no backoff — not the request's fault.
+				if isModelUnavailable(attErr) || attErr.SkipModel {
 					continue
 				}
 				// Otherwise honour the retry policy: a terminal error that

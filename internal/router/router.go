@@ -25,9 +25,19 @@ func NewRouterService() *RouterService {
 	if config.FailureThreshold < 1 {
 		config.FailureThreshold = 1
 	}
+	config.TotalTimeout = totalTimeout(config.RequestTimeout)
+
+	// Clone the default transport (never mutate the process-wide singleton) and
+	// bound header arrival with ResponseHeaderTimeout instead of a whole-request
+	// client Timeout. This lets streamed (SSE) responses run long — the old
+	// http.Client.Timeout counted body reads and silently cut live streams at
+	// RequestTimeout, defeating the server's disabled WriteTimeout.
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.ResponseHeaderTimeout = config.RequestTimeout
+	base.TLSHandshakeTimeout = 10 * time.Second
 
 	transport := &GlobalBreakerTransport{
-		Base:             http.DefaultTransport,
+		Base:             base,
 		FailureThreshold: config.FailureThreshold,
 		Cooldown:         config.Cooldown,
 	}
@@ -40,7 +50,11 @@ func NewRouterService() *RouterService {
 	providerPolicy := modelRuntime.Config
 	modelPolicy := cervomodelpolicy.NewPolicy(providerPolicy)
 	return &RouterService{
-		Client:         &http.Client{Timeout: config.RequestTimeout, Transport: transport},
+		// No blanket Timeout: streaming responses must not be capped by a
+		// whole-request deadline. Header arrival is bounded by the transport's
+		// ResponseHeaderTimeout; non-stream attempts get a per-attempt context
+		// deadline in the fallback loop; streams get an idle timeout instead.
+		Client:         &http.Client{Transport: transport},
 		SideEffects:    sideEffectsFromEnv(),
 		TargetResolver: DefaultAttemptTargetResolver{},
 		PolicyEngine:   policyEngine,
@@ -94,17 +108,17 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 
 	if strings.Contains(r.URL.Path, "messages") {
-		decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
+		_, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
 			OperationHint: capChatCompletion,
 		}, bodyBytes)
 		if !ok {
 			return
 		}
-		if decision.Timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, decision.Timeout)
-			defer cancel()
-		}
+		// No total deadline: the Anthropic tunnel streams via streamCopy, which
+		// is bounded by header + idle timeouts (a fixed deadline would cut long
+		// live streams). These messages/embeddings tunnels are dumb pass-throughs
+		// — they do NOT run the model chain, breaker-eligible scoring or
+		// multi-model fallback; only the per-host transport breaker applies.
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic Tunnel Active")
 		s.tunnelToOpenRouterMessages(ctx, w, bodyBytes, apiKey)
 		return
@@ -139,10 +153,17 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	if decision.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, decision.Timeout)
-		defer cancel()
+	// Non-streaming requests get an overall wall-clock budget across the whole
+	// fallback chain (each attempt is additionally capped per-attempt in the
+	// loop). Streaming requests get NO total deadline here — they are bounded by
+	// the transport's header timeout and a per-chunk idle timeout instead, so a
+	// long-but-live stream is never cut mid-response.
+	if !stream {
+		if total := s.config.TotalTimeout; total > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, total)
+			defer cancel()
+		}
 	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
@@ -168,11 +189,17 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		return
 	}
 
+	perAttempt := s.config.RequestTimeout
+	if decision.Timeout > 0 && decision.Timeout < perAttempt {
+		perAttempt = decision.Timeout
+	}
 	err = s.executeFallbacks(ctx, w, FallbackExecution{
-		RequestBody: reqBody,
-		APIKey:      apiKey,
-		Attempts:    availableModels,
-		RetryPolicy: decision.RetryPolicy,
+		RequestBody:       reqBody,
+		APIKey:            apiKey,
+		Attempts:          availableModels,
+		RetryPolicy:       decision.RetryPolicy,
+		Stream:            stream,
+		PerAttemptTimeout: perAttempt,
 	})
 	if err == nil {
 		return

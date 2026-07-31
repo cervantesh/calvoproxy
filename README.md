@@ -35,23 +35,41 @@ before exit.
 
 | Env var              | Default | Description                          |
 |----------------------|---------|--------------------------------------|
-| `HOST`               | `0.0.0.0` | Bind address. Set `127.0.0.1` on a host install to keep the proxy off the network |
+| `HOST`               | `127.0.0.1` | Bind address. Loopback by default (keeps the proxy and its env key off the network). Set `0.0.0.0` to expose it — the Docker image does this automatically |
 | `PORT`               | `8080`  | HTTP listen port                     |
+| `GRPC_PORT`          | `9090`  | gRPC listen port (see [gRPC](#grpc-transport)); a bind failure is non-fatal |
 | `OPENROUTER_API_KEY` | —       | Upstream key for the default executor|
 | `PROXY_IDLE_TIMEOUT` | off     | Exit after this idle period (Go duration, e.g. `20m`) — enables on-demand use |
 | `PROXY_MAX_BODY_BYTES` | `10485760` | Max request body (10 MiB) — guards against oversized payloads |
+| `PROXY_MAX_RESPONSE_BYTES` | `26214400` | Max buffered non-streaming upstream response (25 MiB) — guards against OOM |
+| `PROXY_REQUEST_TIMEOUT_SECONDS` | `45` | Per-attempt timeout (one upstream call). Header arrival for streams is bounded by this too |
+| `PROXY_TOTAL_TIMEOUT_SECONDS` | `120` | Overall wall-clock budget across the fallback chain (non-streaming) |
+| `PROXY_STREAM_IDLE_TIMEOUT` | `120` | Max gap (seconds) between streamed chunks before a stalled stream is aborted |
+| `PROXY_STREAM_MAX_DURATION` | `1800` | Absolute cap (seconds) on a single stream's lifetime; `0` disables the backstop |
 | `PROXY_SCORING_ENABLED` | `true` | Reorder the chain by per-model reliability score (see below) |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
 | `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | How long an open circuit skips a model |
 | `PROXY_OPENROUTER_URL` | OpenRouter | Override the OpenRouter chat endpoint (e.g. a mock) |
 | `PROXY_AGENTIC_URL`  | off     | If set, `agent`/`plan` profiles route here; unset → normal OpenRouter routing |
 | `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Opt-in monorepo git/sqlite extractor (off by default) |
-| `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token |
+| `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token (constant-time) |
+| `PROXY_METRICS_TOKEN` | off    | If set, `/metrics` accepts this token OR the admin token — decouples the scraper credential from admin |
+| `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending the env `OPENROUTER_API_KEY` for keyless requests on a **public** bind (loopback always allows it) |
 | `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
-successes, open-circuit count, readiness). When `PROXY_ADMIN_TOKEN` is set, the
-detailed endpoints require it; `/ready` stays open and returns readiness only.
+successes, open-circuit count, readiness, plus request rate, per-status-class
+counts, latency sum/count and a `build_info` gauge). When `PROXY_ADMIN_TOKEN` is
+set, the detailed endpoints require it; `/ready` stays open and returns
+readiness only.
+
+> **Secure defaults.** `HOST` is loopback (`127.0.0.1`) by default, and the
+> admin/metrics/health endpoints are open only on that loopback bind. If you
+> expose the proxy (`HOST=0.0.0.0`, or via Docker), **set `PROXY_ADMIN_TOKEN`** —
+> otherwise those endpoints are world-readable. On a public bind the proxy also
+> refuses to spend the env `OPENROUTER_API_KEY` for keyless requests unless
+> `PROXY_ALLOW_ENV_KEY_PUBLIC=true`, so an exposed instance can't become an open
+> relay on your dime. A startup warning fires if you expose it without a token.
 
 **Hot-reload** the model chains without a restart: edit `model-policy.json`, then
 `kill -HUP <pid>` (Unix) or `POST /admin/reload` (any platform, admin-gated).
@@ -123,9 +141,11 @@ CalvoProxy knows its own version and checks GitHub Releases for a newer one.
   release archive for your OS/arch, **verifies its SHA-256** against the
   release's `SHA256SUMS.txt`, extracts the binary and swaps it atomically
   (on Windows the old exe is moved aside to `calvoproxy.exe.old` and cleaned up
-  on next start). Restart afterwards to run the new version. `--force`
-  re-installs even when already current. `calvoproxy version` just prints the
-  version.
+  on next start). Restart afterwards to run the new version. Verification is
+  **fail-closed**: if a release has no `SHA256SUMS.txt` (or no matching entry)
+  the update is refused — pass `--insecure` to override (unsafe; only skips the
+  checksum, not HTTPS). `--force` re-installs even when already current.
+  `calvoproxy version` just prints the version.
 
   ```bash
   calvoproxy update
@@ -138,6 +158,27 @@ CalvoProxy knows its own version and checks GitHub Releases for a newer one.
   docker pull ghcr.io/cervantesh/calvoproxy:latest
   docker compose up -d   # or: docker rm -f calvoproxy && docker run … :latest
   ```
+
+### Reliability of long streams
+
+Streamed (`stream: true`) responses are **not** bounded by the per-request
+timeout — a long-but-live completion is delivered in full. Instead a stream is
+cut only if it *stalls*: no bytes for `PROXY_STREAM_IDLE_TIMEOUT` (default 120s),
+with an absolute `PROXY_STREAM_MAX_DURATION` backstop (default 30m). Non-stream
+requests get a per-attempt timeout plus an overall wall-clock budget across the
+fallback chain, so a slow first model can't starve the fallbacks.
+
+### gRPC transport
+
+Alongside the HTTP API, CalvoProxy exposes a small gRPC `ProxyTransportService`
+(unary `ChatCompletion` + `GetHealth`) on `GRPC_PORT` (default `9090`), backed by
+the same routing engine. It is **unary/buffered** — not a streaming RPC — so use
+the HTTP API for token streaming. The proto lives at
+`proto/calvoproxy/proxy/v1/transport.proto`; generated stubs are under
+`gen/proto/proxyv1/`. When `PROXY_ADMIN_TOKEN` is set, `GetHealth` requires it via
+gRPC metadata (`authorization: Bearer <token>`); `ChatCompletion` always needs an
+API key. A bind failure on `GRPC_PORT` is non-fatal — the HTTP proxy keeps
+serving. (Compose maps only `8080`; publish `9090` yourself if you need gRPC.)
 
 ### HTTP endpoints
 
