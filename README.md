@@ -186,6 +186,23 @@ CalvoProxy knows its own version and checks GitHub Releases for a newer one.
   calvoproxy update
   ```
 
+  **Signature verification (optional, recommended).** On top of the SHA-256
+  check, the updater can verify an **Ed25519 signature** over `SHA256SUMS.txt`,
+  which authenticates a release against a compromised host/account (a bare
+  checksum cannot). It is **off until you enable it** — one-time setup:
+
+  1. Generate a keypair: `go run ./tools/gen`.
+  2. Paste the printed **public** key into `releasePublicKey` in
+     [`cmd/verify.go`](cmd/verify.go) (safe to commit) — or ship it via
+     `PROXY_UPDATE_PUBKEY` at runtime.
+  3. Add the printed **private** key as the GitHub Actions secret
+     `RELEASE_SIGNING_KEY` (repo → Settings → Secrets → Actions).
+
+  The release workflow then signs `SHA256SUMS.txt` → `SHA256SUMS.txt.sig` on
+  every tag. Once a public key is configured, `calvoproxy update` is
+  **fail-closed on the signature too**: a missing or invalid signature refuses
+  the update. Until you set a key, behaviour is unchanged (SHA-256 only).
+
   Inside a container self-update is intentionally refused (an image is
   immutable) — pull a new tag and recreate instead:
 
@@ -221,7 +238,9 @@ serving. (Compose maps only `8080`; publish `9090` yourself if you need gRPC.)
 - `GET /version` — running build + whether a newer release is available.
 - `POST /v1/chat/completions` — OpenAI-compatible chat completions.
 - Per-profile routes: `/v1/{simple,coding,reasoning,agent,creative,vision}/chat/completions`.
-- `POST /v1/messages` — Anthropic-compatible messages.
+- `POST /v1/messages` — Anthropic-compatible messages, routed through the same
+  model chain / breaker / scoring / multi-model fallback as chat (targets the
+  OpenRouter/Anthropic `/messages` shape; other providers don't expose it).
 - `POST /v1/embeddings` — embeddings.
 
 Quick check:

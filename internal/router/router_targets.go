@@ -1,12 +1,36 @@
 package router
 
+import "strings"
+
 const (
-	chatCompletionsPath      = "/v1/chat/completions"
-	defaultAnthropicBaseURL  = "https://api.anthropic.com"
-	defaultOpenAIBaseURL     = "https://api.openai.com"
-	defaultOllamaBaseURL     = "http://ollama:11434"
-	defaultOpenRouterChatURL = "https://openrouter.ai/api/v1/chat/completions"
+	chatCompletionsPath          = "/v1/chat/completions"
+	messagesPath                 = "/v1/messages"
+	defaultAnthropicBaseURL      = "https://api.anthropic.com"
+	defaultOpenAIBaseURL         = "https://api.openai.com"
+	defaultOllamaBaseURL         = "http://ollama:11434"
+	defaultOpenRouterChatURL     = "https://openrouter.ai/api/v1/chat/completions"
+	defaultOpenRouterMessagesURL = "https://openrouter.ai/api/v1/messages"
 )
+
+// openRouterMessagesURL resolves the upstream Anthropic /messages endpoint. It
+// honours PROXY_OPENROUTER_MESSAGES_URL, otherwise derives it from
+// PROXY_OPENROUTER_URL (so a mock set for chat also captures messages), else the
+// real OpenRouter default.
+func openRouterMessagesURL() string {
+	if u := envValue("PROXY_OPENROUTER_MESSAGES_URL"); u != "" {
+		return u
+	}
+	chat := envValue("PROXY_OPENROUTER_URL")
+	if chat == "" {
+		return defaultOpenRouterMessagesURL
+	}
+	if strings.Contains(chat, "/chat/completions") {
+		return strings.Replace(chat, "/chat/completions", "/messages", 1)
+	}
+	// PROXY_OPENROUTER_URL is a bare base (no /chat/completions to swap): best
+	// effort — append /messages rather than silently reusing the chat endpoint.
+	return strings.TrimRight(chat, "/") + "/messages"
+}
 
 // targetURL returns the env override for an upstream base URL, or the default.
 // Lets an operator point CalvoProxy at a real Anthropic/OpenAI/Ollama endpoint
@@ -38,6 +62,9 @@ func (DefaultAttemptTargetResolver) Resolve(attempt modelAttempt, path string) A
 	case providerOllama, providerLocal:
 		return AttemptTarget{URL: targetURL("PROXY_OLLAMA_URL", defaultOllamaBaseURL) + path}
 	default:
+		if path == messagesPath {
+			return AttemptTarget{URL: openRouterMessagesURL()}
+		}
 		return AttemptTarget{URL: targetURL("PROXY_OPENROUTER_URL", defaultOpenRouterChatURL)}
 	}
 }

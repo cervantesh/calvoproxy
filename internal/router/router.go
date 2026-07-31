@@ -134,19 +134,40 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 
 	if strings.Contains(r.URL.Path, "messages") {
-		_, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
+		// Route the Anthropic /messages request through the SAME model chain,
+		// breaker, scoring and multi-model fallback as chat — each attempt targets
+		// the upstream /messages endpoint. If the body isn't routable JSON, fall
+		// back to a dumb pass-through tunnel (still authorized). NOTE: this targets
+		// OpenRouter/Anthropic /messages; other providers don't expose that shape.
+		var msgBody map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &msgBody); err != nil {
+			if _, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{OperationHint: capChatCompletion}, bodyBytes); !ok {
+				return
+			}
+			slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic passthrough (unroutable body)")
+			s.tunnelToOpenRouterMessages(ctx, w, bodyBytes, apiKey)
+			return
+		}
+		messagesRaw, _ := msgBody["messages"].([]interface{})
+		category := s.determineProfile(r, messagesRaw, provider)
+		requestedModel, _ := msgBody["model"].(string)
+		category, requestedModel = s.resolveModelAlias(category, requestedModel)
+		stream, _ := msgBody["stream"].(bool)
+		hasTools := hasRequestTools(msgBody)
+		hasImages := hasImageContent(messagesRaw)
+		// Same policy facts as chat, so stream-deny / limits / metadata are
+		// enforced identically on the messages path.
+		policyFacts := requestPolicyFacts(msgBody, category, requestedModel, stream, hasTools, hasImages, int64(len(bodyBytes)))
+		decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
 			OperationHint: capChatCompletion,
-		}, bodyBytes)
+			Stream:        stream,
+			Metadata:      policyFacts.Metadata,
+		}, bodyBytes, policyFacts.RequestedLimits)
 		if !ok {
 			return
 		}
-		// No total deadline: the Anthropic tunnel streams via streamCopy, which
-		// is bounded by header + idle timeouts (a fixed deadline would cut long
-		// live streams). These messages/embeddings tunnels are dumb pass-throughs
-		// — they do NOT run the model chain, breaker-eligible scoring or
-		// multi-model fallback; only the per-host transport breaker applies.
-		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic Tunnel Active")
-		s.tunnelToOpenRouterMessages(ctx, w, bodyBytes, apiKey)
+		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
+		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath)
 		return
 	}
 
@@ -179,6 +200,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "")
+}
+
+// dispatchChain runs a request through the model chain: plan → filter (breaker) →
+// rank (score) → truncate → fallback. Shared by /chat/completions and /messages;
+// opPath is "" for chat (default) or messagesPath to send each attempt to the
+// Anthropic /messages endpoint with the same resilience machinery.
+func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string) {
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
 	// loop). Streaming requests get NO total deadline here — they are bounded by
@@ -192,6 +221,11 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		}
 	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
+	if opPath != "" {
+		for i := range attemptsToTry {
+			attemptsToTry[i].Path = opPath
+		}
+	}
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	// Reorder the breaker-eligible chain by reliability score (most reliable
 	// first) before truncating to MaxAttempts, so flaky models sink to the back.
@@ -202,6 +236,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 
 	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
 		slog.String("category", category),
+		slog.String("op_path", opPath),
 		slog.String("policy_target", string(decision.Target)),
 		slog.String("executor", string(decision.Executor)),
 		slog.String("rule_id", decision.RuleID),
@@ -219,7 +254,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
 	}
-	err = s.executeFallbacks(ctx, w, FallbackExecution{
+	err := s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody:       reqBody,
 		APIKey:            apiKey,
 		Attempts:          availableModels,

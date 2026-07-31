@@ -6,7 +6,7 @@ import (
 )
 
 func (s *RouterService) tunnelToOpenRouterMessages(ctx context.Context, w http.ResponseWriter, body []byte, apiKey string) {
-	proxyReq, err := newUpstreamRequest(ctx, http.MethodPost, "https://openrouter.ai/api/v1/messages", body, apiKey)
+	proxyReq, err := newUpstreamRequest(ctx, http.MethodPost, openRouterMessagesURL(), body, apiKey)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return

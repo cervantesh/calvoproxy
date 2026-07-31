@@ -404,7 +404,14 @@ func runUpdate(args []string) int {
 	// must not install unverified bytes. If the release has no SHA256SUMS.txt (or
 	// no matching line) we refuse unless the operator passes --insecure.
 	sumsURL, hasSums := rel.assetURL("SHA256SUMS.txt")
+	sigRequired := updatePublicKey() != ""
 	if !hasSums {
+		if sigRequired {
+			// A configured release key demands signature verification, which needs
+			// SHA256SUMS.txt — --insecure must NOT bypass a signature requirement.
+			fmt.Fprintln(os.Stderr, "refusing to update: signature verification is enabled (release public key set) but the release has no SHA256SUMS.txt to verify.")
+			return 1
+		}
 		if !insecure {
 			fmt.Fprintln(os.Stderr, "refusing to update: release has no SHA256SUMS.txt to verify against (pass --insecure to override — unsafe).")
 			return 1
@@ -429,6 +436,28 @@ func runUpdate(args []string) int {
 				return 1
 			}
 			fmt.Println("Checksum verified.")
+		}
+
+		// If a release public key is configured, additionally verify the Ed25519
+		// signature over SHA256SUMS.txt — this authenticates the release against a
+		// compromised host/account, which a bare checksum cannot. Fail-closed:
+		// enabled key but missing/invalid signature refuses the update.
+		if pub := updatePublicKey(); pub != "" {
+			sigURL, ok := rel.assetURL("SHA256SUMS.txt.sig")
+			if !ok {
+				fmt.Fprintln(os.Stderr, "refusing to update: signature verification is enabled (release public key set) but the release has no SHA256SUMS.txt.sig")
+				return 1
+			}
+			sigBytes, err := download(ctx, sigURL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "download signature: %v\n", err)
+				return 1
+			}
+			if err := verifyReleaseSignature(sums, string(sigBytes), pub); err != nil {
+				fmt.Fprintf(os.Stderr, "signature verification failed: %v\n", err)
+				return 1
+			}
+			fmt.Println("Signature verified.")
 		}
 	}
 
