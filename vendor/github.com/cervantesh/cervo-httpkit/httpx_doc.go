@@ -1,4 +1,4 @@
-// Package httpx provides small HTTP client/server helpers used across CervoClaw
+// Package httpx provides small HTTP client/server helpers used across CalvoProxy
 // services.
 //
 // Extraction boundary: httpx may depend on requestmeta for standard headers,

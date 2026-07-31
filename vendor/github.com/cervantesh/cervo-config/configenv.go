@@ -18,12 +18,12 @@ func AliasByPrefix(name, primaryPrefix, aliasPrefix string) string {
 }
 
 // LegacyAlias returns a backward-compatible legacy env name.
-// Example: CERVOCLAW_FOO -> OPENCLAW_FOO.
+// Example: CALVOPROXY_FOO -> OPENCLAW_FOO.
 //
-// Deprecated: use AliasByPrefix(name, "CERVOCLAW_", "OPENCLAW_") in CervoClaw
+// Deprecated: use AliasByPrefix(name, "CALVOPROXY_", "OPENCLAW_") in CalvoProxy
 // projects, or pass explicit aliases to String and default helpers.
 func LegacyAlias(name string) string {
-	return AliasByPrefix(name, "CERVOCLAW_", "OPENCLAW_")
+	return AliasByPrefix(name, "CALVOPROXY_", "OPENCLAW_")
 }
 
 // String returns the first non-empty environment value from primary, then aliases.

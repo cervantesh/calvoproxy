@@ -1,4 +1,4 @@
-// Package calvoproxy provides CervoClaw/OpenClaw compatibility helpers.
+// Package calvoproxy provides CalvoProxy/OpenClaw compatibility helpers.
 package calvoproxy
 
 import (
@@ -9,14 +9,14 @@ import (
 )
 
 const (
-	PrimaryPrefix = "CERVOCLAW_"
+	PrimaryPrefix = "CALVOPROXY_"
 	LegacyPrefix  = "OPENCLAW_"
 
 	DefaultConfigFilePath = "/etc/calvoproxy/config.json"
 	DefaultSecretsDir     = "/var/secrets/calvoproxy"
 )
 
-// CloudLoaderOptions configures the CervoClaw cloud-ready loader preset.
+// CloudLoaderOptions configures the CalvoProxy cloud-ready loader preset.
 type CloudLoaderOptions struct {
 	// ConfigFilePath points to a flat JSON config file. Missing files are skipped.
 	ConfigFilePath string
@@ -28,17 +28,17 @@ type CloudLoaderOptions struct {
 	DisableEnv bool
 }
 
-// Alias returns the OPENCLAW_* alias for a CERVOCLAW_* key.
+// Alias returns the OPENCLAW_* alias for a CALVOPROXY_* key.
 func Alias(name string) string {
 	return configenv.AliasByPrefix(name, PrimaryPrefix, LegacyPrefix)
 }
 
-// NewLoader returns a config loader with CervoClaw legacy prefix support.
+// NewLoader returns a config loader with CalvoProxy legacy prefix support.
 func NewLoader() *configenv.Loader {
 	return configenv.New(Options())
 }
 
-// NewCloudLoader returns a CervoClaw loader for cloud and agentic runtimes.
+// NewCloudLoader returns a CalvoProxy loader for cloud and agentic runtimes.
 //
 // Precedence is explicit sources, environment, optional JSON config file, then
 // optional mounted secret directory. Missing default files/directories are
@@ -73,12 +73,12 @@ func NewCloudLoader(options CloudLoaderOptions) (*configenv.Loader, error) {
 	return configenv.New(loaderOptions), nil
 }
 
-// NewCervoCloudLoader returns the standard CervoClaw cloud loader preset.
+// NewCervoCloudLoader returns the standard CalvoProxy cloud loader preset.
 func NewCervoCloudLoader(options CloudLoaderOptions) (*configenv.Loader, error) {
 	return NewCloudLoader(options)
 }
 
-// Options returns configenv options for CervoClaw legacy prefix support.
+// Options returns configenv options for CalvoProxy legacy prefix support.
 func Options() configenv.Options {
 	return configenv.Options{
 		PrefixAliases: []configenv.PrefixAlias{
@@ -88,8 +88,8 @@ func Options() configenv.Options {
 	}
 }
 
-// String returns the configured CervoClaw value, checking OPENCLAW_* after the
-// primary CERVOCLAW_* key.
+// String returns the configured CalvoProxy value, checking OPENCLAW_* after the
+// primary CALVOPROXY_* key.
 func String(primary string, aliases ...string) string {
 	return NewLoader().String(primary, aliases...)
 }
@@ -102,7 +102,7 @@ func optionalJSONFileSource(path string) (configenv.Source, error) {
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("load CervoClaw config file %s: %w", path, err)
+	return nil, fmt.Errorf("load CalvoProxy config file %s: %w", path, err)
 }
 
 func optionalDirectorySource(path string) (configenv.Source, error) {
@@ -113,5 +113,5 @@ func optionalDirectorySource(path string) (configenv.Source, error) {
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("load CervoClaw secret directory %s: %w", path, err)
+	return nil, fmt.Errorf("load CalvoProxy secret directory %s: %w", path, err)
 }

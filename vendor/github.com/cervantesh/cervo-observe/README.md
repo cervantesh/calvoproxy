@@ -66,7 +66,7 @@ $env:OTEL_TRACES_SAMPLER_ARG = "0.25"
 
 Recommended deployment pattern:
 
-1. CervoClaw service exports OTLP HTTP.
+1. CalvoProxy service exports OTLP HTTP.
 2. A collector or managed backend handles Google authentication/export.
 3. Cloud Run service name, revision, and environment are provided through
    deployment metadata or environment variables.
@@ -76,7 +76,7 @@ Recommended deployment pattern:
 
 `InitWithConfig` installs W3C trace context and baggage propagators globally.
 HTTP middleware, event publishers, and tool-call clients should carry those
-headers or metadata across service boundaries so CervoClaw requests, events,
+headers or metadata across service boundaries so CalvoProxy requests, events,
 and agent actions remain correlated.
 
 ## Sensitive Values

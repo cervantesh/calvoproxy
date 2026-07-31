@@ -13,7 +13,7 @@ const (
 )
 
 func TenantIDFromEnv() string {
-	tenantID := strings.TrimSpace(calvoproxy.String("CERVOCLAW_TENANT_ID"))
+	tenantID := strings.TrimSpace(calvoproxy.String("CALVOPROXY_TENANT_ID"))
 	if tenantID == "" {
 		return "default"
 	}
