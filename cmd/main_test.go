@@ -27,6 +27,10 @@ func TestResolveAPIKey_PrefersAuthorizationThenEnv(t *testing.T) {
 }
 
 func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
+	// Deterministic 401: no env key to fall back to (the host running the suite
+	// may have OPENROUTER_API_KEY set, and a prior test may have left bindHost on
+	// loopback where the env-key fallback applies).
+	t.Setenv("OPENROUTER_API_KEY", "")
 	mux := newMux(router.NewRouterService(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))

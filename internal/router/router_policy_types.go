@@ -178,7 +178,10 @@ func limitsForOperation(operation cervorules.Operation, override Limits) Limits 
 	}
 	switch operation {
 	case capChatCompletion:
-		return Limits{AllowStream: true, AllowImages: true}
+		// OpenAI-compatible chat completions natively support streaming, image
+		// inputs AND tool calling together — allow all three (capability-aware
+		// routing then picks a model that can actually do what the request needs).
+		return Limits{AllowStream: true, AllowImages: true, AllowTools: true}
 	case capToolOrchestration:
 		return Limits{AllowTools: true}
 	default:

@@ -73,7 +73,7 @@ func TestDetermineProfile_Precedence(t *testing.T) {
 			for k, v := range tc.headers {
 				req.Header.Set(k, v)
 			}
-			got := svc.determineProfile(req, tc.messages, tc.forced)
+			got := svc.determineProfile(req, tc.messages, tc.forced, false)
 			if got != tc.expected {
 				t.Fatalf("expected profile %q, got %q", tc.expected, got)
 			}

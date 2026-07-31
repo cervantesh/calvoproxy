@@ -109,6 +109,7 @@ type RouterService struct {
 	breakerMu      sync.RWMutex
 	modelBreakers  map[string]*modelBreakerState
 	admission      *admissionControl
+	capabilities   *capabilityIndex
 }
 
 type HTTPDoer interface {

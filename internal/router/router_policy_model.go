@@ -59,6 +59,46 @@ type modelPolicyRuntime struct {
 	Strict   bool
 }
 
+// capabilityOverridesSchema captures ONLY the "Capabilities" key of a model
+// policy file — a separate targeted unmarshal, because policyConfig is a vendored
+// type alias that ignores unknown fields.
+type capabilityOverridesSchema struct {
+	Capabilities map[string][]string `json:"Capabilities"`
+}
+
+// loadCapabilityOverrides reads the manual per-model capability overrides from
+// the same model-policy file used for the chains, falling back to the embedded
+// default. Missing/invalid ⇒ empty map (auto-derive still applies).
+func loadCapabilityOverrides() map[string][]string {
+	parse := func(data []byte) map[string][]string {
+		var s capabilityOverridesSchema
+		if err := json.Unmarshal(data, &s); err != nil || s.Capabilities == nil {
+			return nil
+		}
+		return s.Capabilities
+	}
+	// Embedded curated caps are the baseline so an external file that omits
+	// Capabilities (or omits some models) never strips the known-good data.
+	merged := map[string][]string{}
+	if base := parse(defaultModelConfigJSON); base != nil {
+		for k, v := range base {
+			merged[k] = v
+		}
+	}
+	for _, path := range modelPolicyFileCandidates() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		// File overrides the embedded baseline per-model (file wins per key).
+		for k, v := range parse(data) {
+			merged[k] = v
+		}
+		break
+	}
+	return merged
+}
+
 func (s *RouterService) resolveProfileAlias(raw string) (string, bool) {
 	return s.activeModelPolicy().ResolveProfileAlias(raw)
 }

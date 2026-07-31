@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,7 +64,7 @@ func NewRouterService() *RouterService {
 	}
 	providerPolicy := modelRuntime.Config
 	modelPolicy := cervomodelpolicy.NewPolicy(providerPolicy)
-	return &RouterService{
+	svc := &RouterService{
 		// No blanket Timeout: streaming responses must not be capped by a
 		// whole-request deadline. Header arrival is bounded by the transport's
 		// ResponseHeaderTimeout; non-stream attempts get a per-attempt context
@@ -81,7 +82,12 @@ func NewRouterService() *RouterService {
 		policyMetadata: generatedPolicyMetadata(),
 		modelBreakers:  make(map[string]*modelBreakerState),
 		admission:      newAdmissionControl(),
+		capabilities:   newCapabilityIndex(loadCapabilityOverrides()),
 	}
+	// Best-effort background auto-derive of model capabilities from OpenRouter;
+	// the manual overrides above already cover the chain models synchronously.
+	svc.capabilities.startCapabilityRefresh(context.Background())
+	return svc
 }
 
 // --- Route dispatch ---
@@ -149,12 +155,12 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 			return
 		}
 		messagesRaw, _ := msgBody["messages"].([]interface{})
-		category := s.determineProfile(r, messagesRaw, provider)
+		hasTools := hasRequestTools(msgBody)
+		hasImages := hasImageContent(messagesRaw)
+		category := s.determineProfile(r, messagesRaw, provider, hasTools)
 		requestedModel, _ := msgBody["model"].(string)
 		category, requestedModel = s.resolveModelAlias(category, requestedModel)
 		stream, _ := msgBody["stream"].(bool)
-		hasTools := hasRequestTools(msgBody)
-		hasImages := hasImageContent(messagesRaw)
 		// Same policy facts as chat, so stream-deny / limits / metadata are
 		// enforced identically on the messages path.
 		policyFacts := requestPolicyFacts(msgBody, category, requestedModel, stream, hasTools, hasImages, int64(len(bodyBytes)))
@@ -167,7 +173,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 			return
 		}
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
-		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath)
+		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
 		return
 	}
 
@@ -179,12 +185,12 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 
 	messagesRaw, _ := reqBody["messages"].([]interface{})
-	category := s.determineProfile(r, messagesRaw, provider)
+	hasTools := hasRequestTools(reqBody)
+	hasImages := hasImageContent(messagesRaw)
+	category := s.determineProfile(r, messagesRaw, provider, hasTools)
 	requestedModel, _ := reqBody["model"].(string)
 	category, requestedModel = s.resolveModelAlias(category, requestedModel)
 	stream, _ := reqBody["stream"].(bool)
-	hasTools := hasRequestTools(reqBody)
-	hasImages := hasImageContent(messagesRaw)
 	policyFacts := requestPolicyFacts(reqBody, category, requestedModel, stream, hasTools, hasImages, int64(len(bodyBytes)))
 
 	decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
@@ -200,14 +206,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "")
+	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
 }
 
 // dispatchChain runs a request through the model chain: plan → filter (breaker) →
 // rank (score) → truncate → fallback. Shared by /chat/completions and /messages;
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
-func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string) {
+func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
 	// loop). Streaming requests get NO total deadline here — they are bounded by
@@ -220,10 +226,29 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 			defer cancel()
 		}
 	}
+	// Capability gate: if the request needs vision/tools and the caller pinned a
+	// specific model that can't do it, fail with a clear client error rather than
+	// routing to it and getting a silent breakage upstream.
+	if len(required) > 0 && requestedModel != "" && !strings.EqualFold(strings.TrimSpace(requestedModel), "auto") {
+		if !s.capabilities.satisfies(requestedModel, required) {
+			writeJSONError(w, http.StatusUnprocessableEntity, "requested model "+requestedModel+" does not support "+strings.Join(required, "+"))
+			return
+		}
+	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
 	if opPath != "" {
 		for i := range attemptsToTry {
 			attemptsToTry[i].Path = opPath
+		}
+	}
+	// Keep only models that support the required capabilities (fail-closed:
+	// unknown models don't qualify). Empties → capability rescue across profiles;
+	// still empty → a clear capability 503 (distinct from the breaker one).
+	if len(required) > 0 {
+		attemptsToTry = s.applyCapabilityFilter(attemptsToTry, category, opPath, required)
+		if len(attemptsToTry) == 0 {
+			writeJSONError(w, http.StatusServiceUnavailable, "No available model supports "+strings.Join(required, "+")+" for this request.")
+			return
 		}
 	}
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
@@ -271,7 +296,57 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	writeJSONError(w, statusCode, message)
 }
 
-func (s *RouterService) determineProfile(r *http.Request, messages []interface{}, forcedProfile string) string {
+// applyCapabilityFilter keeps only attempts whose model is KNOWN to support all
+// required caps. If that empties the chain (the selected profile has no capable
+// model), it falls back to a capability rescue across profiles.
+func (s *RouterService) applyCapabilityFilter(attempts []modelAttempt, category, opPath string, required []string) []modelAttempt {
+	capable := make([]modelAttempt, 0, len(attempts))
+	for _, a := range attempts {
+		if s.capabilities.satisfies(a.Model, required) {
+			capable = append(capable, a)
+		} else if !s.capabilities.known(a.Model) {
+			s.capabilities.warnUnknownOnce(a.Model)
+		}
+	}
+	if len(capable) > 0 {
+		return capable
+	}
+	return s.capabilityRescue(category, opPath, required)
+}
+
+// capabilityRescue builds a candidate list from the models in the CONFIGURED
+// profiles (the curated free chains) that satisfy the required caps — never the
+// full OpenRouter catalog, so rescue can't escape to paid/unvetted models.
+// Deduped by model, stable (sorted) order, stamped with the request's profile so
+// breaker/scoring/audit keep the caller's intent.
+func (s *RouterService) capabilityRescue(category, opPath string, required []string) []modelAttempt {
+	seen := map[string]bool{}
+	models := make([]string, 0)
+	for _, chain := range s.getPolicy().Profiles {
+		for _, m := range chain {
+			if seen[m] {
+				continue
+			}
+			seen[m] = true
+			if s.capabilities.satisfies(m, required) {
+				models = append(models, m)
+			}
+		}
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	sort.Strings(models)
+	provider := s.defaultPolicyProvider()
+	breaker := s.defaultBreakerPolicy()
+	out := make([]modelAttempt, 0, len(models))
+	for _, m := range models {
+		out = append(out, modelAttempt{Profile: category, Model: m, Provider: provider, BreakerPolicy: breaker, Path: opPath})
+	}
+	return out
+}
+
+func (s *RouterService) determineProfile(r *http.Request, messages []interface{}, forcedProfile string, hasTools bool) string {
 	selected := s.classifyPrompt(messages)
 	if alias, ok := s.resolveProfileAlias(forcedProfile); ok {
 		selected = alias
@@ -287,7 +362,11 @@ func (s *RouterService) determineProfile(r *http.Request, messages []interface{}
 		}
 	}
 	pol := s.getPolicy()
-	if s.hasImageContent(messages) {
+	// Auto-switch to the curated vision chain for image requests — but NOT when
+	// tools are also required, since the vision chain is vision-only and would
+	// leave no tool-capable model; in that case stay on the classified profile
+	// and let the capability filter/rescue find a model that does both.
+	if !hasTools && s.hasImageContent(messages) {
 		if _, ok := pol.Profiles["vision"]; ok {
 			selected = "vision"
 		}
@@ -363,5 +442,10 @@ func (s *RouterService) ReloadModelPolicy() error {
 	s.modelWarnings = runtime.Warnings
 	s.modelStrict = runtime.Strict
 	s.policyMu.Unlock()
+	// Reload capability overrides in the same pass, so an edit to the chains and
+	// their per-model capabilities stays consistent (auto-derived data is kept).
+	if s.capabilities != nil {
+		s.capabilities.setOverrides(loadCapabilityOverrides())
+	}
 	return nil
 }
