@@ -108,6 +108,7 @@ type RouterService struct {
 	policyMetadata cervoruntime.PolicyMetadata
 	breakerMu      sync.RWMutex
 	modelBreakers  map[string]*modelBreakerState
+	admission      *admissionControl
 }
 
 type HTTPDoer interface {

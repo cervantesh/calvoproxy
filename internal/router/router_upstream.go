@@ -65,7 +65,8 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		attErr := classifyHTTPError(resp.StatusCode, string(respBytes))
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
-			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
+			// A 429/503 may carry Retry-After — respect it as a minimum cooldown.
+			s.recordFailure(attempt, attErr.StatusCode, attErr.Message, parseRetryAfter(resp.Header.Get("Retry-After")))
 		}
 		return attErr
 	}

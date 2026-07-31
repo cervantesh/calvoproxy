@@ -91,7 +91,11 @@ func (s *RouterService) tryStartAttempt(attempt modelAttempt) bool {
 	return true
 }
 
-func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reason string) {
+// recordFailure counts a failure and opens the circuit at threshold. An optional
+// retryAfter (from an upstream 429/503 Retry-After header) extends the cooldown
+// so the breaker respects the server's requested backoff rather than skipping a
+// still-rate-limited model back in early.
+func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reason string, retryAfter ...time.Duration) {
 	s.breakerMu.Lock()
 	defer s.breakerMu.Unlock()
 
@@ -121,8 +125,17 @@ func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reas
 	if attempt.BreakerPolicy.Cooldown > 0 {
 		cooldown = attempt.BreakerPolicy.Cooldown
 	}
+	// Honour an upstream Retry-After that asks for a longer wait than our cooldown.
+	if len(retryAfter) > 0 && retryAfter[0] > cooldown {
+		cooldown = retryAfter[0]
+	}
 	if state.ConsecutiveFailures >= threshold {
-		state.OpenUntil = time.Now().Add(cooldown)
+		// Never SHORTEN an already-open window: a later failure with the default
+		// cooldown must not undo a long Retry-After that a prior 429 set.
+		until := time.Now().Add(cooldown)
+		if until.After(state.OpenUntil) {
+			state.OpenUntil = until
+		}
 		slog.Warn("[CalvoProxy] 🔴 Circuit OPEN", slog.String("breaker_key", breakerKey), slog.String("open_until", state.OpenUntil.Format(time.RFC3339)))
 	}
 }
