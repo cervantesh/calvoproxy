@@ -111,9 +111,13 @@ func (s *RouterService) penalizeScore(attempt modelAttempt, statusCode int) {
 // scoreForAttempt returns the current (time-decayed) reliability score for a
 // model; unseen models get scoreInitial. Takes the read lock.
 func (s *RouterService) scoreForAttempt(attempt modelAttempt) float64 {
+	// Hold the read lock for the whole read: the state pointer AND the score
+	// fields it points at must be read under the lock, or a concurrent
+	// recordSuccess/penalizeScore (which write those fields under the write lock)
+	// races us. Releasing before dereferencing was a latent data race.
 	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
 	state := s.modelBreakers[s.breakerKey(attempt)]
-	s.breakerMu.RUnlock()
 	if state == nil || state.ScoreUpdatedAt.IsZero() {
 		return scoreInitial
 	}

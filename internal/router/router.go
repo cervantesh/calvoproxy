@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,7 @@ func NewRouterService() *RouterService {
 		runtimeConfig:  runtimeConfig,
 		policyMetadata: generatedPolicyMetadata(),
 		modelBreakers:  make(map[string]*modelBreakerState),
+		admission:      newAdmissionControl(),
 	}
 }
 
@@ -101,6 +103,17 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Request body too large or unreadable", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Admission control: cap concurrent in-flight requests (PROXY_MAX_CONCURRENT)
+	// so a burst waits briefly instead of stampeding the upstream past its rate
+	// limits and collapsing the whole chain to 503. Disabled by default.
+	if release, ok := s.admission.acquire(ctx); ok {
+		defer release()
+	} else {
+		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
+		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
 		return
 	}
 

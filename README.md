@@ -46,6 +46,9 @@ before exit.
 | `PROXY_TOTAL_TIMEOUT_SECONDS` | `120` | Overall wall-clock budget across the fallback chain (non-streaming) |
 | `PROXY_STREAM_IDLE_TIMEOUT` | `120` | Max gap (seconds) between streamed chunks before a stalled stream is aborted |
 | `PROXY_STREAM_MAX_DURATION` | `1800` | Absolute cap (seconds) on a single stream's lifetime; `0` disables the backstop |
+| `PROXY_MAX_IDLE_CONNS_PER_HOST` | `128` | Idle-connection pool size per upstream host. Raising it above the stdlib default of 2 avoids connection churn under concurrency |
+| `PROXY_MAX_CONCURRENT` | off | Cap on concurrent in-flight requests. A burst over the cap waits, then gets `503 Retry-After`; keeps a spike from stampeding the upstream past its rate limits |
+| `PROXY_ADMISSION_TIMEOUT_SECONDS` | `5` | How long an over-cap request waits for a slot before `503` (only when `PROXY_MAX_CONCURRENT` is set) |
 | `PROXY_SCORING_ENABLED` | `true` | Reorder the chain by per-model reliability score (see below) |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
 | `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | How long an open circuit skips a model |
@@ -89,6 +92,38 @@ Two layers keep flaky models out of the way:
   removed, and **recovers toward neutral over ~5 min** so it gets retried later.
   Scores are visible under `circuits[].score` in `/health`. Set
   `PROXY_SCORING_ENABLED=false` to keep the static chain order.
+
+### Capacity & tuning
+
+CalvoProxy itself is not the bottleneck — a load test (200 workers, 25k requests
+against a fast upstream) sustained **~7,500 req/s at p99 ~156 ms with zero
+transport errors**, and `/health` stayed responsive throughout. The practical
+limit for real workloads is the **upstream's** rate limit: OpenRouter's free tier
+rate-limits well before the proxy breaks a sweat, so a burst of ~30 concurrent
+free-tier requests mostly degrades to a clean `503` (via the fallback chain,
+honoring upstream `Retry-After`). For Hermes/Claude-Code-style low-concurrency use
+you have enormous headroom.
+
+Tuning under load:
+
+- **`PROXY_MAX_IDLE_CONNS_PER_HOST`** (default 128) — the single most important
+  knob at high concurrency; too low means connection churn (port/thread
+  exhaustion), too high wastes sockets.
+- **`PROXY_MAX_CONCURRENT`** — set it to smooth bursts: instead of stampeding the
+  upstream (and collapsing the chain to 503s), excess requests wait up to
+  `PROXY_ADMISSION_TIMEOUT_SECONDS` then get a `503 Retry-After`.
+- Breaker/timeout knobs (`PROXY_BREAKER_*`, `PROXY_REQUEST_TIMEOUT_SECONDS`,
+  `PROXY_TOTAL_TIMEOUT_SECONDS`) shape how aggressively a flaky upstream is shed.
+
+**Alerting** — the `/metrics` counters map to the usual SLO alerts: page on a
+sustained rise in `calvoproxy_requests_by_status{class="5xx"}` relative to
+`calvoproxy_requests_total` (chain exhaustion / upstream down), on
+`calvoproxy_open_circuits > 0` persisting (models stuck open), and on the derived
+average latency (`calvoproxy_request_latency_seconds_sum / _count`) crossing your
+budget. `calvoproxy_build_info{version=...}` labels the running build.
+
+Reproduce or extend these measurements with the harness in
+[`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
 ### On-demand operation
 
