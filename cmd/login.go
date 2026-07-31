@@ -149,19 +149,52 @@ func writeCloseTab(w http.ResponseWriter, msg string) {
 	fmt.Fprintf(w, closeTabHTML, msg)
 }
 
-// startCallbackServer binds a single-use loopback listener and returns the chosen
-// port and a channel that fires once with the first valid callback (or an error).
-func startCallbackServer(ctx context.Context, expectedState string) (int, <-chan callbackResult, func(), error) {
+// requireState reports whether a callback MUST carry a matching state parameter
+// (PROXY_OAUTH_REQUIRE_STATE). Default false, because a provider that doesn't
+// echo state must still be able to complete a login; the secret callback path
+// below already gives provider-independent protection. `calvoproxy login` prints
+// whether the provider echoed state, so this can be enabled with evidence.
+func requireState() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PROXY_OAUTH_REQUIRE_STATE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// startCallbackServer binds a single-use loopback listener on a SECRET path and
+// returns the full callback URL plus a channel that fires once with the first
+// valid callback.
+//
+// The path carries 32 bytes of crypto/rand and ONLY that exact path is served —
+// every other path 404s without touching the delivery. This is the primary
+// anti-injection control, and unlike the OAuth `state` parameter it does not
+// depend on the provider echoing anything back.
+//
+// Scope, honestly: it defeats a local process that can only open TCP to the
+// loopback port (it cannot guess the path, so it can neither inject its own
+// authorization code — login-CSRF / account fixation — nor burn the single
+// delivery). It does NOT defeat a same-user attacker who can read the auth URL
+// itself out of browser history or the browser launcher's command line, since the
+// secret travels in that URL — exactly as `state` would. Defending against that
+// requires OS-level isolation, not a longer token.
+func startCallbackServer(ctx context.Context, expectedState string) (string, <-chan callbackResult, func(), error) {
+	secret, err := randomURLToken(32)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return 0, nil, nil, err
+		return "", nil, nil, err
 	}
 	ch := make(chan callbackResult, 1)
 	var once sync.Once
 	deliver := func(r callbackResult) { once.Do(func() { ch <- r }) }
 
+	callbackPath := "/callback/" + secret
 	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
@@ -193,15 +226,25 @@ func startCallbackServer(ctx context.Context, expectedState string) (int, <-chan
 			writeCloseTab(w, "Missing authorization code.")
 			return // ignored: keep waiting for a well-formed callback (or timeout)
 		}
-		// A code with no state is still accepted (the provider may not echo state;
-		// PKCE plus the single-use loopback listener protect the exchange itself),
-		// but it is logged so an unexpected flow is visible.
 		if !stateOK {
-			fmt.Println("Note: the provider did not echo the CSRF state parameter; relying on PKCE.")
+			// The provider did not echo state. Strict mode refuses; otherwise we
+			// proceed — the secret path already bound this callback to our flow,
+			// and PKCE protects the exchange — but say so, so the operator can
+			// turn on strict mode once they've seen their provider echo it.
+			if requireState() {
+				writeCloseTab(w, "State parameter required.")
+				deliver(callbackResult{err: errors.New("callback carried no matching state and PROXY_OAUTH_REQUIRE_STATE is set")})
+				return
+			}
+			fmt.Println("Note: the provider did not echo the CSRF state parameter; relying on the secret callback path + PKCE.")
+		} else {
+			fmt.Println("Note: the provider echoed the CSRF state parameter — you can set PROXY_OAUTH_REQUIRE_STATE=true to enforce it.")
 		}
 		writeCloseTab(w, "Login complete ✓")
 		deliver(callbackResult{code: code})
 	})
+	// Anything that is not the exact secret path is a stray/hostile request: 404
+	// it and never touch the single-shot delivery.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
@@ -211,7 +254,8 @@ func startCallbackServer(ctx context.Context, expectedState string) (int, <-chan
 		<-ctx.Done()
 		stop()
 	}()
-	return ln.Addr().(*net.TCPAddr).Port, ch, stop, nil
+	callbackURL := fmt.Sprintf("http://127.0.0.1:%d%s", ln.Addr().(*net.TCPAddr).Port, callbackPath)
+	return callbackURL, ch, stop, nil
 }
 
 // openBrowser best-effort opens a URL. Returns false on failure (caller prints the
@@ -256,14 +300,13 @@ func runLogin(args []string) int {
 		return 1
 	}
 
-	port, ch, stop, err := startCallbackServer(ctx, state)
+	callbackURL, ch, stop, err := startCallbackServer(ctx, state)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start callback server:", err)
 		return 1
 	}
 	defer stop()
 
-	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 	authURL := openrouterAuthURL() + "?" + url.Values{
 		"callback_url":          {callbackURL},
 		"code_challenge":        {pkceChallenge(verifier)},
@@ -296,6 +339,8 @@ func runLogin(args []string) int {
 		return 0
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "login timed out — no authorization received.")
+		fmt.Fprintln(os.Stderr, "If you DID authorize in the browser, the provider may not have preserved the")
+		fmt.Fprintln(os.Stderr, "callback URL's path. Please report it — that path carries this login's secret.")
 		return 1
 	}
 }
