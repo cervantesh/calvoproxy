@@ -1,5 +1,7 @@
 # CalvoProxy
 
+*English · [Español](README.es.md)*
+
 Smart OpenAI-compatible proxy that fronts free OpenRouter models behind one
 endpoint. It applies deterministic request policy, selects a model chain per
 request, and adds gateway concerns — timeouts, retries, circuit breaking,
