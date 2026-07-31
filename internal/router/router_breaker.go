@@ -140,6 +140,30 @@ func (s *RouterService) recordFailure(attempt modelAttempt, statusCode int, reas
 	}
 }
 
+// resolveProbe closes the breaker bookkeeping for an attempt that has reached a
+// good response (200 + headers) WITHOUT scoring it as a completed success. It is
+// what a streaming attempt calls at header time: the model clearly answered, so
+// the circuit and any half-open probe claim must be released immediately (leaving
+// them held for the whole stream would wedge single-flight recovery and let a
+// second probe stampede once the TTL lapsed). The reliability score is only
+// updated later, when the stream actually ends — cleanly or not.
+func (s *RouterService) resolveProbe(attempt modelAttempt) {
+	s.breakerMu.Lock()
+	defer s.breakerMu.Unlock()
+	breakerKey := s.breakerKey(attempt)
+	state := s.modelBreakers[breakerKey]
+	if state == nil {
+		state = &modelBreakerState{}
+		s.modelBreakers[breakerKey] = state
+	}
+	state.ConsecutiveFailures = 0
+	state.OpenUntil = time.Time{}
+	state.ProbeUntil = time.Time{}
+	state.LastFailureCode = 0
+	state.LastFailureReason = ""
+	state.LastFailureAt = time.Time{}
+}
+
 func (s *RouterService) recordSuccess(attempt modelAttempt) {
 	s.breakerMu.Lock()
 	defer s.breakerMu.Unlock()
@@ -190,6 +214,28 @@ func (s *RouterService) allKnownAttempts() []modelAttempt {
 	return attempts
 }
 
+// retryAfterForAttempts returns how long until the SOONEST of these models leaves
+// its cooldown, so an "all models cooling down" 503 can carry a Retry-After and
+// clients back off instead of stampeding. Returns 0 when nothing is open (the
+// chain was empty for another reason) — callers then omit the header.
+func (s *RouterService) retryAfterForAttempts(attempts []modelAttempt) time.Duration {
+	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+	now := time.Now()
+	var soonest time.Duration
+	for _, attempt := range attempts {
+		state := s.modelBreakers[s.breakerKey(attempt)]
+		if state == nil || !state.OpenUntil.After(now) {
+			continue // this model isn't the reason we're empty
+		}
+		d := state.OpenUntil.Sub(now)
+		if soonest == 0 || d < soonest {
+			soonest = d
+		}
+	}
+	return soonest
+}
+
 func (s *RouterService) filterAvailableAttempts(attempts []modelAttempt) []modelAttempt {
 	available := make([]modelAttempt, 0, len(attempts))
 	for _, attempt := range attempts {
@@ -198,6 +244,56 @@ func (s *RouterService) filterAvailableAttempts(attempts []modelAttempt) []model
 		}
 	}
 	return available
+}
+
+// healthFacts returns ONLY the three fields the policy engine actually consumes
+// (status/ready/open-circuit count), computed under a single read lock with no
+// sorting or per-circuit allocation.
+//
+// The policy path runs on every request; calling the full Health() there meant
+// building and sorting a snapshot of every circuit — holding breakerMu (and thus
+// delaying recordSuccess/recordFailure writers) purely for observability data
+// that was then thrown away. Full Health() remains for /health and /metrics.
+func (s *RouterService) healthFacts() ProxyHealth {
+	s.breakerMu.RLock()
+	now := time.Now()
+	openCount := 0
+	for _, state := range s.modelBreakers {
+		if state.OpenUntil.After(now) {
+			openCount++
+		}
+	}
+	anyAvailable := false
+	for _, attempt := range s.allKnownAttempts() {
+		if s.isModelAvailableLocked(attempt) {
+			anyAvailable = true
+			break
+		}
+	}
+	s.breakerMu.RUnlock()
+
+	status := "ok"
+	ready := true
+	if openCount > 0 {
+		status = "degraded"
+	}
+	if !anyAvailable {
+		ready, status = false, "unavailable"
+	}
+	if strict, warnings := s.strictAndWarnings(); strict && len(warnings) > 0 {
+		ready, status = false, "unavailable"
+	}
+	return ProxyHealth{Status: status, Ready: ready, OpenCircuitCount: openCount}
+}
+
+// ambientKeyConfigured reports whether an upstream key is available from any
+// ambient source. The binary injects AmbientKeyPresent so a key stored by
+// `calvoproxy login` counts too; without it we can only see the env var.
+func (s *RouterService) ambientKeyConfigured() bool {
+	if s.AmbientKeyPresent != nil {
+		return s.AmbientKeyPresent()
+	}
+	return envValue("OPENROUTER_API_KEY") != ""
 }
 
 // Health returns a ProxyHealth snapshot of all circuit breakers.
@@ -249,7 +345,9 @@ func (s *RouterService) Health() ProxyHealth {
 		ready = false
 		status = "unavailable"
 	}
-	if s.modelStrict && len(s.modelWarnings) > 0 {
+	// Read the reload-managed validation state under policyMu (lock order stays
+	// breakerMu → policyMu, matching getPolicy() calls elsewhere in this method).
+	if strict, warnings := s.strictAndWarnings(); strict && len(warnings) > 0 {
 		ready = false
 		status = "unavailable"
 	}
@@ -259,7 +357,7 @@ func (s *RouterService) Health() ProxyHealth {
 		Status:             status,
 		Ready:              ready,
 		OpenCircuitCount:   openCount,
-		ConfiguredAPIKey:   envValue("OPENROUTER_API_KEY") != "",
+		ConfiguredAPIKey:   s.ambientKeyConfigured(),
 		DefaultExecutor:    string(s.defaultPolicyProvider()),
 		Profiles:           profileNames(s.getPolicy().Profiles),
 		FailureThreshold:   s.config.FailureThreshold,
@@ -318,6 +416,10 @@ type GlobalBreakerTransport struct {
 type hostBreakerState struct {
 	failures  int
 	openUntil time.Time
+	// probeUntil single-flights the half-open recovery probe, mirroring the
+	// per-model breaker: after the cooldown elapses exactly one request probes
+	// the host instead of every concurrent caller stampeding it.
+	probeUntil time.Time
 }
 
 func (t *GlobalBreakerTransport) hostState(host string) *hostBreakerState {
@@ -337,11 +439,27 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 	t.mu.Lock()
 	hb := t.hostState(host)
-	open := time.Now().Before(hb.openUntil)
-	t.mu.Unlock()
-	if open {
+	now := time.Now()
+	switch {
+	case now.Before(hb.openUntil):
+		t.mu.Unlock()
 		return nil, fmt.Errorf("circuit breaker open for host %s: temporarily unreachable", host)
+	case !hb.openUntil.IsZero():
+		// Half-open: cooldown elapsed. Let exactly one probe through; everyone
+		// else keeps failing fast until it resolves or the probe TTL lapses.
+		if now.Before(hb.probeUntil) {
+			t.mu.Unlock()
+			return nil, fmt.Errorf("circuit breaker recovering for host %s: probe in flight", host)
+		}
+		// The probe TTL must outlast a slow probe request, or it lapses while the
+		// probe is still in flight and a second one stampedes the recovering host.
+		ttl := t.Cooldown
+		if hdr := 60 * time.Second; ttl < hdr {
+			ttl = hdr
+		}
+		hb.probeUntil = now.Add(ttl)
 	}
+	t.mu.Unlock()
 
 	base := t.Base
 	if base == nil {
@@ -353,6 +471,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	hb = t.hostState(host)
+	hb.probeUntil = time.Time{} // this attempt resolved any in-flight probe
 
 	if err != nil {
 		hb.failures++
@@ -363,13 +482,23 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 		return resp, err
 	}
 
-	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+	switch {
+	case resp.StatusCode == http.StatusBadGateway ||
+		resp.StatusCode == http.StatusServiceUnavailable ||
+		resp.StatusCode == http.StatusGatewayTimeout:
+		// Genuine host-level faults.
 		hb.failures++
 		if hb.failures >= t.FailureThreshold {
 			hb.openUntil = time.Now().Add(t.Cooldown)
 			slog.Error("[CalvoProxy] 🚨 HOST CIRCUIT OPEN: host is returning errors", slog.String("host", host), slog.Int("http_code", resp.StatusCode), slog.String("open_until", hb.openUntil.Format(time.RFC3339)))
 		}
-	} else if resp.StatusCode < 500 {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// Rate limiting is NEUTRAL at the host level: it is a per-model/per-key
+		// quota signal, already handled by the model breaker (with Retry-After).
+		// Counting it here would open the circuit for EVERY model on the host;
+		// treating it as success would erase real accumulated host failures.
+	case resp.StatusCode < 500:
+		// A real answer from the host: it is healthy again.
 		hb.failures = 0
 		hb.openUntil = time.Time{}
 	}

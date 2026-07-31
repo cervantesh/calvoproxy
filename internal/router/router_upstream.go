@@ -79,9 +79,31 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	// through with flushing so tokens arrive incrementally. We can't fall back
 	// once bytes are on the wire, so record success on the 200 and stream.
 	if isEventStream(resp) {
-		s.recordSuccess(attempt)
+		// The model answered, so release the circuit / half-open probe now — but
+		// do NOT score it a success yet: the stream still has to actually deliver.
+		s.resolveProbe(attempt)
 		streamProxyResponse(w, resp)
-		streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
+		outcome := streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
+		s.recordStreamOutcome(outcome)
+		switch {
+		case outcome == streamCompleted:
+			s.recordSuccess(attempt) // clean EOF: a real success
+		case outcome.upstreamFault():
+			// Stalled or died mid-stream — the model's fault. Penalise the score
+			// and count it toward the breaker so a broken model stops being first.
+			attErr := &attemptError{StatusCode: http.StatusBadGateway, Message: "stream ended abnormally: " + outcome.String()}
+			s.penalizeScore(attempt, attErr.StatusCode)
+			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
+			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ stream ended abnormally",
+				slog.String("model", attempt.Model), slog.String("reason", outcome.String()))
+		default:
+			// Client went away, or our own max-duration backstop fired: not the
+			// model's fault, so no breaker/score penalty.
+			slog.InfoContext(ctx, "[CalvoProxy] stream ended without completing",
+				slog.String("model", attempt.Model), slog.String("reason", outcome.String()))
+		}
+		// Never return an error after headers/bytes are on the wire: the fallback
+		// chain cannot retry a response the client is already reading.
 		return nil
 	}
 

@@ -37,7 +37,10 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 		req.Metadata["body_bytes"] = strconv.Itoa(len(body))
 	}
 	requested := requestedPolicyLimits(facts, body, requestedLimits...)
-	health := s.Health()
+	// Cheap facts only: the policy engine consumes just status/ready/open-count.
+	// The full Health() snapshot (sorted per-circuit detail) is for /health and
+	// /metrics — building it per request held breakerMu and delayed writers.
+	health := s.healthFacts()
 	derived := derivePolicyFacts(facts, policyRequestFacts{Metadata: req.Metadata, RequestedLimits: requested}, health)
 	if health.Status != "" {
 		req.Metadata["proxy_status"] = health.Status

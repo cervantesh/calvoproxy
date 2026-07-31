@@ -86,8 +86,20 @@ func NewRouterService() *RouterService {
 	}
 	// Best-effort background auto-derive of model capabilities from OpenRouter;
 	// the manual overrides above already cover the chain models synchronously.
-	svc.capabilities.startCapabilityRefresh(context.Background())
+	// The refresh goroutine is tied to a service-scoped context so Close() stops
+	// it (it used to run off context.Background(), i.e. forever — each new
+	// RouterService leaked a ticker).
+	refreshCtx, cancelRefresh := context.WithCancel(context.Background())
+	svc.cancelRefresh = cancelRefresh
+	svc.capabilities.startCapabilityRefresh(refreshCtx)
 	return svc
+}
+
+// Close releases the service's background workers. Safe to call more than once.
+func (s *RouterService) Close() {
+	if s.cancelRefresh != nil {
+		s.cancelRefresh()
+	}
 }
 
 // --- Route dispatch ---
@@ -118,6 +130,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if release, ok := s.admission.acquire(ctx); ok {
 		defer release()
 	} else {
+		s.counters.admissionRejected.Add(1)
 		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
 		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
 		return
@@ -231,6 +244,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	// routing to it and getting a silent breakage upstream.
 	if len(required) > 0 && requestedModel != "" && !strings.EqualFold(strings.TrimSpace(requestedModel), "auto") {
 		if !s.capabilities.satisfies(requestedModel, required) {
+			s.counters.capabilityRefused.Add(1)
 			writeJSONError(w, http.StatusUnprocessableEntity, "requested model "+requestedModel+" does not support "+strings.Join(required, "+"))
 			return
 		}
@@ -247,6 +261,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if len(required) > 0 {
 		attemptsToTry = s.applyCapabilityFilter(attemptsToTry, category, opPath, required)
 		if len(attemptsToTry) == 0 {
+			s.counters.capabilityRefused.Add(1)
 			writeJSONError(w, http.StatusServiceUnavailable, "No available model supports "+strings.Join(required, "+")+" for this request.")
 			return
 		}
@@ -271,6 +286,16 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	)
 
 	if len(availableModels) == 0 {
+		// Tell the client WHEN to come back: the soonest cooldown expiry across
+		// the planned chain. Without this, clients retry immediately and amplify
+		// the outage they're already suffering.
+		if wait := s.retryAfterForAttempts(attemptsToTry); wait > 0 {
+			secs := int(wait.Seconds())
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		}
 		writeJSONError(w, http.StatusServiceUnavailable, "All models are temporarily rate-limited or unhealthy. Cooling down before retry.")
 		return
 	}

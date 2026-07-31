@@ -30,7 +30,10 @@ func applyProxyHeaders(req *http.Request, apiKey string) {
 }
 
 func writeProxyResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
-	copyHeaders(w.Header(), resp.Header, "content-length")
+	// Drop Content-Encoding along with Content-Length: `body` is the already
+	// decoded (and possibly transformed) payload, so forwarding an upstream
+	// encoding header would tell the client to decompress plain bytes.
+	copyHeaders(w.Header(), resp.Header, "content-length", "content-encoding")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)

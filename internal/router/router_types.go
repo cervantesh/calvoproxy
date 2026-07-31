@@ -110,6 +110,13 @@ type RouterService struct {
 	modelBreakers  map[string]*modelBreakerState
 	admission      *admissionControl
 	capabilities   *capabilityIndex
+	counters       routerCounters
+	cancelRefresh  context.CancelFunc
+	// AmbientKeyPresent, when set by the binary, reports whether an ambient
+	// upstream key is configured from ANY source (env or the `calvoproxy login`
+	// file). The router only knows about the env var, so /health used to claim no
+	// key was configured for a login-file user.
+	AmbientKeyPresent func() bool
 }
 
 type HTTPDoer interface {

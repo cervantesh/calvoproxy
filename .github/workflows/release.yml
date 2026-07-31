@@ -41,17 +41,36 @@ jobs:
           build linux amd64
           build linux arm64
           (cd dist && sha256sum * > SHA256SUMS.txt)
-      - name: Sign checksums (Ed25519)
+      - name: Sign checksums (Ed25519) and verify against the embedded key
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          # Set repo variable ALLOW_UNSIGNED_RELEASE=true to deliberately cut an
+          # unsigned release (only valid when no key is embedded — see below).
+          ALLOW_UNSIGNED_RELEASE: ${{ vars.ALLOW_UNSIGNED_RELEASE }}
         run: |
           set -euo pipefail
+          # Do the shipped binaries REQUIRE a signature? They do whenever
+          # internal/releasekey.Public is non-empty. If so, publishing an
+          # unsigned release would fail-close every `calvoproxy update`, so we
+          # fail the job loudly here instead of shipping a broken release.
+          # No `|| true`: if this fails we must NOT fall through to the
+          # unsigned path while the binaries still require a signature.
+          KEY_EMBEDDED="$(go run ./tools/keystatus)"
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
-            echo "RELEASE_SIGNING_KEY not set — skipping release signing (checksums only)."
+            if [ "$KEY_EMBEDDED" = "embedded" ] && [ "${ALLOW_UNSIGNED_RELEASE:-}" != "true" ]; then
+              echo "::error::RELEASE_SIGNING_KEY secret is missing but a release public key is embedded."
+              echo "::error::Publishing unsigned would make every 'calvoproxy update' refuse this release (fail-closed)."
+              echo "::error::Add the RELEASE_SIGNING_KEY secret, or set repo variable ALLOW_UNSIGNED_RELEASE=true to override."
+              exit 1
+            fi
+            echo "No signing key and none embedded — publishing checksums only."
             exit 0
           fi
           go run ./tools/sign dist/SHA256SUMS.txt > dist/SHA256SUMS.txt.sig
-          echo "Signed dist/SHA256SUMS.txt -> dist/SHA256SUMS.txt.sig"
+          # Prove the signature verifies with the SAME key the binaries embed,
+          # so a mismatched keypair fails CI rather than the user's update.
+          go run ./tools/verify dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig
+          echo "Signed and verified dist/SHA256SUMS.txt -> dist/SHA256SUMS.txt.sig"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

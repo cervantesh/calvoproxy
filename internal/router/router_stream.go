@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -16,9 +17,54 @@ func isEventStream(resp *http.Response) bool {
 	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
 }
 
+// streamOutcome says how a streamed response ended, so the caller can score the
+// model honestly. Before this existed, a stream was recorded as a success the
+// moment its 200 headers arrived — a stalled or truncated stream still counted as
+// healthy, which is exactly the failure mode that matters most for long agent
+// streams.
+type streamOutcome int
+
+const (
+	// streamCompleted: upstream signalled a clean end of body (EOF).
+	streamCompleted streamOutcome = iota
+	// streamStalled: no bytes for the idle window — an upstream fault.
+	streamStalled
+	// streamUpstreamError: a non-EOF read error mid-stream — an upstream fault.
+	streamUpstreamError
+	// streamMaxReached: our own absolute lifetime backstop fired. Local policy,
+	// not necessarily the model's fault.
+	streamMaxReached
+	// streamClientGone: client disconnected/cancelled, or writing to it failed.
+	// Never the model's fault.
+	streamClientGone
+)
+
+// upstreamFault reports whether the outcome indicates the MODEL/upstream misbehaved
+// (as opposed to the client going away or our own backstop firing).
+func (o streamOutcome) upstreamFault() bool {
+	return o == streamStalled || o == streamUpstreamError
+}
+
+func (o streamOutcome) String() string {
+	switch o {
+	case streamCompleted:
+		return "completed"
+	case streamStalled:
+		return "stalled (idle timeout)"
+	case streamUpstreamError:
+		return "upstream read error"
+	case streamMaxReached:
+		return "max duration reached"
+	case streamClientGone:
+		return "client disconnected"
+	default:
+		return "unknown"
+	}
+}
+
 // streamCopy pipes an upstream body to the client, flushing after every chunk so
 // tokens reach the caller as they arrive (real streaming) instead of being
-// buffered until the end.
+// buffered until the end. It returns HOW the stream ended (see streamOutcome).
 //
 // It replaces the old whole-request client timeout (which silently cut long but
 // live streams) with two bounds that do not penalise a healthy long stream:
@@ -29,7 +75,7 @@ func isEventStream(resp *http.Response) bool {
 //
 // Reads run in a dedicated goroutine so the select can honour the timers and the
 // request context; on any exit the body is closed, which unblocks that read.
-func streamCopy(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, idle, max time.Duration) {
+func streamCopy(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, idle, max time.Duration) streamOutcome {
 	// Self-contained: close the body on EVERY exit path (idle/max/ctx/write-error
 	// close it explicitly to unblock the reader immediately; this defer covers the
 	// clean-EOF path too). A double close on an http body is harmless.
@@ -79,13 +125,15 @@ func streamCopy(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, 
 		maxC = maxTimer.C
 	}
 
+	// The outcome is decided by WHICH select case wins — not by inspecting
+	// ctx.Err() afterwards, which races with a concurrent client disconnect.
 	for {
 		select {
 		case c := <-chunks:
 			if len(c.data) > 0 {
 				if _, werr := w.Write(c.data); werr != nil {
 					_ = body.Close()
-					return
+					return streamClientGone // can't write to the client anymore
 				}
 				if flusher != nil {
 					flusher.Flush()
@@ -99,17 +147,55 @@ func streamCopy(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, 
 				idleTimer.Reset(idle)
 			}
 			if c.err != nil {
-				return // normal EOF or upstream error: stream ended
+				if errors.Is(c.err, io.EOF) {
+					return streamCompleted // clean end of stream
+				}
+				// A cancelled request tears down the upstream read too, so this
+				// error can be the CLIENT leaving rather than the model failing.
+				// Both cases race in the select; check the context before blaming
+				// the model, or a user hitting Ctrl-C would open its circuit.
+				if ctx.Err() != nil {
+					return streamClientGone
+				}
+				return streamUpstreamError // upstream died mid-stream
 			}
 		case <-idleTimer.C:
+			// The idle timer and a just-arrived chunk can fire together; prefer
+			// real data so a healthy stream is never mislabelled as stalled.
+			select {
+			case c := <-chunks:
+				if len(c.data) > 0 {
+					if _, werr := w.Write(c.data); werr != nil {
+						_ = body.Close()
+						return streamClientGone
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					idleTimer.Reset(idle)
+					continue
+				}
+				if c.err != nil {
+					if errors.Is(c.err, io.EOF) {
+						return streamCompleted
+					}
+					if ctx.Err() != nil {
+						return streamClientGone
+					}
+					return streamUpstreamError
+				}
+				idleTimer.Reset(idle)
+				continue
+			default:
+			}
 			_ = body.Close() // stalled upstream: unblock the reader and stop
-			return
+			return streamStalled
 		case <-maxC:
-			_ = body.Close() // absolute lifetime backstop
-			return
+			_ = body.Close() // absolute lifetime backstop (our policy, not theirs)
+			return streamMaxReached
 		case <-ctx.Done():
 			_ = body.Close() // client disconnect / cancellation
-			return
+			return streamClientGone
 		}
 	}
 }

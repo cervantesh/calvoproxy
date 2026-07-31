@@ -65,8 +65,10 @@ en vuelo antes de salir.
 
 Las métricas Prometheus están en **`/metrics`** (score por-modelo, fallos
 consecutivos, éxitos, cantidad de circuitos abiertos, readiness, más tasa de
-requests, conteos por clase de status, suma/conteo de latencia y un gauge
-`build_info`). Cuando `PROXY_ADMIN_TOKEN` está seteado, los endpoints detallados
+requests, conteos por clase de status, suma/conteo de latencia, desenlaces de
+stream (`completed`/`stalled`/`upstream_error`/`max_duration`/`client_gone`),
+rechazos por admisión, rechazos por capacidad, conteo de requests gRPC y un
+gauge `build_info`). Cuando `PROXY_ADMIN_TOKEN` está seteado, los endpoints detallados
 lo requieren; `/ready` queda abierto y solo devuelve readiness.
 
 > **Defaults seguros.** `HOST` es loopback (`127.0.0.1`) por defecto, y los
@@ -153,6 +155,9 @@ Tuning bajo carga:
 - **`PROXY_MAX_CONCURRENT`** — seteala para suavizar ráfagas: en vez de estampidar
   el upstream (y colapsar la cadena a 503), los requests de más esperan hasta
   `PROXY_ADMISSION_TIMEOUT_SECONDS` y luego reciben `503 Retry-After`.
+  El slot se retiene durante **todo** el request, streams incluidos (esa es la
+  idea: un stream vivo sigue ocupando una conexión upstream), así que subí el
+  tope en deploys con muchos streams.
 - Las perillas de breaker/timeout (`PROXY_BREAKER_*`,
   `PROXY_REQUEST_TIMEOUT_SECONDS`, `PROXY_TOTAL_TIMEOUT_SECONDS`) modelan qué tan
   agresivamente se descarta un upstream inestable.
@@ -229,23 +234,30 @@ CalvoProxy conoce su propia versión y chequea GitHub Releases por una más nuev
   calvoproxy update
   ```
 
-  **Verificación de firma (opcional, recomendada).** Además del checksum SHA-256,
-  el actualizador puede verificar una **firma Ed25519** sobre `SHA256SUMS.txt`, que
-  autentica una release contra un host/cuenta comprometidos (algo que un checksum
-  solo no puede). Está **apagada hasta que la actives** —setup de una sola vez:
+  **La verificación de firma está ACTIVA en los builds oficiales.** Además del
+  checksum SHA-256, el actualizador verifica una **firma Ed25519** sobre
+  `SHA256SUMS.txt`, que autentica una release contra un host/cuenta comprometidos
+  (algo que un checksum solo no puede). La clave pública viaja en
+  [`internal/releasekey`](internal/releasekey/key.go), así que `calvoproxy update`
+  es **fail-closed en la firma**: una `SHA256SUMS.txt.sig` ausente o inválida
+  rechaza la actualización, y `--insecure` no puede saltearla.
+
+  Por eso el workflow de release **falla ruidosamente** si falta el secret
+  `RELEASE_SIGNING_KEY` mientras hay una clave embebida (publicar sin firmar
+  rompería la actualización de todos los clientes), y verifica la firma recién
+  generada contra esa misma clave embebida antes de publicar.
+
+  Para un **fork**, configurá tu propia firma una sola vez:
 
   1. Generá un par de claves: `go run ./tools/gen`.
-  2. Pegá la clave **pública** impresa en `releasePublicKey` en
-     [`cmd/verify.go`](cmd/verify.go) (seguro de commitear) — o pasala por
-     `PROXY_UPDATE_PUBKEY` en runtime.
+  2. Poné la clave **pública** impresa en
+     [`internal/releasekey/key.go`](internal/releasekey/key.go) (seguro de
+     commitear) — o pasala por `PROXY_UPDATE_PUBKEY` en runtime.
   3. Agregá la clave **privada** impresa como el secret de GitHub Actions
      `RELEASE_SIGNING_KEY` (repo → Settings → Secrets → Actions).
 
-  El workflow de release entonces firma `SHA256SUMS.txt` → `SHA256SUMS.txt.sig` en
-  cada tag. Una vez configurada una clave pública, `calvoproxy update` es
-  **fail-closed también en la firma**: una firma ausente o inválida rechaza la
-  actualización. Hasta que setees una clave, el comportamiento no cambia (solo
-  SHA-256).
+  Dejar la clave vacía desactiva la verificación de firma (solo SHA-256); el
+  workflow entonces permite releases sin firmar sin fallar.
 
   Dentro de un contenedor el self-update se rechaza a propósito (una imagen es
   inmutable) — bajá un tag nuevo y recreá:
@@ -269,8 +281,9 @@ puede matar de hambre a los fallbacks.
 
 Junto a la API HTTP, CalvoProxy expone un pequeño `ProxyTransportService` gRPC
 (unary `ChatCompletion` + `GetHealth`) en `GRPC_PORT` (default `9090`), respaldado
-por el mismo motor de ruteo. Es **unary/buffered** —no un RPC de streaming—, así
-que usá la API HTTP para streaming de tokens. El proto vive en
+por el mismo motor de ruteo. Es **solo unary**: un request con `stream: true` se **rechaza** con
+`InvalidArgument` en vez de bufferear el stream entero en memoria; usá la API
+HTTP para streaming de tokens. El proto vive en
 `proto/calvoproxy/proxy/v1/transport.proto`; los stubs generados están bajo
 `gen/proto/proxyv1/`. Cuando `PROXY_ADMIN_TOKEN` está seteado, `GetHealth` lo
 requiere vía metadata gRPC (`authorization: Bearer <token>`); `ChatCompletion`
@@ -334,6 +347,20 @@ docker run -d --name calvoproxy -p 8080:8080 \
   -e OPENROUTER_API_KEY=sk-or-v1-... \
   ghcr.io/cervantesh/calvoproxy:latest
 ```
+
+> **Exponerlo de forma segura.** El contenedor bindea `0.0.0.0`, así que es
+> alcanzable por cualquier cosa que llegue al puerto. Por eso **no** gasta su
+> `OPENROUTER_API_KEY` con clientes que no mandan su propia key —esos reciben un
+> `401`—. Dos perillas deciden qué tan abierto está:
+>
+> - `-e PROXY_ADMIN_TOKEN=…` — protege `/health`, `/metrics` y `/admin/reload`
+>   (si no, quedan legibles por cualquiera).
+> - `-e PROXY_ALLOW_ENV_KEY_PUBLIC=true` — permite que clientes sin key gasten la
+>   key del contenedor. Hacelo solo si al puerto llega **únicamente** gente a la
+>   que le darías la key.
+>
+> Los clientes que mandan su propio `Authorization: Bearer sk-or-…` siempre
+> funcionan y no se ven afectados.
 
 O con Compose (seteá `OPENROUTER_API_KEY` en tu shell o un archivo `.env`):
 

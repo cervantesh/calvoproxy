@@ -10,6 +10,14 @@ services:
     environment:
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in your env or a .env file}"
       PROXY_IDLE_TIMEOUT: "${PROXY_IDLE_TIMEOUT:-}"   # e.g. 20m to self-stop when idle
+      # The container binds 0.0.0.0, so these two decide how safe that is:
+      #  - PROXY_ADMIN_TOKEN gates /health, /metrics and /admin/reload.
+      #  - PROXY_ALLOW_ENV_KEY_PUBLIC=true lets keyless clients spend the
+      #    container's OPENROUTER_API_KEY. Leave it unset unless the port is only
+      #    reachable by people you'd hand the key to; otherwise clients must send
+      #    their own Authorization header.
+      PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:-}"
+      PROXY_ALLOW_ENV_KEY_PUBLIC: "${PROXY_ALLOW_ENV_KEY_PUBLIC:-}"
     # Optional: edit chains without rebuilding by mounting your own file:
     # volumes:
     #   - ./model-policy.json:/app/model-policy.json:ro
