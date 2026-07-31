@@ -283,6 +283,34 @@ Quick check:
 curl -s http://127.0.0.1:8080/health
 ```
 
+## Sign in to OpenRouter (`calvoproxy login`)
+
+Instead of copy-pasting an API key from the dashboard, authorize CalvoProxy via
+OpenRouter's OAuth (PKCE) — handy for onboarding, since each user brings their own
+revocable key:
+
+```bash
+calvoproxy login          # opens your browser → authorize → key stored locally
+calvoproxy whoami         # show which key is configured (masked) and its source
+calvoproxy logout         # remove the stored key
+```
+
+`login` runs a one-shot loopback callback server, opens
+`https://openrouter.ai/auth`, and after you authorize, exchanges the code for a
+**user-controlled** API key (verified via PKCE `S256`). The key is written to
+`<user-config-dir>/calvoproxy/openrouter.key` (`%AppData%` on Windows,
+`~/.config` on Linux, `~/Library/Application Support` on macOS), `0600`.
+
+- `--no-browser` prints the URL to open manually.
+- `--key-stdin` stores a key piped in, no browser (`echo sk-or-v1-… | calvoproxy login --key-stdin`) — for headless/CI.
+
+**Key precedence** for a keyless request is: request `Authorization` header →
+`OPENROUTER_API_KEY` env → the stored login key. The stored key is **ambient**
+like the env key, so on a public bind it is refused unless
+`PROXY_ALLOW_ENV_KEY_PUBLIC=true` (a header key always wins and bypasses the gate).
+For public/Docker deployments, inject `OPENROUTER_API_KEY` or pass a per-request
+Bearer rather than relying on the login file.
+
 ## Install
 
 ### Docker (recommended)

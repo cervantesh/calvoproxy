@@ -25,19 +25,25 @@ var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`
 func resolveAPIKey(r *http.Request) string {
 	apiKey := requestmeta.AuthorizationFromRequest(r)
 	if apiKey == "" || apiKey == "dummy" {
-		// Don't silently spend the env OpenRouter key for a keyless request when
-		// bound to a public interface — that turns an exposed instance into an
-		// open relay on someone else's dime. Loopback binds keep the old
-		// behaviour; a public bind requires PROXY_ALLOW_ENV_KEY_PUBLIC=true.
+		// "Ambient" keys are the ones the proxy supplies itself for a keyless
+		// request: the env OPENROUTER_API_KEY and the `calvoproxy login` file.
+		// Don't silently spend either on a public bind — that turns an exposed
+		// instance into an open relay on the user's OpenRouter bill. Loopback
+		// binds keep the old behaviour; a public bind requires
+		// PROXY_ALLOW_ENV_KEY_PUBLIC=true (covers both ambient sources).
 		if boundToPublicInterface() && !allowEnvKeyOnPublicBind() {
-			slog.Warn("Refusing env OPENROUTER_API_KEY for a keyless request on a public bind; set PROXY_ALLOW_ENV_KEY_PUBLIC=true to allow, or pass a key")
+			slog.Warn("Refusing ambient OpenRouter key (env/login file) for a keyless request on a public bind; set PROXY_ALLOW_ENV_KEY_PUBLIC=true to allow, or pass a key")
 			return ""
 		}
-		envKey := os.Getenv("OPENROUTER_API_KEY")
-		if envKey != "" {
+		if envKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")); envKey != "" {
 			slog.Info("Using API key from environment (header was empty or dummy)")
+			return envKey
 		}
-		return envKey
+		if fileKey := storedAPIKey(); fileKey != "" {
+			slog.Info("Using API key from login file (header/env were empty)")
+			return fileKey
+		}
+		return ""
 	}
 	slog.Info("Using API key from request header")
 	return apiKey
@@ -257,6 +263,12 @@ func main() {
 		switch os.Args[1] {
 		case "update":
 			os.Exit(runUpdate(os.Args[2:]))
+		case "login":
+			os.Exit(runLogin(os.Args[2:]))
+		case "logout":
+			os.Exit(runLogout())
+		case "whoami":
+			os.Exit(runWhoami())
 		case "version", "--version", "-v":
 			fmt.Println("CalvoProxy " + version)
 			return
