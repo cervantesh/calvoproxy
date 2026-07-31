@@ -35,6 +35,19 @@ func NewRouterService() *RouterService {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.ResponseHeaderTimeout = config.RequestTimeout
 	base.TLSHandshakeTimeout = 10 * time.Second
+	// The proxy fans out to a small set of upstream hosts (mostly one:
+	// openrouter.ai), so raise the idle-connection pool well above the stdlib
+	// default of 2 per host. Otherwise high concurrency churns thousands of
+	// short-lived connections — exhausting ephemeral ports and inflating OS
+	// threads — instead of reusing a warm pool. Tunable via
+	// PROXY_MAX_IDLE_CONNS_PER_HOST.
+	perHost := envInt("PROXY_MAX_IDLE_CONNS_PER_HOST", 128)
+	if perHost < 2 {
+		perHost = 2
+	}
+	base.MaxIdleConnsPerHost = perHost
+	base.MaxIdleConns = perHost * 4
+	base.IdleConnTimeout = 90 * time.Second
 
 	transport := &GlobalBreakerTransport{
 		Base:             base,
