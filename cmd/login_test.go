@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestPKCEChallenge(t *testing.T) {
@@ -124,25 +125,112 @@ func TestCallbackFlow(t *testing.T) {
 	}
 }
 
-func TestCallbackStateMismatchAndError(t *testing.T) {
-	// State mismatch.
+// TestCallbackIgnoresPoisonThenAcceptsRealRedirect guards the single-shot
+// delivery against local poisoning: junk callbacks (bad state, malformed code)
+// must be ignored — not consume the one delivery — so the genuine redirect still
+// completes the login.
+func TestCallbackIgnoresPoisonThenAcceptsRealRedirect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
 	defer stop()
 	base := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
-	http.Get(base + "?" + url.Values{"code": {"c"}, "state": {"wrong"}}.Encode())
-	if res := <-ch; res.err == nil {
-		t.Fatal("expected state-mismatch error")
+
+	// Poison 1: wrong state. Poison 2: malformed code. Neither may deliver.
+	if r, err := http.Get(base + "?" + url.Values{"code": {"c"}, "state": {"wrong"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	if r, err := http.Get(base + "?" + url.Values{"code": {"bad code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		t.Fatalf("poison callback consumed the delivery: %+v", res)
+	case <-time.After(150 * time.Millisecond):
 	}
 
-	// error= param.
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	port2, ch2, stop2, _ := startCallbackServer(ctx2, "s")
-	defer stop2()
-	http.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?error=access_denied", port2))
-	if res := <-ch2; res.err == nil {
-		t.Fatal("expected error on ?error=")
+	// The real redirect still wins.
+	if r, err := http.Get(base + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("real redirect: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("real redirect was not delivered after poison attempts")
+	}
+}
+
+// A provider-signalled error with a matching state IS a definitive answer.
+func TestCallbackDeliversProviderError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	port, ch, stop, _ := startCallbackServer(ctx, "s")
+	defer stop()
+	if r, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?state=s&error=access_denied", port)); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err == nil {
+			t.Fatal("expected error on ?error=")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider error was not delivered")
+	}
+}
+
+// An unattributed callback (no state) carrying error= must NOT burn the single
+// delivery: any local process could otherwise kill a login in flight. A code with
+// no state is still accepted (the provider may not echo state).
+func TestCallbackUnattributedErrorIsIgnored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+	base := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+
+	// No state at all + error= → ignored.
+	if r, err := http.Get(base + "?error=access_denied"); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		t.Fatalf("unattributed error= consumed the delivery: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The genuine redirect still completes the login.
+	if r, err := http.Get(base + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("real redirect: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("real redirect was not delivered")
+	}
+}
+
+// A provider that does not echo state must still be able to complete a login.
+func TestCallbackAcceptsCodeWithoutState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+	if r, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?code=no-state-code", port)); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "no-state-code" {
+			t.Fatalf("code without state should still work: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("code without state was not delivered (would break providers that don't echo state)")
 	}
 }

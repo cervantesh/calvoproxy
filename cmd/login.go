@@ -167,24 +167,37 @@ func startCallbackServer(ctx context.Context, expectedState string) (int, <-chan
 			return
 		}
 		q := r.URL.Query()
+		// Check state first, and NEVER consume the single-shot delivery for a
+		// request that fails it: otherwise any local process could poison the
+		// login by hitting /callback with junk before the real redirect arrives.
+		stateOK := subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(expectedState)) == 1
+		if st := q.Get("state"); st != "" && !stateOK {
+			writeCloseTab(w, "State check failed.")
+			return // ignored, not delivered
+		}
 		if e := q.Get("error"); e != "" {
+			// A denial is only a definitive answer when we can attribute it to OUR
+			// flow. An unattributed error= is pure denial-of-service (it would burn
+			// the single delivery), so ignore it and let the real redirect — or the
+			// timeout — decide.
+			if !stateOK {
+				writeCloseTab(w, "Ignoring an unattributed callback.")
+				return
+			}
 			writeCloseTab(w, "Authorization was denied.")
 			deliver(callbackResult{err: errors.New("authorization denied by user or provider")})
-			return
-		}
-		// Verify state only when the provider echoed it (defense in depth); its
-		// absence is not fatal — PKCE + the single-use loopback listener already
-		// protect the code→key exchange.
-		if st := q.Get("state"); st != "" && subtle.ConstantTimeCompare([]byte(st), []byte(expectedState)) != 1 {
-			writeCloseTab(w, "State check failed.")
-			deliver(callbackResult{err: errors.New("state mismatch")})
 			return
 		}
 		code := q.Get("code")
 		if !validAuthCode(code) {
 			writeCloseTab(w, "Missing authorization code.")
-			deliver(callbackResult{err: errors.New("missing or malformed authorization code")})
-			return
+			return // ignored: keep waiting for a well-formed callback (or timeout)
+		}
+		// A code with no state is still accepted (the provider may not echo state;
+		// PKCE plus the single-use loopback listener protect the exchange itself),
+		// but it is logged so an unexpected flow is visible.
+		if !stateOK {
+			fmt.Println("Note: the provider did not echo the CSRF state parameter; relying on PKCE.")
 		}
 		writeCloseTab(w, "Login complete ✓")
 		deliver(callbackResult{code: code})

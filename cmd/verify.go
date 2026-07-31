@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/cervantesh/calvoproxy/internal/releasekey"
 )
 
-// releasePublicKey is the base64 (std-encoded) 32-byte Ed25519 public key that
-// release SHA256SUMS.txt signatures are verified against. Empty = signature
-// verification is DISABLED (the SHA-256 checksum is still enforced). Fill this in
-// once, after generating a keypair with `go run ./tools/gen` (the public key is
-// safe to commit); the matching private key goes into the CI signing secret. It
-// can also be overridden at runtime with PROXY_UPDATE_PUBKEY.
-var releasePublicKey = "GZXKveslK0EYlHea9EUpcdnWo6QIXmwE9ksfhq2gups="
+// releasePublicKey is the base64 Ed25519 public key that release SHA256SUMS.txt
+// signatures are verified against. It comes from internal/releasekey so the CI
+// release tooling verifies with the exact same key the shipped binaries use —
+// a release can never carry a signature these binaries would reject. Empty =
+// signature verification disabled (the SHA-256 checksum is still enforced).
+// Overridable at runtime with PROXY_UPDATE_PUBKEY.
+var releasePublicKey = releasekey.Public
 
 // updatePublicKey returns the configured release public key (env overrides the
 // embedded default), or "" when signature verification is disabled.

@@ -225,13 +225,23 @@ func shouldUseRuntimeDefaultProfile() bool {
 
 func (s *RouterService) ModelPolicyHealth() ModelPolicyHealth {
 	cfg := s.getPolicy()
+	// modelStrict/modelWarnings are written by ReloadModelPolicy under policyMu —
+	// read them under the same lock (they were read bare, a real race window).
+	strict, warnings := s.strictAndWarnings()
 	return ModelPolicyHealth{
 		DefaultProfile:     cfg.DefaultProfile,
 		Profiles:           profileNames(cfg.Profiles),
 		Aliases:            aliasNames(cfg.Aliases),
-		Strict:             s.modelStrict,
-		ValidationWarnings: append([]cervomodelpolicy.ValidationIssue(nil), s.modelWarnings...),
+		Strict:             strict,
+		ValidationWarnings: warnings,
 	}
+}
+
+// strictAndWarnings returns the model-policy validation state under policyMu.
+func (s *RouterService) strictAndWarnings() (bool, []cervomodelpolicy.ValidationIssue) {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return s.modelStrict, append([]cervomodelpolicy.ValidationIssue(nil), s.modelWarnings...)
 }
 
 func aliasNames(aliases map[string]string) []string {

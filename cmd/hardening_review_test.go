@@ -69,3 +69,32 @@ func TestRunUpdate_FailsClosedWithoutChecksums(t *testing.T) {
 		t.Fatal("update must fail closed (non-zero) when SHA256SUMS.txt is absent")
 	}
 }
+
+// P2: streaming over the gRPC unary transport must be refused, not silently
+// buffered in memory (a 30-minute SSE would be accumulated whole and returned as
+// one blob, which no streaming client can consume).
+func TestGRPCChatCompletion_RejectsStreaming(t *testing.T) {
+	called := false
+	server := &proxyTransportGRPCServer{
+		routerService: &routerServiceAdapter{
+			routeRequestWithProvider: func(http.ResponseWriter, *http.Request, string, string) { called = true },
+			health:                   func() interface{} { return map[string]any{"ready": true} },
+		},
+	}
+	_, err := server.ChatCompletion(context.Background(), &proxyv1.ChatCompletionRequest{
+		Path:          "/v1/chat/completions",
+		Authorization: "Bearer test-token",
+		BodyJson:      `{"model":"auto","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("stream:true over gRPC should be InvalidArgument, got %v", err)
+	}
+	if called {
+		t.Fatal("router must not be invoked for a rejected streaming request")
+	}
+
+	// Non-streaming still works.
+	if !requestsStreaming(`{"stream":true}`) || requestsStreaming(`{"stream":false}`) || requestsStreaming(`{}`) || requestsStreaming(`not json`) {
+		t.Fatal("requestsStreaming misclassified a body")
+	}
+}

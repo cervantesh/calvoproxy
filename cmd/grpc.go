@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"time"
 
 	proxyv1 "github.com/cervantesh/calvoproxy/gen/proto/proxyv1"
 	"github.com/cervantesh/calvoproxy/internal/router"
@@ -40,7 +41,28 @@ func newProxyTransportGRPCServer(routerService *router.RouterService) *proxyTran
 	}
 }
 
+// requestsStreaming reports whether a chat body explicitly asks for streaming.
+// Only an explicit boolean true counts (matching how the router itself reads it).
+func requestsStreaming(bodyJSON string) bool {
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(bodyJSON), &body); err != nil {
+		return false
+	}
+	stream, _ := body["stream"].(bool)
+	return stream
+}
+
 func (s *proxyTransportGRPCServer) ChatCompletion(ctx context.Context, req *proxyv1.ChatCompletionRequest) (*proxyv1.ChatCompletionResponse, error) {
+	// This unary RPC runs the router against an in-memory recorder, so a streamed
+	// response would be buffered whole (potentially many minutes of tokens) and
+	// delivered as one blob — no flushing, unbounded memory, and nothing a
+	// streaming client can consume. Refuse explicitly rather than silently
+	// downgrading, which would leave SSE consumers parsing something unexpected.
+	if requestsStreaming(req.GetBodyJson()) {
+		return nil, status.Error(codes.InvalidArgument,
+			"streaming is not supported on the gRPC unary transport; use the HTTP API (POST /v1/chat/completions) for stream:true")
+	}
+	start := time.Now()
 	path := strings.TrimSpace(req.GetPath())
 	if path == "" {
 		path = "/v1/chat/completions"
@@ -60,6 +82,8 @@ func (s *proxyTransportGRPCServer) ChatCompletion(ctx context.Context, req *prox
 	recorder := httptest.NewRecorder()
 	apiKey := resolveAPIKey(httpReq)
 	if apiKey == "" {
+		metrics.observe(http.StatusUnauthorized, time.Since(start).Nanoseconds())
+		metrics.grpcRequests.Add(1)
 		return &proxyv1.ChatCompletionResponse{
 			StatusCode: http.StatusUnauthorized,
 			BodyJson:   "API Key required\n",
@@ -67,6 +91,10 @@ func (s *proxyTransportGRPCServer) ChatCompletion(ctx context.Context, req *prox
 		}, nil
 	}
 	s.routerService.routeRequestWithProvider(recorder, httpReq, apiKey, strings.TrimSpace(req.GetProvider()))
+	// gRPC traffic used to be invisible in /metrics (only the HTTP handler
+	// recorded); count it the same way so operators see all proxy load.
+	metrics.observe(recorder.Code, time.Since(start).Nanoseconds())
+	metrics.grpcRequests.Add(1)
 
 	headers := map[string]string{}
 	for key, values := range recorder.Header() {

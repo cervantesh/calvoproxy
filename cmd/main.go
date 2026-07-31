@@ -128,6 +128,7 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 
 	mux.HandleFunc("/metrics", metricsAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeMetrics(w, routerService.Health())
+		writeRouterMetrics(w, routerService.Counters())
 	}))
 
 	// /version stays open: it reports the running build and, if the startup
@@ -253,8 +254,26 @@ func writeMetrics(w http.ResponseWriter, h router.ProxyHealth) {
 	fmt.Fprintf(w, "calvoproxy_request_latency_seconds_sum %.6f\n", float64(metrics.latencyNanos.Load())/1e9)
 	fmt.Fprintln(w, "# HELP calvoproxy_request_latency_count Handler latency observations\n# TYPE calvoproxy_request_latency_count counter")
 	fmt.Fprintf(w, "calvoproxy_request_latency_count %d\n", metrics.latencyCount.Load())
+	fmt.Fprintln(w, "# HELP calvoproxy_grpc_requests_total Requests served over the gRPC transport\n# TYPE calvoproxy_grpc_requests_total counter")
+	fmt.Fprintf(w, "calvoproxy_grpc_requests_total %d\n", metrics.grpcRequests.Load())
 	fmt.Fprintln(w, "# HELP calvoproxy_build_info Build version (value always 1)\n# TYPE calvoproxy_build_info gauge")
 	fmt.Fprintf(w, "calvoproxy_build_info{version=%q} 1\n", version)
+}
+
+// writeRouterMetrics renders router-side event counters: how streams ended (a
+// stalled stream used to be indistinguishable from a clean one), load shed by
+// admission control, and capability-gated refusals.
+func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
+	fmt.Fprintln(w, "# HELP calvoproxy_streams_total Streamed responses by how they ended\n# TYPE calvoproxy_streams_total counter")
+	fmt.Fprintf(w, "calvoproxy_streams_total{outcome=\"completed\"} %d\n", c.StreamsCompleted)
+	fmt.Fprintf(w, "calvoproxy_streams_total{outcome=\"stalled\"} %d\n", c.StreamsStalled)
+	fmt.Fprintf(w, "calvoproxy_streams_total{outcome=\"upstream_error\"} %d\n", c.StreamsUpstreamErr)
+	fmt.Fprintf(w, "calvoproxy_streams_total{outcome=\"max_duration\"} %d\n", c.StreamsMaxReached)
+	fmt.Fprintf(w, "calvoproxy_streams_total{outcome=\"client_gone\"} %d\n", c.StreamsClientGone)
+	fmt.Fprintln(w, "# HELP calvoproxy_admission_rejected_total Requests shed by admission control\n# TYPE calvoproxy_admission_rejected_total counter")
+	fmt.Fprintf(w, "calvoproxy_admission_rejected_total %d\n", c.AdmissionRejected)
+	fmt.Fprintln(w, "# HELP calvoproxy_capability_refused_total Requests refused for lacking a capable model (vision/tools)\n# TYPE calvoproxy_capability_refused_total counter")
+	fmt.Fprintf(w, "calvoproxy_capability_refused_total %d\n", c.CapabilityRefused)
 }
 
 func main() {
@@ -309,6 +328,12 @@ func main() {
 	}
 
 	routerService := router.NewRouterService()
+	defer routerService.Close()
+	// Let /health report a key configured via `calvoproxy login` too, not just the
+	// env var (the router alone can't see the login file).
+	routerService.AmbientKeyPresent = func() bool {
+		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || storedAPIKey() != ""
+	}
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
 
