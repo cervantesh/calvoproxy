@@ -14,7 +14,7 @@ import (
 // once, after generating a keypair with `go run ./tools/gen` (the public key is
 // safe to commit); the matching private key goes into the CI signing secret. It
 // can also be overridden at runtime with PROXY_UPDATE_PUBKEY.
-var releasePublicKey = ""
+var releasePublicKey = "GZXKveslK0EYlHea9EUpcdnWo6QIXmwE9ksfhq2gups="
 
 // updatePublicKey returns the configured release public key (env overrides the
 // embedded default), or "" when signature verification is disabled.
