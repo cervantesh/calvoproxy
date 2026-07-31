@@ -184,7 +184,7 @@ func shouldUseRuntimeDefaultProfile() bool {
 }
 
 func (s *RouterService) ModelPolicyHealth() ModelPolicyHealth {
-	cfg := s.policy
+	cfg := s.getPolicy()
 	return ModelPolicyHealth{
 		DefaultProfile:     cfg.DefaultProfile,
 		Profiles:           profileNames(cfg.Profiles),

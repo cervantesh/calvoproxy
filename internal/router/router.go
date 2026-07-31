@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -197,13 +198,14 @@ func (s *RouterService) determineProfile(r *http.Request, messages []interface{}
 			selected = alias
 		}
 	}
+	pol := s.getPolicy()
 	if s.hasImageContent(messages) {
-		if _, ok := s.policy.Profiles["vision"]; ok {
+		if _, ok := pol.Profiles["vision"]; ok {
 			selected = "vision"
 		}
 	}
-	if _, ok := s.policy.Profiles[selected]; !ok {
-		return s.policy.DefaultProfile
+	if _, ok := pol.Profiles[selected]; !ok {
+		return pol.DefaultProfile
 	}
 	return selected
 }
@@ -226,19 +228,52 @@ func (s *RouterService) resolveModelAlias(category string, requestedModel string
 func (s *RouterService) planModelAttempts(decision policyDecision, category string, requestedModel string) []modelAttempt {
 	planner := s.AttemptPlanner
 	if planner == nil {
-		planner = PolicyModelAttemptPlanner{Policy: s.policy, model: s.activeModelPolicy()}
+		planner = PolicyModelAttemptPlanner{Policy: s.getPolicy(), model: s.activeModelPolicy()}
 	}
 	return planner.Plan(decision, category, requestedModel)
 }
 
 func (s *RouterService) activeModelPolicy() *cervomodelpolicy.Policy {
-	if s.modelPolicy != nil {
-		return s.modelPolicy
+	s.policyMu.RLock()
+	mp := s.modelPolicy
+	pol := s.policy
+	s.policyMu.RUnlock()
+	if mp != nil {
+		return mp
 	}
-	return cervomodelpolicy.NewPolicy(s.policy)
+	return cervomodelpolicy.NewPolicy(pol)
+}
+
+// getPolicy returns the current model-policy config under a read lock. The
+// returned value shares the (immutable-after-swap) maps, so it is safe to read
+// even while a concurrent ReloadModelPolicy swaps in a new config.
+func (s *RouterService) getPolicy() policyConfig {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return s.policy
 }
 
 func (s *RouterService) setModelPolicyConfig(policy policyConfig) {
-	s.policy = cervomodelpolicy.NormalizeConfig(policy)
-	s.modelPolicy = cervomodelpolicy.NewPolicy(s.policy)
+	normalized := cervomodelpolicy.NormalizeConfig(policy)
+	mp := cervomodelpolicy.NewPolicy(normalized)
+	s.policyMu.Lock()
+	s.policy = normalized
+	s.modelPolicy = mp
+	s.policyMu.Unlock()
+}
+
+// ReloadModelPolicy re-reads the model policy (embedded default < model-policy.json
+// < env) and atomically swaps it in, so free-model chains can be updated without
+// a full restart. Refuses to swap in a policy that fails strict validation.
+func (s *RouterService) ReloadModelPolicy() error {
+	runtime := loadModelPolicyRuntime()
+	if runtime.Strict && len(runtime.Warnings) > 0 {
+		return fmt.Errorf("model policy strict validation failed (%d warnings); keeping current policy", len(runtime.Warnings))
+	}
+	s.setModelPolicyConfig(runtime.Config)
+	s.policyMu.Lock()
+	s.modelWarnings = runtime.Warnings
+	s.modelStrict = runtime.Strict
+	s.policyMu.Unlock()
+	return nil
 }
