@@ -60,7 +60,7 @@ before exit.
 | `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token (constant-time) |
 | `PROXY_METRICS_TOKEN` | off    | If set, `/metrics` accepts this token OR the admin token — decouples the scraper credential from admin |
 | `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending the env `OPENROUTER_API_KEY` for keyless requests on a **public** bind (loopback always allows it) |
-| `PROXY_OAUTH_REQUIRE_STATE` | `false` | Require a matching `state` on the `calvoproxy login` callback (the secret callback path already binds it; enable once you've seen your provider echo state) |
+| `PROXY_OAUTH_REQUIRE_STATE` | `true` | Require a matching CSRF `state` on the `calvoproxy login` callback. OpenRouter echoes it, so this is on by default; set `false` only for a provider that doesn't (the secret callback path + PKCE still apply) |
 | `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
@@ -323,10 +323,13 @@ own authorization code nor kill your login with junk — and unlike the OAuth
 anything back. (It does not defend against a same-user attacker who can read the
 auth URL out of your browser history or the browser's command line; the secret
 travels in that URL, exactly as `state` would.) A mismatched `state` and an
-unattributed `error=` are ignored rather than ending the login. Set
-`PROXY_OAUTH_REQUIRE_STATE=true` to additionally *require* a matching `state` —
-`login` prints whether your provider echoed one, so you can enable it with
-evidence. The key is written to
+unattributed `error=` are ignored rather than ending the login.
+
+On top of that, a matching CSRF `state` is **required by default**
+(`PROXY_OAUTH_REQUIRE_STATE`) — an interactive login confirmed OpenRouter echoes
+it, so demanding it closes the login-CSRF hole outright instead of leaning on the
+secret path alone. Set it to `false` only if your provider doesn't echo `state`;
+the login then still works, protected by the secret path and PKCE. The key is written to
 `<user-config-dir>/calvoproxy/openrouter.key` (`%AppData%` on Windows,
 `~/.config` on Linux, `~/Library/Application Support` on macOS), `0600`.
 

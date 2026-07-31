@@ -185,9 +185,10 @@ func TestCallbackDeliversProviderError(t *testing.T) {
 }
 
 // An unattributed callback (no state) carrying error= must NOT burn the single
-// delivery: any local process could otherwise kill a login in flight. A code with
-// no state is still accepted (the provider may not echo state).
+// delivery: any local process could otherwise kill a login in flight. With the
+// strict check opted out, a code with no state is still accepted.
 func TestCallbackUnattributedErrorIsIgnored(t *testing.T) {
+	t.Setenv("PROXY_OAUTH_REQUIRE_STATE", "false")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
@@ -218,8 +219,10 @@ func TestCallbackUnattributedErrorIsIgnored(t *testing.T) {
 	}
 }
 
-// A provider that does not echo state must still be able to complete a login.
+// A provider that does not echo state must still be able to complete a login —
+// but only when the operator opts out of the (default-on) strict check.
 func TestCallbackAcceptsCodeWithoutState(t *testing.T) {
+	t.Setenv("PROXY_OAUTH_REQUIRE_STATE", "false")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
@@ -293,8 +296,9 @@ func TestCallbackSecretPath(t *testing.T) {
 	}
 }
 
-// Strict mode refuses a callback that carries no matching state, for operators
-// who have confirmed their provider echoes it.
+// Strict mode IGNORES a callback with no matching state — it must not deliver a
+// refusal, because that would let anyone who merely learned the callback path
+// burn the one-shot and kill the login without knowing the state.
 func TestCallbackRequireStateStrictMode(t *testing.T) {
 	t.Setenv("PROXY_OAUTH_REQUIRE_STATE", "true")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -307,11 +311,8 @@ func TestCallbackRequireStateStrictMode(t *testing.T) {
 	}
 	select {
 	case res := <-ch:
-		if res.err == nil {
-			t.Fatalf("strict mode must refuse a state-less callback, got code=%q", res.code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("strict mode should report the refusal, not hang")
+		t.Fatalf("a state-less callback must be ignored, not consume the delivery: %+v", res)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -397,8 +398,11 @@ func TestCallbackSubPathDoesNotDeliver(t *testing.T) {
 }
 
 func TestRequireStateEnvParsing(t *testing.T) {
-	cases := map[string]bool{"": false, "0": false, "false": false, "no": false,
-		"1": true, "true": true, "TRUE": true, "yes": true, "on": true}
+	// Default is TRUE (OpenRouter echoes state); only an explicit falsey value
+	// opts out.
+	cases := map[string]bool{"": true, "1": true, "true": true, "TRUE": true,
+		"yes": true, "on": true, "garbage": true,
+		"0": false, "false": false, "FALSE": false, "no": false, "off": false}
 	for val, want := range cases {
 		t.Setenv("PROXY_OAUTH_REQUIRE_STATE", val)
 		if got := requireState(); got != want {
@@ -422,5 +426,38 @@ func TestCallbackPathIsFreshPerLogin(t *testing.T) {
 	}
 	if pa.Path == "/callback" || pb.Path == "/callback" {
 		t.Fatal("callback path must not be the guessable constant /callback")
+	}
+}
+
+// Strict state is ON by default (verified: OpenRouter echoes state), so a
+// callback without a matching state is refused unless explicitly opted out.
+func TestCallbackRequireStateDefaultsOn(t *testing.T) {
+	if !requireState() {
+		t.Fatal("PROXY_OAUTH_REQUIRE_STATE must default to true")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+	// Junk with no state must be IGNORED (not consume the one-shot)...
+	if r, err := http.Get(cbURL + "?code=attacker-code"); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		t.Fatalf("a state-less callback burned the login: %+v", res)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// ...and the genuine, properly attributed redirect must still win.
+	if r, err := http.Get(cbURL + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("real redirect after state-less junk: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the genuine redirect was not delivered after state-less junk")
 	}
 }
