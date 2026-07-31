@@ -150,16 +150,20 @@ func writeCloseTab(w http.ResponseWriter, msg string) {
 }
 
 // requireState reports whether a callback MUST carry a matching state parameter
-// (PROXY_OAUTH_REQUIRE_STATE). Default false, because a provider that doesn't
-// echo state must still be able to complete a login; the secret callback path
-// below already gives provider-independent protection. `calvoproxy login` prints
-// whether the provider echoed state, so this can be enabled with evidence.
+// (PROXY_OAUTH_REQUIRE_STATE). Default TRUE: an interactive login against
+// OpenRouter confirmed it echoes `state` back to the callback, so demanding it
+// costs nothing here and closes the login-CSRF hole completely rather than
+// relying on the secret path alone.
+//
+// Set PROXY_OAUTH_REQUIRE_STATE=false for a provider that does NOT echo state —
+// the login then still works, protected by the secret callback path and PKCE.
+// `calvoproxy login` prints which case it saw.
 func requireState() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("PROXY_OAUTH_REQUIRE_STATE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -227,18 +231,19 @@ func startCallbackServer(ctx context.Context, expectedState string) (string, <-c
 			return // ignored: keep waiting for a well-formed callback (or timeout)
 		}
 		if !stateOK {
-			// The provider did not echo state. Strict mode refuses; otherwise we
-			// proceed — the secret path already bound this callback to our flow,
-			// and PKCE protects the exchange — but say so, so the operator can
-			// turn on strict mode once they've seen their provider echo it.
+			// No matching state. With the strict default this callback is not
+			// provably ours, so IGNORE it — exactly like a wrong state, and for
+			// the same reason: delivering a refusal here would let anyone who
+			// merely learned the callback path (OpenRouter's own consent screen
+			// displays it) burn the one-shot and kill the login without ever
+			// knowing the state. Staying silent lets the genuine redirect still
+			// win; a provider that truly never echoes state hits the timeout,
+			// which tells the user to set PROXY_OAUTH_REQUIRE_STATE=false.
 			if requireState() {
-				writeCloseTab(w, "State parameter required.")
-				deliver(callbackResult{err: errors.New("callback carried no matching state and PROXY_OAUTH_REQUIRE_STATE is set")})
+				writeCloseTab(w, "Ignoring a callback with no matching state.")
 				return
 			}
 			fmt.Println("Note: the provider did not echo the CSRF state parameter; relying on the secret callback path + PKCE.")
-		} else {
-			fmt.Println("Note: the provider echoed the CSRF state parameter — you can set PROXY_OAUTH_REQUIRE_STATE=true to enforce it.")
 		}
 		writeCloseTab(w, "Login complete ✓")
 		deliver(callbackResult{code: code})
@@ -339,8 +344,9 @@ func runLogin(args []string) int {
 		return 0
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "login timed out — no authorization received.")
-		fmt.Fprintln(os.Stderr, "If you DID authorize in the browser, the provider may not have preserved the")
-		fmt.Fprintln(os.Stderr, "callback URL's path. Please report it — that path carries this login's secret.")
+		fmt.Fprintln(os.Stderr, "If you DID authorize in the browser, either the provider dropped the CSRF")
+		fmt.Fprintln(os.Stderr, "state parameter (retry with PROXY_OAUTH_REQUIRE_STATE=false) or it did not")
+		fmt.Fprintln(os.Stderr, "preserve the callback URL's path — that path carries this login's secret.")
 		return 1
 	}
 }
