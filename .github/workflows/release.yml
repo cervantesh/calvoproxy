@@ -25,7 +25,9 @@ jobs:
             os="$1"; arch="$2"; ext="${3:-}"
             pkg="calvoproxy-${VERSION}-${os}-${arch}"
             mkdir -p "$pkg"
-            GOOS="$os" GOARCH="$arch" go build -mod=vendor -o "$pkg/calvoproxy${ext}" ./cmd
+            GOOS="$os" GOARCH="$arch" go build -mod=vendor \
+              -ldflags "-X main.version=${VERSION}" \
+              -o "$pkg/calvoproxy${ext}" ./cmd
             cp model-policy.json README.md LICENSE "$pkg"/
             if [ "$os" = "windows" ]; then
               zip -r "dist/${pkg}.zip" "$pkg"
@@ -67,5 +69,7 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

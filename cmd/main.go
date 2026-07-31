@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	httpx "github.com/cervantesh/cervo-httpkit"
-	"github.com/cervantesh/cervo-requestmeta"
 	"github.com/cervantesh/calvoproxy/internal/router"
 	"github.com/cervantesh/calvoproxy/internal/telemetry"
+	httpx "github.com/cervantesh/cervo-httpkit"
+	"github.com/cervantesh/cervo-requestmeta"
 )
 
 var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`)
@@ -111,6 +111,14 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeMetrics(w, routerService.Health())
 	}))
 
+	// /version stays open: it reports the running build and, if the startup
+	// check has run, whether a newer release is available. No internals, so
+	// it's safe on an exposed port.
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, currentUpdateStatus())
+	})
+
 	// /ready stays open (load-balancer probe) but returns only readiness — no
 	// internals — so it's safe on an exposed port.
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +200,19 @@ func writeMetrics(w http.ResponseWriter, h router.ProxyHealth) {
 }
 
 func main() {
+	// Subcommands handled before the server boots.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "update":
+			os.Exit(runUpdate(os.Args[2:]))
+		case "version", "--version", "-v":
+			fmt.Println("CalvoProxy " + version)
+			return
+		}
+	}
+	// Remove any leftover <exe>.old from a prior Windows self-update.
+	cleanupStaleUpdate()
+
 	tp, err := telemetry.Init("CalvoProxy")
 	if err != nil {
 		log.Printf("Failed to initialize OpenTelemetry: %v", err)
@@ -213,6 +234,11 @@ func main() {
 	routerService := router.NewRouterService()
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
+
+	// Best-effort background check for a newer release; logs a recommendation
+	// and caches the result for GET /version. Silent for dev builds or when
+	// PROXY_UPDATE_CHECK=false.
+	go announceUpdate()
 
 	// gRPC transport (unary ChatCompletion + GetHealth over the same router).
 	// A cancellable context lets shutdown GracefulStop it; a bind failure is
