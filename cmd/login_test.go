@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -107,12 +109,12 @@ func TestValidAuthCode(t *testing.T) {
 func TestCallbackFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, ch, stop, err := startCallbackServer(ctx, "expected-state")
+	cbURL, ch, stop, err := startCallbackServer(ctx, "expected-state")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
-	base := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	base := cbURL
 
 	resp, err := http.Get(base + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode())
 	if err != nil {
@@ -132,9 +134,9 @@ func TestCallbackFlow(t *testing.T) {
 func TestCallbackIgnoresPoisonThenAcceptsRealRedirect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
 	defer stop()
-	base := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	base := cbURL
 
 	// Poison 1: wrong state. Poison 2: malformed code. Neither may deliver.
 	if r, err := http.Get(base + "?" + url.Values{"code": {"c"}, "state": {"wrong"}}.Encode()); err == nil {
@@ -167,9 +169,9 @@ func TestCallbackIgnoresPoisonThenAcceptsRealRedirect(t *testing.T) {
 func TestCallbackDeliversProviderError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, ch, stop, _ := startCallbackServer(ctx, "s")
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "s")
 	defer stop()
-	if r, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?state=s&error=access_denied", port)); err == nil {
+	if r, err := http.Get(cbURL + "?state=s&error=access_denied"); err == nil {
 		r.Body.Close()
 	}
 	select {
@@ -188,9 +190,9 @@ func TestCallbackDeliversProviderError(t *testing.T) {
 func TestCallbackUnattributedErrorIsIgnored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
 	defer stop()
-	base := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	base := cbURL
 
 	// No state at all + error= → ignored.
 	if r, err := http.Get(base + "?error=access_denied"); err == nil {
@@ -220,9 +222,9 @@ func TestCallbackUnattributedErrorIsIgnored(t *testing.T) {
 func TestCallbackAcceptsCodeWithoutState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
 	defer stop()
-	if r, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?code=no-state-code", port)); err == nil {
+	if r, err := http.Get(cbURL + "?code=no-state-code"); err == nil {
 		r.Body.Close()
 	}
 	select {
@@ -232,5 +234,193 @@ func TestCallbackAcceptsCodeWithoutState(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("code without state was not delivered (would break providers that don't echo state)")
+	}
+}
+
+// TestCallbackSecretPath is the core of the issue-#7 hardening: the callback
+// lives on an unguessable path, so a local process that doesn't know it cannot
+// reach the handler at all — it can neither inject its own authorization code nor
+// burn the single-shot delivery. This protects the flow even when the provider
+// does not echo the state parameter.
+func TestCallbackSecretPath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, err := startCallbackServer(ctx, "expected-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	u, err := url.Parse(cbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The path must carry a high-entropy secret, not be a guessable constant.
+	if !strings.HasPrefix(u.Path, "/callback/") || len(strings.TrimPrefix(u.Path, "/callback/")) < 42 {
+		t.Fatalf("callback path should carry a 32-byte secret, got %q", u.Path)
+	}
+	origin := "http://" + u.Host
+
+	// Every guessable path an attacker would try must 404 and never deliver.
+	for _, p := range []string{"/callback", "/callback/", "/callback/guessed", "/", "/callback/" + strings.Repeat("a", 43)} {
+		resp, err := http.Get(origin + p + "?" + url.Values{"code": {"attacker-code"}, "state": {"expected-state"}}.Encode())
+		if err != nil {
+			continue
+		}
+		body := resp.StatusCode
+		resp.Body.Close()
+		if body != http.StatusNotFound {
+			t.Errorf("path %q should 404, got %d", p, body)
+		}
+	}
+	select {
+	case res := <-ch:
+		t.Fatalf("a request to a wrong path reached the handler: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The real (secret) path still completes the login.
+	if r, err := http.Get(cbURL + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("secret path should deliver: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the genuine redirect on the secret path was not delivered")
+	}
+}
+
+// Strict mode refuses a callback that carries no matching state, for operators
+// who have confirmed their provider echoes it.
+func TestCallbackRequireStateStrictMode(t *testing.T) {
+	t.Setenv("PROXY_OAUTH_REQUIRE_STATE", "true")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+
+	if r, err := http.Get(cbURL + "?code=no-state-code"); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err == nil {
+			t.Fatalf("strict mode must refuse a state-less callback, got code=%q", res.code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("strict mode should report the refusal, not hang")
+	}
+}
+
+// With strict mode on, a properly attributed callback still works.
+func TestCallbackRequireStateAcceptsMatching(t *testing.T) {
+	t.Setenv("PROXY_OAUTH_REQUIRE_STATE", "true")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+
+	if r, err := http.Get(cbURL + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("strict mode should accept a matching state: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("matching state was not delivered under strict mode")
+	}
+}
+
+// A concurrent flood of wrong-path requests must not consume the one-shot
+// delivery, and the genuine redirect must still win afterwards.
+func TestCallbackWrongPathFloodThenRealRedirect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "expected-state")
+	defer stop()
+	u, _ := url.Parse(cbURL)
+	origin := "http://" + u.Host
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p := fmt.Sprintf("%s/callback/guess-%d?code=attacker-code&state=expected-state", origin, i)
+			if r, err := http.Get(p); err == nil {
+				r.Body.Close()
+			}
+		}(i)
+	}
+	wg.Wait()
+	select {
+	case res := <-ch:
+		t.Fatalf("a wrong-path flood consumed the delivery: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if r, err := http.Get(cbURL + "?" + url.Values{"code": {"good-code"}, "state": {"expected-state"}}.Encode()); err == nil {
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil || res.code != "good-code" {
+			t.Fatalf("real redirect after flood: code=%q err=%v", res.code, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("real redirect was not delivered after a wrong-path flood")
+	}
+}
+
+// A deeper path under the secret must not match either (exact registration).
+func TestCallbackSubPathDoesNotDeliver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cbURL, ch, stop, _ := startCallbackServer(ctx, "s")
+	defer stop()
+	if r, err := http.Get(cbURL + "/extra?code=c&state=s"); err == nil {
+		if r.StatusCode != http.StatusNotFound {
+			t.Errorf("sub-path should 404, got %d", r.StatusCode)
+		}
+		r.Body.Close()
+	}
+	select {
+	case res := <-ch:
+		t.Fatalf("a sub-path reached the handler: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestRequireStateEnvParsing(t *testing.T) {
+	cases := map[string]bool{"": false, "0": false, "false": false, "no": false,
+		"1": true, "true": true, "TRUE": true, "yes": true, "on": true}
+	for val, want := range cases {
+		t.Setenv("PROXY_OAUTH_REQUIRE_STATE", val)
+		if got := requireState(); got != want {
+			t.Errorf("PROXY_OAUTH_REQUIRE_STATE=%q → %v; want %v", val, got, want)
+		}
+	}
+}
+
+// Each login must get a fresh, unguessable callback path.
+func TestCallbackPathIsFreshPerLogin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, _, stopA, _ := startCallbackServer(ctx, "s")
+	defer stopA()
+	b, _, stopB, _ := startCallbackServer(ctx, "s")
+	defer stopB()
+	pa, _ := url.Parse(a)
+	pb, _ := url.Parse(b)
+	if pa.Path == pb.Path {
+		t.Fatalf("callback path must be unique per login, got %q twice", pa.Path)
+	}
+	if pa.Path == "/callback" || pb.Path == "/callback" {
+		t.Fatal("callback path must not be the guessable constant /callback")
 	}
 }

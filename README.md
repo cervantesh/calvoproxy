@@ -60,6 +60,7 @@ before exit.
 | `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token (constant-time) |
 | `PROXY_METRICS_TOKEN` | off    | If set, `/metrics` accepts this token OR the admin token — decouples the scraper credential from admin |
 | `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending the env `OPENROUTER_API_KEY` for keyless requests on a **public** bind (loopback always allows it) |
+| `PROXY_OAUTH_REQUIRE_STATE` | `false` | Require a matching `state` on the `calvoproxy login` callback (the secret callback path already binds it; enable once you've seen your provider echo state) |
 | `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
@@ -311,9 +312,21 @@ calvoproxy whoami         # show which key is configured (masked) and its source
 calvoproxy logout         # remove the stored key
 ```
 
-`login` runs a one-shot loopback callback server, opens
-`https://openrouter.ai/auth`, and after you authorize, exchanges the code for a
-**user-controlled** API key (verified via PKCE `S256`). The key is written to
+`login` runs a one-shot loopback callback server on an **unguessable path**
+(32 random bytes), opens `https://openrouter.ai/auth`, and after you authorize,
+exchanges the code for a **user-controlled** API key (verified via PKCE `S256`).
+
+The secret path is what binds the callback to *your* login: another process on
+the same machine can find the port but not the path, so it can neither inject its
+own authorization code nor kill your login with junk — and unlike the OAuth
+`state` parameter, that protection doesn't depend on the provider echoing
+anything back. (It does not defend against a same-user attacker who can read the
+auth URL out of your browser history or the browser's command line; the secret
+travels in that URL, exactly as `state` would.) A mismatched `state` and an
+unattributed `error=` are ignored rather than ending the login. Set
+`PROXY_OAUTH_REQUIRE_STATE=true` to additionally *require* a matching `state` —
+`login` prints whether your provider echoed one, so you can enable it with
+evidence. The key is written to
 `<user-config-dir>/calvoproxy/openrouter.key` (`%AppData%` on Windows,
 `~/.config` on Linux, `~/Library/Application Support` on macOS), `0600`.
 
