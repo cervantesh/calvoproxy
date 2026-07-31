@@ -46,9 +46,14 @@ before exit.
 | `PROXY_OPENROUTER_URL` | OpenRouter | Override the OpenRouter chat endpoint (e.g. a mock) |
 | `PROXY_AGENTIC_URL`  | off     | If set, `agent`/`plan` profiles route here; unset → normal OpenRouter routing |
 | `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Opt-in monorepo git/sqlite extractor (off by default) |
+| `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
-successes, open-circuit count, readiness).
+successes, open-circuit count, readiness). When `PROXY_ADMIN_TOKEN` is set, the
+detailed endpoints require it; `/ready` stays open and returns readiness only.
+
+**Hot-reload** the model chains without a restart: edit `model-policy.json`, then
+`kill -HUP <pid>` (Unix) or `POST /admin/reload` (any platform, admin-gated).
 
 ### Reliability: circuit breaker + scoring
 

@@ -90,7 +90,7 @@ func (s *RouterService) recordSuccess(attempt modelAttempt) {
 func (s *RouterService) breakerKey(attempt modelAttempt) string {
 	profile := strings.TrimSpace(attempt.Profile)
 	if profile == "" {
-		profile = s.policy.DefaultProfile
+		profile = s.getPolicy().DefaultProfile
 	}
 	return profile + ":" + strings.TrimSpace(attempt.Model)
 }
@@ -98,7 +98,7 @@ func (s *RouterService) breakerKey(attempt modelAttempt) string {
 func (s *RouterService) allKnownAttempts() []modelAttempt {
 	seen := map[string]struct{}{}
 	attempts := make([]modelAttempt, 0)
-	for profile, chain := range s.policy.Profiles {
+	for profile, chain := range s.getPolicy().Profiles {
 		for _, model := range chain {
 			candidate := modelAttempt{Profile: profile, Model: model, Provider: s.defaultPolicyProvider(), BreakerPolicy: s.defaultBreakerPolicy()}
 			if _, ok := seen[s.breakerKey(candidate)]; ok {
@@ -178,7 +178,7 @@ func (s *RouterService) Health() ProxyHealth {
 		OpenCircuitCount:   openCount,
 		ConfiguredAPIKey:   envValue("OPENROUTER_API_KEY") != "",
 		DefaultExecutor:    string(s.defaultPolicyProvider()),
-		Profiles:           profileNames(s.policy.Profiles),
+		Profiles:           profileNames(s.getPolicy().Profiles),
 		FailureThreshold:   s.config.FailureThreshold,
 		CooldownSeconds:    int(s.config.Cooldown.Seconds()),
 		RequestTimeoutSecs: int(s.config.RequestTimeout.Seconds()),

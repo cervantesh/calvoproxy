@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,32 +94,73 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 	mux.HandleFunc("/v1/embeddings", proxyHandler(""))
 	mux.HandleFunc("/api/v1/embeddings", proxyHandler(""))
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// /health, /health/model-policy and /metrics expose internals (model chains,
+	// policy hashes, upstream error text). When PROXY_ADMIN_TOKEN is set they
+	// require it; otherwise they stay open (backward compatible).
+	mux.HandleFunc("/health", admin(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, routerService.Health())
-	})
+	}))
 
-	mux.HandleFunc("/health/model-policy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health/model-policy", admin(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, routerService.ModelPolicyHealth())
-	})
+	}))
 
+	mux.HandleFunc("/metrics", admin(func(w http.ResponseWriter, r *http.Request) {
+		writeMetrics(w, routerService.Health())
+	}))
+
+	// /ready stays open (load-balancer probe) but returns only readiness — no
+	// internals — so it's safe on an exposed port.
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		health := routerService.Health()
+		w.Header().Set("Content-Type", "application/json")
 		if !health.Ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		} else {
 			w.WriteHeader(http.StatusOK)
 		}
-		writeJSON(w, health)
+		writeJSON(w, map[string]any{"ready": health.Ready, "status": health.Status})
 	})
 
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		writeMetrics(w, routerService.Health())
-	})
+	// Hot-reload the model-policy.json chains without a restart. POST only, admin-gated.
+	mux.HandleFunc("/admin/reload", admin(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := routerService.ReloadModelPolicy(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]any{"reloaded": false, "error": err.Error()})
+			return
+		}
+		slog.Info("model policy reloaded via /admin/reload")
+		writeJSON(w, map[string]any{"reloaded": true, "profiles": routerService.Health().Profiles})
+	}))
 
 	return mux
+}
+
+// admin gates a handler behind PROXY_ADMIN_TOKEN. When the env var is unset the
+// endpoint is open (unchanged default); when set, callers must present it as a
+// Bearer token or X-Admin-Token header.
+func admin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := os.Getenv("PROXY_ADMIN_TOKEN")
+		if token != "" {
+			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if got == "" {
+				got = r.Header.Get("X-Admin-Token")
+			}
+			if got != token {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		h(w, r)
+	}
 }
 
 func boolToInt(b bool) int {
@@ -170,6 +212,20 @@ func main() {
 	routerService := router.NewRouterService()
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
+
+	// SIGHUP → hot-reload model-policy.json without a restart (Unix; the signal
+	// is never delivered on Windows, where /admin/reload is the way).
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		for range hupCh {
+			if err := routerService.ReloadModelPolicy(); err != nil {
+				slog.Warn("model policy reload (SIGHUP) failed", "error", err)
+			} else {
+				slog.Info("model policy reloaded (SIGHUP)")
+			}
+		}
+	}()
 
 	srv := httpx.NewServer(host+":"+port, mux)
 	// LLM responses can be long or streamed — a fixed write deadline would cut

@@ -88,6 +88,7 @@ type RouterService struct {
 	Fallbacks      FallbackExecutor
 	PolicyEngine   cervorules.Engine
 	config         breakerConfig
+	policyMu       sync.RWMutex // guards policy + modelPolicy for hot-reload
 	policy         policyConfig
 	modelPolicy    *cervomodelpolicy.Policy
 	modelWarnings  []cervomodelpolicy.ValidationIssue
