@@ -77,6 +77,40 @@ readiness only.
 **Hot-reload** the model chains without a restart: edit `model-policy.json`, then
 `kill -HUP <pid>` (Unix) or `POST /admin/reload` (any platform, admin-gated).
 
+### Capability-aware routing (vision + tools)
+
+Not every free model accepts images or does tool calling. CalvoProxy tags each
+model with its capabilities and, when a request needs one, filters the chain to
+models that actually support it before breaker/scoring/fallback — so a photo goes
+to a vision model and a tool-calling request goes to a tool-capable model (and a
+request that needs **both** goes to a model that does both).
+
+- **Detection:** image content ⇒ needs `vision`; a `tools`/`functions` array ⇒
+  needs `tools`. Plain text requests are never filtered (zero change).
+- **Fail-closed:** a model with no known capability data does **not** qualify, so
+  images/tools are never silently routed to an incapable model. If you pin a
+  specific `model` that can't do what the request needs, you get a clear `422`.
+- **Rescue:** if the selected profile has no capable model, the router falls back
+  to any known-capable model across profiles; if none exists, a clear `503`.
+- **Capabilities source (hybrid):** auto-derived from the public OpenRouter
+  `/models` API (`input_modalities`/`supported_parameters`), **merged with** manual
+  overrides in `model-policy.json` (authoritative — use `"!vision"`/`"!tools"` to
+  deny a wrongly-reported capability):
+
+  ```json
+  "Capabilities": {
+    "google/gemma-4-31b-it:free": ["vision", "tools"],
+    "openai/gpt-oss-20b:free": ["tools"]
+  }
+  ```
+
+  Auto-derive runs in the background (`PROXY_CAPABILITY_AUTODERIVE=false` to
+  disable; `PROXY_CAPABILITY_REFRESH_SECONDS` to change the 6h interval); the
+  curated overrides cover the chain models synchronously so it works offline too.
+  Refresh the capability data the same way as the model list — the OpenRouter
+  `/models` response carries `architecture.input_modalities` and
+  `supported_parameters` per model.
+
 ### Reliability: circuit breaker + scoring
 
 Two layers keep flaky models out of the way:

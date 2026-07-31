@@ -42,5 +42,15 @@
     "agent": "agent",
     "creative": "creative",
     "vision": "vision"
+  },
+    "Capabilities": {
+    "nvidia/nemotron-3-super-120b-a12b:free": ["tools"],
+    "nvidia/nemotron-3-ultra-550b-a55b:free": ["tools"],
+    "openai/gpt-oss-20b:free": ["tools"],
+    "cohere/north-mini-code:free": ["tools"],
+    "google/gemma-4-26b-a4b-it:free": ["vision", "tools"],
+    "google/gemma-4-31b-it:free": ["vision", "tools"],
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": ["vision", "tools"],
+    "nvidia/nemotron-nano-12b-v2-vl:free": ["vision", "tools"]
   }
 }
