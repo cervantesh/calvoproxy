@@ -175,6 +175,11 @@ type modelAttempt struct {
 	// messages path to route an Anthropic-compatible request through the same
 	// model chain / breaker / scoring / fallback machinery as chat.
 	Path string
+	// AttemptIndex is this attempt's 1-based position in the chain, surfaced to
+	// the client as X-Calvoproxy-Attempt. Anything above 1 means the request was
+	// served by a fallback — the single most useful thing a caller can know and
+	// the one thing an HTTP status never tells it.
+	AttemptIndex int
 	// LastInChain marks the final attempt the executor will make. The
 	// fail-fast first-event budget is skipped for it: with nothing left to fall
 	// back to, abandoning would turn a slow success into a fast failure —
