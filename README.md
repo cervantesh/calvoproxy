@@ -294,6 +294,17 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   | jq -r '.model'
 ```
 
+- **Check the response headers.** Every answer names the model that actually
+  served it, so a caller never has to guess:
+
+  | Header | Meaning |
+  |---|---|
+  | `X-Calvoproxy-Model` | the model that answered |
+  | `X-Calvoproxy-Profile` | the profile it was routed under |
+  | `X-Calvoproxy-Attempt` | position in the chain — **anything above 1 was a fallback** |
+
+  `X-Calvoproxy-Attempt` is the degraded signal an HTTP status can never give
+  you. The body's `model` field carries the same id for callers that parse it.
 - **Check `.model` on anything you intend to trust.** A profile name is a
   request, not a guarantee.
 - **Keep weak models out of chains used for judgment.** The quality floor is

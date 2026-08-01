@@ -179,3 +179,51 @@ func TestUpstream400AdvancesToTheNextModel(t *testing.T) {
 		t.Errorf("upstream called %d time(s); the next model was never tried", calls.Load())
 	}
 }
+
+// A profile name is a request, not a promise: the chain reorders and falls
+// through, so "coding" can be served by any member. Without these headers a
+// caller cannot tell a first-choice answer from a fallback — which is how a
+// design review ended up answered by the third model in the chain while the
+// caller believed it had the first.
+func TestServedModelHeadersRevealFallback(t *testing.T) {
+	t.Setenv("PROXY_SCORING_ENABLED", "false")
+	bindHost = "127.0.0.1"
+
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"upstream down"}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+	t.Setenv("PROXY_OPENROUTER_URL", upstream.URL)
+
+	svc := router.NewRouterService()
+	defer svc.Close()
+	mux := newMux(svc, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/coding/chat/completions",
+		strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Calvoproxy-Profile"); got != "coding" {
+		t.Errorf("profile header = %q, want coding", got)
+	}
+	if got := rec.Header().Get("X-Calvoproxy-Model"); got == "" {
+		t.Error("the served model must be named in the response")
+	}
+	// The first model 5xx'd, so this answer came from a fallback. That is the
+	// whole point: an HTTP 200 alone cannot tell the caller that.
+	if got := rec.Header().Get("X-Calvoproxy-Attempt"); got != "2" {
+		t.Errorf("attempt header = %q, want 2 (served by a fallback)", got)
+	}
+}
