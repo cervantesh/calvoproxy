@@ -135,3 +135,47 @@ func TestFirstEventBudget_LastAttemptIsExempt(t *testing.T) {
 		t.Errorf("the last attempt was cut anyway (counter=%d)", got)
 	}
 }
+
+// A 400 from one provider is not a verdict on the request. Observed in
+// production: a client exposing more than 64 tools got
+// `400 invalid_request_error: "at most 64 tools are allowed"` from one
+// provider, and because 400 is otherwise terminal the whole chain stopped —
+// the user got an error in 0.8s from a request every other model could serve.
+func TestUpstream400AdvancesToTheNextModel(t *testing.T) {
+	t.Setenv("PROXY_SCORING_ENABLED", "false")
+	bindHost = "127.0.0.1"
+
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"code":"invalid_request_error","message":"at most 64 tools are allowed","param":"tools"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"served-by-the-next-model"}}]}`)
+	}))
+	defer upstream.Close()
+	t.Setenv("PROXY_OPENROUTER_URL", upstream.URL)
+
+	svc := router.NewRouterService()
+	defer svc.Close()
+	mux := newMux(svc, nil)
+
+	body := `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/coding/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("one provider's 400 must not end the chain: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "served-by-the-next-model") {
+		t.Errorf("the chain did not advance past the 400; got %q", rec.Body.String())
+	}
+	if calls.Load() < 2 {
+		t.Errorf("upstream called %d time(s); the next model was never tried", calls.Load())
+	}
+}
