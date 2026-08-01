@@ -155,9 +155,11 @@ func TestFallback_MarksTheDegradedAttempt(t *testing.T) {
 		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
 	})
 
+	// RouteRequest, not RouteRequestWithProvider: this is the entry point the
+	// server actually calls, so at least one test has to go through it.
 	rec := httptest.NewRecorder()
-	svc.RouteRequestWithProvider(rec, trustedRequest(
-		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+	svc.RouteRequest(rec, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("chain should recover on model-b, got %d: %s", rec.Code, rec.Body.String())

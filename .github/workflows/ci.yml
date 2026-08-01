@@ -25,3 +25,26 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Vendored dependency integrity
+        # The cervo-* modules have NO go.sum entries and no reachable upstream
+        # (third_party/ is not in this repo). This manifest is the only thing
+        # that would notice if they changed. See THIRD_PARTY.md.
+        run: ./scripts/vendor-manifest.sh
+      - name: Coverage gate
+        # A ratchet, not a target. Floors sit at the last measured value and only
+        # move up, so a hurried PR cannot quietly trade coverage for speed. See
+        # scripts/coverage-floors.txt -- lowering a floor is a visible diff line.
+        run: ./scripts/coverage-gate.sh
+      - name: Contract tests (real upstream)
+        # Opt-in and secret-gated: they spend real quota, so forks and PRs from
+        # forks skip them. They are the only check that tests what OpenRouter
+        # actually does rather than what our mocks assume -- the 64-tool cap
+        # shipped precisely because no mock modelled it.
+        # Guard on `secrets`, not `env`: a step-level `env:` block is not visible
+        # to that step's own `if`, so `env.OPENROUTER_API_KEY != ''` is always
+        # false and the step would silently never run.
+        if: ${{ secrets.OPENROUTER_API_KEY != '' }}
+        env:
+          CALVOPROXY_CONTRACT: "1"
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: go test ./test/contract/ -v

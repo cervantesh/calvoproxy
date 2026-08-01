@@ -19,3 +19,4 @@ proxy.err
 proxy.out
 start-hidden.vbs
 verify.exe
+coverage.out
