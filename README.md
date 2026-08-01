@@ -10,6 +10,68 @@ reliability scoring, limits and audit — on top of upstream forwarding.
 CalvoProxy is **fully self-contained**: all of its dependencies are **vendored**
 (`vendor/`), so it builds and runs offline with no external module access.
 
+## Quickstart
+
+Three commands from nothing to a working proxy:
+
+```bash
+calvoproxy login     # browser sign-in with OpenRouter; stores a per-user key
+calvoproxy           # starts on http://127.0.0.1:8080
+calvoproxy doctor    # verifies the whole chain and your client wiring
+```
+
+`doctor` is the shortcut past every trap below. It checks, in the order you
+actually hit them: the proxy answers, credentials resolve, a **real completion
+survives the whole chain**, and — if Hermes is installed — that Hermes is wired
+to route through the proxy. Every failure prints the fix, and a failing run
+prints the exact config block to paste. Use `--no-live` to skip the real
+request.
+
+### Wiring Hermes (read this before editing config.yaml)
+
+Two keys are required, and missing either one fails **silently** — Hermes keeps
+working, it just quietly talks to OpenRouter (or your previous provider)
+instead of the proxy:
+
+```yaml
+model:
+  provider: custom
+  default: coding
+  base_url: http://127.0.0.1:8080/v1   # REQUIRED — see below
+  api_key: dummy                       # the real key lives in the proxy
+
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1  # must match model.base_url exactly
+    api_key: dummy
+    api_mode: chat_completions
+    discover_models: false              # the proxy serves no /v1/models
+    models:
+      coding:    {context_length: 131072}
+      simple:    {context_length: 131072}
+      reasoning: {context_length: 131072}
+      vision:    {context_length: 131072}
+```
+
+- **`model.base_url` is what binds `provider: custom` to the `custom_providers`
+  entry.** Without it Hermes resolves `provider: custom` but keeps
+  `base_url: https://openrouter.ai/api/v1`, then sends a profile name like
+  `coding` upstream and gets `400: coding is not a valid model ID`.
+- **Use `127.0.0.1`, not `localhost`.** Hermes only trusts `model.base_url`
+  when the host is loopback, and `localhost` can resolve to IPv6 `::1` while
+  the proxy listens on IPv4 only.
+- **The gateway does not reload `config.yaml` while running.** Restart it after
+  editing, or nothing changes.
+
+Confirm it actually took effect — the proxy's own counters are the only proof:
+
+```bash
+curl -s http://127.0.0.1:8080/metrics | grep calvoproxy_requests_by_status
+```
+
+Send one message through Hermes and watch `class="2xx"` increase. If it does
+not move, the request never reached the proxy.
+
 ## Build
 
 ```bash
