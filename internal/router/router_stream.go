@@ -1,6 +1,8 @@
 package router
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -197,5 +199,68 @@ func streamCopy(ctx context.Context, w http.ResponseWriter, body io.ReadCloser, 
 			_ = body.Close() // client disconnect / cancellation
 			return streamClientGone
 		}
+	}
+}
+
+// --- fail-fast on the first stream event -------------------------------------
+
+// firstEventReader stitches the bytes consumed while waiting for the first SSE
+// event back in front of the still-buffered reader, so nothing is lost between
+// the pre-commit wait and streamCopy. Close goes to the original body.
+type firstEventReader struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (f firstEventReader) Close() error { return f.closer.Close() }
+
+// awaitFirstStreamEvent waits for the first SSE event that actually carries
+// payload, so the caller can abandon a queued model BEFORE committing headers
+// to the client.
+//
+// Keepalive comments do NOT count as progress. OpenRouter emits
+// `: OPENROUTER PROCESSING` precisely while a request sits queued upstream —
+// the exact condition this wait exists to detect — so treating any byte as
+// arrival would defeat the mechanism in the only case that matters.
+//
+// Returns a reader positioned as if nothing had been consumed, whether a real
+// event arrived, and whether the wait timed out (as opposed to the stream
+// simply ending).
+func awaitFirstStreamEvent(body io.ReadCloser, timeout time.Duration) (io.ReadCloser, bool, bool) {
+	type result struct {
+		consumed []byte
+		ok       bool
+	}
+	br := bufio.NewReader(body)
+	ch := make(chan result, 1) // buffered: a timed-out reader must not block forever
+	go func() {
+		var seen bytes.Buffer
+		for {
+			line, err := br.ReadBytes('\n')
+			seen.Write(line)
+			if err != nil {
+				ch <- result{seen.Bytes(), false}
+				return
+			}
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) == 0 || trimmed[0] == ':' {
+				continue // blank separator or keepalive comment: not progress
+			}
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				ch <- result{seen.Bytes(), true}
+				return
+			}
+		}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return firstEventReader{Reader: io.MultiReader(bytes.NewReader(r.consumed), br), closer: body}, r.ok, false
+	case <-timer.C:
+		// The goroutine is still blocked in Read. The caller closes the body,
+		// which unblocks it; its send lands in the buffered channel and it exits.
+		return nil, false, true
 	}
 }
