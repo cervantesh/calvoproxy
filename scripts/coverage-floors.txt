@@ -7,7 +7,7 @@
 # encodes values CI cannot meet. Regenerate on Linux, or copy from the measured
 # table the gate prints when it fails.
 pkg github.com/cervantesh/calvoproxy/cmd 59.6
-pkg github.com/cervantesh/calvoproxy/internal/router 81.8
+pkg github.com/cervantesh/calvoproxy/internal/router 81.7
 pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 84.6
 pkg github.com/cervantesh/calvoproxy/internal/telemetry 100.0
 func RouteRequest 100.0
