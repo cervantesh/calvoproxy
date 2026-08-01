@@ -462,19 +462,29 @@ func (s *RouterService) visionChainServes(chain []string, hasTools bool) bool {
 	return false
 }
 
-// rejectUnknownProfile reports whether an explicitly requested model name is a
-// bare word that names no profile and no alias — and, if so, answers 404.
+// rejectUnknownProfile reports whether an explicitly requested model name names
+// no profile and no alias — and, when strict naming is enabled, answers 404.
 //
-// Why this exists: without it an unknown name is silently ignored and the
-// profile is chosen by keyword-classifying the prompt, so a request for a
-// profile that does not exist (a typo, or a client written against docs that
-// landed before the policy did) returns 200 from whatever chain classification
-// picked. The caller believes it got the profile it named. For a fail-closed
-// profile that guarantee is the entire feature, and silence destroys it.
+// Why this exists: an unknown name is otherwise silently ignored and the profile
+// is chosen by keyword-classifying the prompt, so a request for a profile that
+// does not exist (a typo, or a client written against docs that landed before
+// the policy did) returns 200 from whatever chain classification picked. The
+// caller believes it got the profile it named. For a fail-closed profile that
+// guarantee is the entire feature.
+//
+// OFF BY DEFAULT (PROXY_STRICT_PROFILE_NAMES), because rejecting is wrong for an
+// OpenAI-compatible proxy: clients legitimately send their own model names. This
+// shipped hard-on in v0.5.0 and broke a real client — Hermes calls its model
+// "Sol", so every turn that named it got a 404 while requests naming "coding"
+// sailed through, which is exactly the intermittent, hard-to-attribute failure a
+// gate like this should never cause.
+//
+// The counter is incremented either way, so a substitution is still visible in
+// /metrics even when it is allowed to proceed.
 //
 // Scoped deliberately to names WITHOUT a "/": every real upstream model id is
 // `vendor/model`, so pinning a specific model — including one absent from every
-// chain — keeps working untouched. Only profile-shaped names are validated.
+// chain — keeps working untouched.
 func (s *RouterService) rejectUnknownProfile(w http.ResponseWriter, requestedModel string) bool {
 	name := strings.TrimSpace(requestedModel)
 	if name == "" || strings.Contains(name, "/") {
@@ -506,8 +516,14 @@ func (s *RouterService) rejectUnknownProfile(w http.ResponseWriter, requestedMod
 			}
 		}
 	}
-	known := profileNames(pol.Profiles)
+	// Unknown either way — count it so the substitution is never invisible.
 	s.counters.unknownProfileRejected.Add(1)
+	if !envBool("PROXY_STRICT_PROFILE_NAMES", false) {
+		slog.Debug("[CalvoProxy] unknown profile name, falling back to classification",
+			slog.String("requested", name))
+		return false
+	}
+	known := profileNames(pol.Profiles)
 	writeJSONError(w, http.StatusNotFound, fmt.Sprintf(
 		"unknown profile %q; known profiles: %s (pin a specific model with its full vendor/model id)",
 		name, strings.Join(known, ", ")))
