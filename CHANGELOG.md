@@ -11,6 +11,15 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-01
+
+Nothing in this release changes how the proxy routes a request. It changes what
+the project can prove about itself, and it raises the Go floor.
+
+**Minor, not patch, for one reason: this requires Go 1.26 to build.** Anyone on
+1.25 will fail, which is not a patch-level surprise. There is no behavioural
+change to the running proxy.
+
 ### Added
 - Contract tests against the **real** OpenRouter API (`test/contract/`,
   opt-in via `CALVOPROXY_CONTRACT=1`). Every mock in this repo encodes an
@@ -259,7 +268,8 @@ out — see v0.7.1.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.0
 [0.8.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.8.0
 [0.7.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.7.2
 [0.7.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.7.1
