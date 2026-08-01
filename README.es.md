@@ -300,6 +300,17 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   | jq -r '.model'
 ```
 
+- **Revisá las cabeceras de la respuesta.** Toda respuesta nombra el modelo que
+  la sirvió, así que el llamador nunca tiene que adivinar:
+
+  | Cabecera | Significado |
+  |---|---|
+  | `X-Calvoproxy-Model` | el modelo que respondió |
+  | `X-Calvoproxy-Profile` | el perfil bajo el que se ruteó |
+  | `X-Calvoproxy-Attempt` | posición en la cadena — **más de 1 fue un fallback** |
+
+  `X-Calvoproxy-Attempt` es la señal de degradación que un status HTTP nunca te
+  da. El campo `model` del cuerpo lleva el mismo id para quien parsee el cuerpo.
 - **Revisá `.model` en todo lo que pienses creerle.** Un nombre de perfil es un
   pedido, no una garantía.
 - **Mantené los modelos débiles fuera de las cadenas que usás para juzgar.** El
