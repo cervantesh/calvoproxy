@@ -9,11 +9,17 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    # Job level, not step level. A step's own `env:` block is not visible to that
+    # step's `if:`, and the `secrets` context is not available in `if:` at all —
+    # using it there is a workflow file error, which fails the run in 0s with no
+    # log. (Learned the direct way.) Job-level env IS visible to step `if:`.
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - name: Build (offline, vendored)
         run: GOPROXY=off go build -mod=vendor ./...
       - name: Test
@@ -25,3 +31,36 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Vendored dependency integrity
+        # The cervo-* modules have NO go.sum entries and no reachable upstream
+        # (third_party/ is not in this repo). This manifest is the only thing
+        # that would notice if they changed. See THIRD_PARTY.md.
+        run: ./scripts/vendor-manifest.sh
+      - name: Coverage gate
+        # A ratchet, not a target. Floors sit at the last measured value and only
+        # move up, so a hurried PR cannot quietly trade coverage for speed. See
+        # scripts/coverage-floors.txt -- lowering a floor is a visible diff line.
+        run: ./scripts/coverage-gate.sh
+      - name: Contract tests must be configured on main and dev
+        # Optional forever is the same failure shape as "one green check was
+        # enough": the check exists, never runs, and its absence reads as a pass.
+        # On the protected branches the secret is REQUIRED, so a missing one is a
+        # loud failure rather than a silent skip. Pull requests (including from
+        # forks, which cannot see secrets) are exempt.
+        if: github.event_name == 'push' && env.OPENROUTER_API_KEY == ''
+        run: |
+          echo "::error::OPENROUTER_API_KEY is not configured, so the upstream" \
+               "contract tests cannot run on ${{ github.ref_name }}."
+          echo "These are the only check that tests what OpenRouter actually does"
+          echo "rather than what our mocks assume. The 64-tool cap shipped because"
+          echo "no mock modelled it. Set the repository secret, or delete this step"
+          echo "and say so in the README."
+          exit 1
+      - name: Contract tests (real upstream)
+        # They spend real quota, so they are opt-in via CALVOPROXY_CONTRACT and
+        # gated on the secret being present. The step above is what stops "absent"
+        # from quietly becoming permanent.
+        if: env.OPENROUTER_API_KEY != ''
+        env:
+          CALVOPROXY_CONTRACT: "1"
+        run: go test ./test/contract/ -v
