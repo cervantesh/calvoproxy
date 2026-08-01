@@ -26,33 +26,39 @@ type routerCounters struct {
 	// free embedding model upstream. Counted so an operator can see whether
 	// anything is actually trying to use it before opting in.
 	paidEmbeddingRefused atomic.Int64
+	// A streaming attempt abandoned before its first real event. Kept OUT of
+	// streamOutcome: it happens before streamCopy runs, so folding it into that
+	// enum would make the stream metrics describe something that never streamed.
+	streamFirstEventTimeout atomic.Int64
 }
 
 // RouterCounters is the exported snapshot rendered into Prometheus text.
 type RouterCounters struct {
-	StreamsCompleted       int64
-	StreamsStalled         int64
-	StreamsUpstreamErr     int64
-	StreamsMaxReached      int64
-	StreamsClientGone      int64
-	AdmissionRejected      int64
-	CapabilityRefused      int64
-	UnknownProfileRejected int64
-	PaidEmbeddingRefused   int64
+	StreamsCompleted        int64
+	StreamsStalled          int64
+	StreamsUpstreamErr      int64
+	StreamsMaxReached       int64
+	StreamsClientGone       int64
+	AdmissionRejected       int64
+	CapabilityRefused       int64
+	UnknownProfileRejected  int64
+	PaidEmbeddingRefused    int64
+	StreamFirstEventTimeout int64
 }
 
 // Counters returns a snapshot of the router's event counters.
 func (s *RouterService) Counters() RouterCounters {
 	return RouterCounters{
-		StreamsCompleted:       s.counters.streamsCompleted.Load(),
-		StreamsStalled:         s.counters.streamsStalled.Load(),
-		StreamsUpstreamErr:     s.counters.streamsUpstreamErr.Load(),
-		StreamsMaxReached:      s.counters.streamsMaxReached.Load(),
-		StreamsClientGone:      s.counters.streamsClientGone.Load(),
-		AdmissionRejected:      s.counters.admissionRejected.Load(),
-		CapabilityRefused:      s.counters.capabilityRefused.Load(),
-		UnknownProfileRejected: s.counters.unknownProfileRejected.Load(),
-		PaidEmbeddingRefused:   s.counters.paidEmbeddingRefused.Load(),
+		StreamsCompleted:        s.counters.streamsCompleted.Load(),
+		StreamsStalled:          s.counters.streamsStalled.Load(),
+		StreamsUpstreamErr:      s.counters.streamsUpstreamErr.Load(),
+		StreamsMaxReached:       s.counters.streamsMaxReached.Load(),
+		StreamsClientGone:       s.counters.streamsClientGone.Load(),
+		AdmissionRejected:       s.counters.admissionRejected.Load(),
+		CapabilityRefused:       s.counters.capabilityRefused.Load(),
+		UnknownProfileRejected:  s.counters.unknownProfileRejected.Load(),
+		PaidEmbeddingRefused:    s.counters.paidEmbeddingRefused.Load(),
+		StreamFirstEventTimeout: s.counters.streamFirstEventTimeout.Load(),
 	}
 }
 
