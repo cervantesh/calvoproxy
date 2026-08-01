@@ -48,6 +48,31 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Transport Error")
+		// A cancelled request context is not the model's fault. The client hung
+		// up, or we abandoned the attempt ourselves — either way the upstream
+		// was never given a chance to fail. Scoring it, opening its circuit or
+		// counting it against the shared host punishes a model for someone
+		// else's disconnect.
+		//
+		// Same bug class fixed for streams in v0.4.0 (router_stream.go checks
+		// ctx.Err() before blaming the model); the non-streaming path never got
+		// the same treatment. It matters more than it looks: the vendored
+		// ClassifyTransportError marks everything BreakerEligible by default
+		// with no context.Canceled branch, and the host breaker counts ANY
+		// transport error — so a few cancelled requests in a row open
+		// openrouter.ai for EVERY model.
+		//
+		// DeadlineExceeded is deliberately excluded: that is our own per-attempt
+		// timeout firing, which is real evidence the model is too slow.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			s.resolveProbe(attempt) // release the half-open claim without a verdict
+			return &attemptError{
+				StatusCode: http.StatusServiceUnavailable,
+				Retryable:  false,
+				SkipModel:  true,
+				Message:    "request cancelled before the upstream responded",
+			}
+		}
 		attErr := classifyTransportError(err)
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
