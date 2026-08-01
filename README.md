@@ -242,6 +242,54 @@ Additional policy/behaviour overrides (`PROXY_DEFAULT_PROVIDER`,
 `PROXY_PROVIDER_FALLBACKS_JSON`, `PROXY_LIMITS_JSON`, `PROXY_RETRY_POLICY_JSON`,
 …) are documented in [docs/POLICY.md](docs/POLICY.md).
 
+### Choosing a profile
+
+Clients ask for a **profile name**, not a model id. The proxy resolves it to an
+ordered chain and walks down that chain on failure or rate-limit.
+
+| Profile | For | Chain leads with |
+|---|---|---|
+| `simple` (default) | short answers, light turns | `nemotron-3-super-120b-a12b` |
+| `coding` | code, and agent work that calls tools | `nemotron-3-super-120b-a12b` |
+| `reasoning` | analysis, review, planning | `nemotron-3-ultra-550b-a55b` |
+| `agent` | tool-calling loops | `nemotron-3-super-120b-a12b` |
+| `creative` | prose, drafting | `nemotron-3-super-120b-a12b` |
+| `vision` | requests containing images | vision-capable models only |
+
+**Reading model names.** Size is in the slug, and the part that matters is the
+*active* parameter count of a mixture-of-experts model:
+`nemotron-3-ultra-550b-a55b` is 550B total but **55B active per token**;
+`nemotron-3-nano-30b-a3b` is **3B active**. That is an 18× difference in real
+compute between two models that both advertise "reasoning". `nano`, `mini`,
+`xs` and `flash` mean small or latency-optimized.
+
+**Chains degrade silently, and that is a feature with a sharp edge.** If the
+first model is rate-limited the second answers, and so on. For bulk work an
+answer beats no answer. For a task where a *wrong* answer is worse than no
+answer — an adversarial review, a correctness judgment — a chain that falls
+through to a much smaller model gives you a confident answer you should not
+trust. Nothing in the HTTP status says this happened.
+
+Two defences, both available today:
+
+```bash
+# The response names the model that actually served it.
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer dummy" \
+  -d '{"model":"reasoning","messages":[{"role":"user","content":"hi"}]}' \
+  | jq -r '.model'
+```
+
+- **Check `.model` on anything you intend to trust.** A profile name is a
+  request, not a guarantee.
+- **Keep weak models out of chains used for judgment.** The quality floor is
+  enforced by *omission*: reliability scoring can reorder a chain but can never
+  introduce a model that is not listed in it, so a chain whose every member is
+  above your bar stays above it.
+
+A fail-closed `critic` profile — one that returns 503 rather than degrade — is
+designed in [issue #10](https://github.com/cervantesh/calvoproxy/issues/10).
+
 ### Model chains (edit without recompiling)
 
 The per-profile model chains live in **`model-policy.json`** — the live,
