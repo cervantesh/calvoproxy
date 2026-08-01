@@ -13,6 +13,7 @@
 /tmp/
 build-errors.log
 ensure-*.ps1
+ensure-*.ps1.bak
 ensure-calvoproxy.ps1
 proxy.err
 proxy.out
