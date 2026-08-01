@@ -104,8 +104,13 @@ change to the running proxy.
 - CI's contract-test guard used the `secrets` context in a step-level `if:`,
   which is a workflow file error — two runs failed in 0s with no log. The env
   has to be declared at **job** level; a step's own `env:` block is invisible to
-  that step's `if:`. A missing key is now a loud failure on pushes to main and
-  dev, rather than a step that skips forever and reads as a pass.
+  that step's `if:`. The tests now run wherever a key exists and are skipped
+  cleanly wherever one does not — which is most places, since forks cannot read
+  secrets and a contributor's clone has no key at all. A skipped run says so in
+  the job summary: absence is visible, never fatal. Requiring the key would
+  paint every contributor's CI red for a reason unrelated to their change, which
+  is a good way to teach people to ignore CI. This is a public project, not one
+  deployment's private pipeline.
 
 ## [0.8.0] — 2026-08-01
 ### Added
