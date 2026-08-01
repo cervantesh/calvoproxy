@@ -255,14 +255,26 @@ Overrides adicionales de política/comportamiento (`PROXY_DEFAULT_PROVIDER`,
 Los clientes piden un **nombre de perfil**, no un id de modelo. El proxy lo
 resuelve a una cadena ordenada y baja por ella ante fallo o rate-limit.
 
-| Perfil | Para | La cadena encabeza con |
+| Perfil | Para | Al agotarse la cadena |
 |---|---|---|
-| `simple` (por defecto) | respuestas cortas, turnos livianos | `nemotron-3-super-120b-a12b` |
-| `coding` | código, y trabajo de agente que llama tools | `nemotron-3-super-120b-a12b` |
-| `reasoning` | análisis, revisión, planificación | `nemotron-3-ultra-550b-a55b` |
-| `agent` | bucles de tool-calling | `nemotron-3-super-120b-a12b` |
-| `creative` | prosa, borradores | `nemotron-3-super-120b-a12b` |
+| `coding` (por defecto) | código, y trabajo de agente con tools | degrada, cola débil permitida |
+| `reasoning` | análisis, planificación, diseño | degrada, pero nunca por debajo de ~12B |
+| `critic` | revisión adversarial, juicios de corrección | **503 — nunca degrada** |
+| `bulk` | resúmenes, clasificación, borradores | degrada libremente |
 | `vision` | peticiones con imágenes | solo modelos con visión |
+
+Alias: `simple`→`bulk`, `agent`/`creative`→`coding`, `review`/`adversarial`→`critic`,
+`planning`/`design`→`reasoning`.
+
+**Los perfiles se distinguen por el fallo que tolerás, no por el nombre de la
+tarea.** `coding` y `bulk` pueden caer a un modelo chico porque una respuesta vale
+más que ninguna. `critic` no: para una revisión, una respuesta confiada y errónea es
+peor que ninguna, así que su cadena no tiene cola débil y devuelve **503** cuando
+todos sus miembros están caídos. Reintentá, o escalá a un revisor más fuerte.
+
+Un nombre de perfil que no existe ahora da **404**, no una sustitución silenciosa —
+un typo, o un cliente escrito contra documentación anterior a la política, no debe
+recibir respuesta de la cadena que la clasificación por palabras clave eligió.
 
 **Cómo leer los nombres.** El tamaño está en el slug, y lo que importa es la
 cantidad de parámetros **activos** en un modelo mixture-of-experts:
@@ -296,8 +308,10 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   ella, así que una cadena cuyos miembros están todos por encima de tu barra se
   mantiene por encima.
 
-Un perfil `critic` fail-closed —que devuelve 503 en vez de degradar— está
-diseñado en el [issue #10](https://github.com/cervantesh/calvoproxy/issues/10).
+`/v1/embeddings` se rechaza por defecto (**402**): OpenRouter no publica ningún
+modelo de embeddings gratuito, así que ese endpoint gasta crédito real y es el único
+camino sin cadena, breaker ni fallback detrás. Habilitalo con
+`PROXY_ALLOW_PAID_EMBEDDINGS=true`.
 
 ### Cadenas de modelos (editar sin recompilar)
 

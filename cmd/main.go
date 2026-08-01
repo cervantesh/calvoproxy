@@ -274,6 +274,10 @@ func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
 	fmt.Fprintf(w, "calvoproxy_admission_rejected_total %d\n", c.AdmissionRejected)
 	fmt.Fprintln(w, "# HELP calvoproxy_capability_refused_total Requests refused for lacking a capable model (vision/tools)\n# TYPE calvoproxy_capability_refused_total counter")
 	fmt.Fprintf(w, "calvoproxy_capability_refused_total %d\n", c.CapabilityRefused)
+	fmt.Fprintln(w, "# HELP calvoproxy_unknown_profile_rejected_total Requests naming a profile that does not exist (404)\n# TYPE calvoproxy_unknown_profile_rejected_total counter")
+	fmt.Fprintf(w, "calvoproxy_unknown_profile_rejected_total %d\n", c.UnknownProfileRejected)
+	fmt.Fprintln(w, "# HELP calvoproxy_paid_embedding_refused_total Embedding requests refused because they would bill real credit\n# TYPE calvoproxy_paid_embedding_refused_total counter")
+	fmt.Fprintf(w, "calvoproxy_paid_embedding_refused_total %d\n", c.PaidEmbeddingRefused)
 }
 
 func main() {
