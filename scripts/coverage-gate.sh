@@ -11,22 +11,27 @@
 # means this change removed coverage that existed before it — not that the repo
 # fell short of some ideal.
 #
-# Two legitimate sources of drops have nothing to do with tests:
+# PACKAGE TOTALS ARE PINNED TO WHOLE PERCENT. FUNCTION FLOORS TO ONE DECIMAL.
 #
-#   - Statement counting differs between Go toolchains, so a version bump can
-#     move a package by a tenth of a point.
-#   - Coverage differs by PLATFORM. cmd/ contains GOOS-specific code, so the
-#     same commit measures 59.9% on Windows and 59.6% on Linux.
+# That asymmetry is measured, not stylistic. Across three consecutive CI runs on
+# the same code, internal/router reported 81.8, then 81.7, then 81.6 -- one of
+# those runs changed nothing but this floors file. The package total is not a
+# stable measurement at a tenth of a point: concurrent tests walk slightly
+# different statements depending on scheduling. It also varies by platform
+# (cmd/ has GOOS-specific code: 59.9% on Windows, 59.6% on Linux) and by
+# toolchain (statement counting changes between Go versions).
 #
-# Because of the second one, THE FLOORS ARE THE CI (linux/amd64) NUMBERS. If you
-# regenerate them on Windows or macOS you will encode values CI cannot meet, and
-# the gate will fail for everyone. Regenerate on Linux, or take the numbers from
-# the failing CI log -- the gate prints its full measured table on failure for
-# exactly this reason.
+# Every pinned FUNCTION, by contrast, measured identically in all three runs and
+# on both platforms. So:
 #
-# --allow-lower is for these cases. Before reaching for it, check that no
-# CRITICAL FUNCTION moved: a package total shifting 0.1 is noise, dispatchChain
-# falling is not.
+#   - function floors: one decimal, hard everywhere. These are the real gate.
+#   - package totals: whole percent, hard only on linux/amd64. Enough to catch
+#     an entire test file being deleted; immune to scheduling noise. A gate that
+#     fails on noise gets switched off, and then it protects nothing at all.
+#
+# THE FLOORS ARE THE CI (linux/amd64) NUMBERS. Regenerating them elsewhere
+# encodes values CI cannot meet. Regenerate on Linux, or take them from the
+# measured table the gate prints on failure.
 #
 #   ./scripts/coverage-gate.sh                          # check
 #   ./scripts/coverage-gate.sh --update                 # raise floors to today
@@ -58,7 +63,7 @@ trap 'rm -f "$measured"' EXIT
 # shellcheck disable=SC2086
 go test $PKGS -cover 2>/dev/null \
   | awk '$1 == "ok" && /coverage: [0-9.]+% of statements/ {
-      for (i = 1; i <= NF; i++) if ($i == "coverage:") { gsub(/%/, "", $(i+1)); print "pkg " $2 " " $(i+1) }
+      for (i = 1; i <= NF; i++) if ($i == "coverage:") { gsub(/%/, "", $(i+1)); print "pkg " $2 " " int($(i+1)) }
     }' >> "$measured"
 
 # Named critical-path functions. A package total can stay flat while the

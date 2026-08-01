@@ -28,9 +28,18 @@ out — see v0.7.1.
   it. "Which statuses advance" is the question that keeps producing incidents,
   and answering it one status at a time is how the 400 case was missed.
 - Coverage ratchet (`scripts/coverage-gate.sh` + `scripts/coverage-floors.txt`),
-  wired into CI. Floors sit at the last measured value and only move up, so a
-  hurried PR cannot quietly trade coverage for speed. Lowering one is a visible
-  diff line.
+  wired into CI. Floors only move up: `--update` refuses to lower without
+  `--allow-lower` or to drop an entry without `--allow-remove`, because
+  regenerating a ratchet in the same PR is the easy way to defeat it without
+  ever arguing with it.
+
+  Function floors are pinned to one decimal and bind on every platform; package
+  totals are pinned to whole percent and bind only on CI. That asymmetry is
+  measured, not stylistic: across three consecutive CI runs on the same code
+  `internal/router` reported 81.8, 81.7 and 81.6 — one of those runs changed
+  nothing but the floors file — while every pinned function measured identically
+  in all three runs and on both Windows and Linux. A gate that fails on
+  scheduling noise gets switched off, and then it protects nothing.
 - `CHANGELOG.md` (this file) and a release checklist, so a release is a
   reviewable act rather than a tag with narrative attached.
 
