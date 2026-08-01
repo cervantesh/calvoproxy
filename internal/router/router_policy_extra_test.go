@@ -111,11 +111,20 @@ func TestLoadModelPolicyRuntime_StrictTreatsInvalidJSONAsWarning(t *testing.T) {
 
 func TestDefaultModelConfigComesFromEmbeddedJSON(t *testing.T) {
 	cfg := defaultModelConfig()
-	if cfg.DefaultProfile != "simple" {
+	// `coding`, not `bulk`: the default is what a caller gets when it names
+	// nothing, and quietly serving those from the small-model chain would
+	// recreate the very failure this policy exists to prevent — a weak answer
+	// nobody asked for.
+	if cfg.DefaultProfile != "coding" {
 		t.Fatalf("unexpected default profile: %q", cfg.DefaultProfile)
 	}
 	if len(cfg.Profiles["coding"]) == 0 {
 		t.Fatalf("expected coding profile from embedded defaults: %+v", cfg.Profiles)
+	}
+	// The fail-closed profile must exist in the embedded baseline too, so a
+	// binary booting without model-policy.json still honors `critic`.
+	if len(cfg.Profiles["critic"]) == 0 {
+		t.Fatalf("expected critic profile from embedded defaults: %+v", cfg.Profiles)
 	}
 }
 

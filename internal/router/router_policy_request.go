@@ -5,18 +5,18 @@ import (
 	"strings"
 )
 
+// hasRequestTools reports whether the request actually asks for tool calling.
+//
+// Only a NON-EMPTY ARRAY counts. Previously any non-nil value did, so `"tools": {}`
+// or `"tools": []` — both of which ask for nothing — forced the tools capability
+// requirement, shrinking the eligible chain to tool-capable models for no reason
+// and, on a vision request, pushing it onto the narrower vision+tools rescue path.
 func hasRequestTools(reqBody map[string]interface{}) bool {
-	if rawTools, ok := reqBody["tools"]; ok {
-		if tools, ok := rawTools.([]interface{}); ok && len(tools) > 0 {
-			return true
-		}
-		return rawTools != nil
+	if tools, ok := reqBody["tools"].([]interface{}); ok && len(tools) > 0 {
+		return true
 	}
-	if rawFunctions, ok := reqBody["functions"]; ok {
-		if functions, ok := rawFunctions.([]interface{}); ok && len(functions) > 0 {
-			return true
-		}
-		return rawFunctions != nil
+	if functions, ok := reqBody["functions"].([]interface{}); ok && len(functions) > 0 {
+		return true
 	}
 	return false
 }

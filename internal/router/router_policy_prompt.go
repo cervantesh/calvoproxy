@@ -97,10 +97,17 @@ func classifyPrompt(messages []interface{}) string {
 	return "simple"
 }
 
+// hasImageContent reports whether ANY message carries image content.
+//
+// Every role is scanned, not just "user". The vision gate is fail-closed — a
+// request whose images go undetected is routed to a chain with no vision-capable
+// model and fails upstream instead of being rescued. Images legitimately appear
+// on other roles: a system message with a reference screenshot, or an assistant
+// turn replayed from history on a multi-turn request.
 func hasImageContent(messages []interface{}) bool {
 	for _, rawMsg := range messages {
 		msg, ok := rawMsg.(map[string]interface{})
-		if !ok || msg["role"] != "user" {
+		if !ok {
 			continue
 		}
 		if contentContainsImage(msg["content"]) {
