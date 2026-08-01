@@ -222,13 +222,23 @@ func TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery(t *testing.T) {
 
 	// After the cooldown, exactly ONE probe may go through.
 	//
-	// The probe is HELD in flight while the other callers run, rather than
-	// letting the burst race the cooldown. Without that hold this assertion is
-	// flaky by construction: the probe fails fast against the stub, the circuit
-	// reopens for another 50ms, and a burst that outlives that window enters a
-	// SECOND half-open window and legitimately sends a second probe — which
-	// reads as a single-flight violation when it is really a test racing itself.
-	time.Sleep(60 * time.Millisecond)
+	// Entering half-open by SLEEPING past the cooldown is what made this test
+	// flaky: it failed in CI with "got 2", and both probes were legitimate. The
+	// probe's own 503 re-opens the circuit for another Cooldown, so any caller
+	// the scheduler delays past that second window enters a second half-open
+	// window and correctly sends a second probe. Under -race on a loaded runner,
+	// starting 16 goroutines can easily take longer than a 50ms cooldown.
+	//
+	// So: no sleeping, and a cooldown long enough that a second window cannot
+	// open while the test runs. The clock is removed from the assertion
+	// entirely, leaving the invariant -- one probe per half-open window -- which
+	// is the only thing this test was ever about.
+	tr.Cooldown = 30 * time.Second
+	tr.mu.Lock()
+	tr.hosts["example.test"].openUntil = time.Now().Add(-time.Millisecond)
+	tr.hosts["example.test"].probeUntil = time.Time{}
+	tr.mu.Unlock()
+
 	stub.mu.Lock()
 	before := stub.calls
 	stub.gate = make(chan struct{})
@@ -247,14 +257,15 @@ func TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery(t *testing.T) {
 			}
 		}()
 	}
-	// Wait for the single probe to actually reach the host, then let the others
-	// pile up against a window that provably cannot have closed yet.
+	// Wait for the single probe to actually reach the host, then release it. The
+	// others pile up against a window that CANNOT have closed: the 30s cooldown
+	// outlives any scheduling delay, so a second probe here is a real
+	// single-flight violation rather than a second legitimate window.
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no probe reached the host in half-open")
 	}
-	time.Sleep(20 * time.Millisecond)
 	close(gate)
 	wg.Wait()
 	stub.mu.Lock()

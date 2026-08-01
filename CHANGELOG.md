@@ -66,6 +66,17 @@ out — see v0.7.1.
   hashes the content **git** holds, which is identical on every platform and
   every git config, and `.gitattributes` keeps `vendor/**` checked out
   byte-exact besides.
+- `TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery` was flaky and failed a
+  CI run with “got 2” — where **both probes were legitimate**. The probe's own
+  503 re-opens the circuit for another cooldown, so any caller the scheduler
+  delays past that second window enters a second half-open window and correctly
+  sends a second probe; under `-race` on a loaded runner, starting 16 goroutines
+  easily outlasts a 50ms cooldown. The test no longer sleeps: it forces the
+  half-open state directly and uses a cooldown long enough that no second window
+  can open, so it measures the single-flight invariant rather than the
+  scheduler. 60/60 under `-race`, and breaking the single-flight makes it fail
+  with 15 probes. (v0.5.2 made the *model* breaker test deterministic; the
+  *host* breaker one was still timing-dependent.)
 - CI's contract-test guard used the `secrets` context in a step-level `if:`,
   which is a workflow file error — two runs failed in 0s with no log. The env
   has to be declared at **job** level; a step's own `env:` block is invisible to
