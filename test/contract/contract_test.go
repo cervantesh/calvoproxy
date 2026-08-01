@@ -99,8 +99,14 @@ func TestUpstream_ToolCapSurfacesAs400(t *testing.T) {
 	})
 	t.Logf("model=%s status=%d body=%s", model, code, truncate(string(body), 300))
 
+	// Deliberately NOT t.Skip. If the cap is gone, the router is carrying a
+	// special case for a condition that no longer exists, and a silent skip is
+	// exactly how such a special case survives for years without being revisited.
 	if code == http.StatusOK {
-		t.Skipf("%s now accepts 70 tools — the cap this repo routes around may be gone", model)
+		t.Fatalf("%s now accepts 70 tools: the assumption behind the 400-advances-chain "+
+			"special case has dissolved. Re-check whether the special case is still "+
+			"needed, then either point CALVOPROXY_CONTRACT_PICKY_MODEL at a model that "+
+			"still caps tools, or retire this test together with the router change.", model)
 	}
 	if code != http.StatusBadRequest {
 		t.Errorf("expected the tool cap to surface as 400, got %d; the chain only "+

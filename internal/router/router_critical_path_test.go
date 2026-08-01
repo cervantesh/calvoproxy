@@ -1,9 +1,11 @@
 package router
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,8 +169,11 @@ func TestFallback_MarksTheDegradedAttempt(t *testing.T) {
 	if got := rec.Header().Get("X-Calvoproxy-Model"); got != "model-b" {
 		t.Errorf("X-Calvoproxy-Model = %q, want model-b", got)
 	}
-	if got := rec.Header().Get("X-Calvoproxy-Attempt"); got == "" || got == "0" {
-		t.Errorf("a fallback answer must carry the attempt index, got %q", got)
+	// Exactly "2", not merely non-empty: AttemptIndex is 1-based, so a
+	// degradation signal hard-wired to "1" would satisfy a non-empty check while
+	// reporting every fallback as a first-choice answer.
+	if got := rec.Header().Get("X-Calvoproxy-Attempt"); got != "2" {
+		t.Errorf("X-Calvoproxy-Attempt = %q, want \"2\" — this is the degraded signal", got)
 	}
 }
 
@@ -193,8 +198,15 @@ func TestDispatch_AllModelsCoolingDownAdvertisesRetryAfter(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("all-open chain should be 503, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("Retry-After") == "" {
-		t.Error("503 without Retry-After: clients retry immediately and amplify the outage")
+	// A parseable, positive, sane value — not just a present header. "0" or
+	// garbage tells a client nothing and it retries immediately anyway, which is
+	// the outage amplification this header exists to prevent.
+	raw := rec.Header().Get("Retry-After")
+	secs, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Errorf("Retry-After = %q, not an integer number of seconds", raw)
+	} else if secs < 1 || secs > 3600 {
+		t.Errorf("Retry-After = %ds, outside a usable band; the configured cooldown is 90s", secs)
 	}
 	if upstream.calls != 0 {
 		t.Errorf("an open breaker must not reach upstream, got %d calls", upstream.calls)
@@ -351,7 +363,12 @@ func TestEmbeddings_RefusedByDefaultAndAllowedOnOptIn(t *testing.T) {
 		http.MethodPost, "/v1/embeddings", `{"input":"hi"}`), "k", "")
 
 	if upstream.calls != 1 {
-		t.Errorf("the opt-in must actually let the request through, got %d calls", upstream.calls)
+		t.Fatalf("the opt-in must actually let the request through, got %d calls", upstream.calls)
+	}
+	// And the client must get the upstream's answer. Counting the call only
+	// proves we spent the money, not that anyone got anything for it.
+	if rec.Code != http.StatusOK {
+		t.Errorf("opted-in embeddings returned %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -375,5 +392,125 @@ func TestRoute_OversizedBodyIs413(t *testing.T) {
 	}
 	if upstream.calls != 0 {
 		t.Errorf("must not reach upstream, got %d calls", upstream.calls)
+	}
+}
+
+// statusThenOKTransport answers the first attempt with a chosen status and body,
+// then 200. It exists because sequenceTransport cannot carry a body, and the
+// body is what distinguishes "this provider is picky" from "this request is
+// broken".
+type statusThenOKTransport struct {
+	first  int
+	body   string
+	calls  int
+	models []string
+}
+
+func (t *statusThenOKTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.calls++
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		m, _ := parsed["model"].(string)
+		t.models = append(t.models, m)
+	}
+	status, body := http.StatusOK, `{"choices":[{"message":{"content":"ok"}}]}`
+	if t.calls == 1 {
+		status, body = t.first, t.body
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+// The incident this whole branch came from, pinned at the level where the
+// decision is actually made.
+//
+// A provider returned 400 "at most 64 tools are allowed". 400 is normally
+// terminal, so the chain stopped on the first picky provider and every agent
+// turn died in ~0.8s — even though every other model in the chain would have
+// answered. The fix makes 400 advance.
+//
+// Table-driven over the status classes because "which statuses advance" is the
+// question that keeps producing incidents, and answering it one status at a
+// time is how the 400 case got missed.
+func TestUpstreamStatus_AdvancesOrTerminatesTheChain(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantCalls  int // 2 = advanced to the second model, 1 = stopped
+		wantClient int
+	}{
+		{
+			// The regression guard. If SkipModel is dropped for 400, this fails.
+			name:   "400 from a picky provider advances",
+			status: http.StatusBadRequest,
+			body: `{"error":{"message":"Provider returned error","code":400,` +
+				`"metadata":{"raw":"at most 64 tools are allowed"}}}`,
+			wantCalls: 2, wantClient: http.StatusOK,
+		},
+		{
+			// CURRENT BEHAVIOUR, recorded rather than endorsed: 402 is terminal.
+			//
+			// This looks like the same bug class as the 400 above, and this test
+			// is how it was found. A proxy whose whole premise is free models
+			// gets a 402 when ONE model stops being free -- the rest of the chain
+			// is unaffected, so terminating loses a request the next model would
+			// have served. The counter-argument is an account-wide credit
+			// exhaustion, where advancing burns the chain for nothing.
+			//
+			// Left unchanged here on purpose: changing routing semantics does not
+			// belong in a testing change. If it is made to advance, flip
+			// wantCalls to 2 and wantClient to 200 -- and the fact that this line
+			// has to change is the point of writing it down.
+			name: "402 currently stops the chain (see comment)", status: http.StatusPaymentRequired,
+			body:      `{"error":"model requires credit"}`,
+			wantCalls: 1, wantClient: http.StatusPaymentRequired,
+		},
+		{
+			name: "429 advances", status: http.StatusTooManyRequests, body: `{"error":"rate limited"}`,
+			wantCalls: 2, wantClient: http.StatusOK,
+		},
+		{
+			name: "502 advances", status: http.StatusBadGateway, body: `upstream unavailable`,
+			wantCalls: 2, wantClient: http.StatusOK,
+		},
+		{
+			// A bad key is bad for every model in the chain. Advancing would burn
+			// the whole chain on a problem no other model can fix, and would hide
+			// the one error the operator needs to see.
+			name: "401 stops the chain", status: http.StatusUnauthorized, body: `{"error":"invalid key"}`,
+			wantCalls: 1, wantClient: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &statusThenOKTransport{first: tc.status, body: tc.body}
+			svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+				DefaultProfile: "simple",
+				Profiles:       map[string][]string{"simple": {"picky-model", "tolerant-model"}},
+				Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+			})
+
+			rec := httptest.NewRecorder()
+			svc.RouteRequest(rec, trustedRequest(http.MethodPost, "/v1/chat/completions",
+				`{"messages":[{"role":"user","content":"hi"}]}`), "k")
+
+			if upstream.calls != tc.wantCalls {
+				t.Errorf("upstream called %d times, want %d (models tried: %v)",
+					upstream.calls, tc.wantCalls, upstream.models)
+			}
+			if rec.Code != tc.wantClient {
+				t.Errorf("client got %d, want %d: %s", rec.Code, tc.wantClient, rec.Body.String())
+			}
+			if tc.wantCalls == 2 && len(upstream.models) == 2 && upstream.models[1] != "tolerant-model" {
+				t.Errorf("advanced to %q, want tolerant-model", upstream.models[1])
+			}
+		})
 	}
 }

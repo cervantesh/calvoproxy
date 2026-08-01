@@ -21,13 +21,38 @@ out — see v0.7.1.
   real agents send, the stream is SSE with `data:` events and `[DONE]`, and every
   model in `model-policy.json` still exists and declares its capabilities.
 - Critical-path test coverage: `RouteRequestWithProvider` 41.7% → 87.5%,
-  `dispatchChain` 45.2% → 85.7%, `streamProxyResponse` 0% → 100%.
+  `dispatchChain` 45.2% → 92.9%, `streamProxyResponse` 0% → 100%.
+- `TestUpstreamStatus_AdvancesOrTerminatesTheChain` — a table over upstream
+  status classes asserting **advance vs terminate**. This is the actual guard
+  for the 64-tool incident: mutation-checked, removing `SkipModel` on 400 fails
+  it. "Which statuses advance" is the question that keeps producing incidents,
+  and answering it one status at a time is how the 400 case was missed.
 - Coverage ratchet (`scripts/coverage-gate.sh` + `scripts/coverage-floors.txt`),
   wired into CI. Floors sit at the last measured value and only move up, so a
   hurried PR cannot quietly trade coverage for speed. Lowering one is a visible
   diff line.
 - `CHANGELOG.md` (this file) and a release checklist, so a release is a
   reviewable act rather than a tag with narrative attached.
+
+### Changed
+- After external adversarial review, several of the guards above were found to
+  be weaker than they read. Fixed: the degraded-attempt assertion now requires
+  exactly `"2"` (it accepted any non-empty value, so a signal hard-wired to
+  `"1"` would have passed); `Retry-After` must parse to a positive value in a
+  usable band, not merely exist; the embeddings opt-in asserts the client's
+  status, not just that money was spent. `--update` on the coverage gate can now
+  only *raise* floors — lowering needs `--allow-lower`, removing needs
+  `--allow-remove` — because regenerating a ratchet in the same PR is the easy
+  way to defeat it. The float tolerance dropped from 0.05 to 0.001, which was
+  large enough to hide real drops. The vendor manifest hashes every regular
+  file rather than three extensions, closing a hole that would have opened the
+  day a vendored module gained a `//go:embed` asset. The tool-cap contract test
+  now fails loudly instead of skipping when the cap disappears.
+- Recorded, not changed: **402 terminates the chain**, found by the new
+  status-class table. It looks like the same bug class as the 400 — a free model
+  that starts requiring credit kills a turn the rest of the chain would have
+  served — but changing routing semantics does not belong in a testing change.
+  See `TestUpstreamStatus_AdvancesOrTerminatesTheChain`.
 
 ### Fixed
 - CI's contract-test step guards on `secrets`, not `env` — a step-level `env:`

@@ -35,7 +35,11 @@ if [[ ! -d "$ROOT" ]]; then
 fi
 
 generate() {
-  find "$ROOT" -type f \( -name '*.go' -o -name '*.json' -o -name '*.yaml' \) \
+  # Every regular file, no extension filter. An earlier version listed
+  # *.go/*.json/*.yaml, which would have gone blind the day one of these modules
+  # gained a //go:embed asset, a .s file, or a cgo source -- each of which
+  # changes the built binary while looking like nothing to a filter.
+  find "$ROOT" -type f \
     | LC_ALL=C sort \
     | while read -r f; do
         printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
