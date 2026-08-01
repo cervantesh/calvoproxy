@@ -14,6 +14,7 @@ import (
 // from keyword-classifying the prompt, so `critic` returned 200 from whatever
 // chain classification picked — the caller believing it got the critic.
 func TestRejectUnknownProfileAnswers404(t *testing.T) {
+	t.Setenv("PROXY_STRICT_PROFILE_NAMES", "true") // opt-in; see the compat test below
 	s := &RouterService{policy: policyConfig{
 		DefaultProfile: "coding",
 		Profiles:       map[string][]string{"coding": {"a/b:free"}, "critic": {"c/d:free"}},
@@ -250,5 +251,29 @@ func TestImageRequestTrustsCuratedChainForUnknownModels(t *testing.T) {
 
 	if got := s.determineProfile(req, messages, "", true); got != "vision" {
 		t.Errorf("an unknown model in the curated chain must not veto the switch, got %q", got)
+	}
+}
+
+// The gate shipped hard-on in v0.5.0 and broke a real client: Hermes calls its
+// model "Sol", so every turn naming it got a 404 while turns naming "coding"
+// sailed through — an intermittent failure with no obvious cause. An
+// OpenAI-compatible proxy cannot reject a caller's own model naming by default.
+func TestUnknownProfileIsAllowedByDefault(t *testing.T) {
+	t.Setenv("PROXY_STRICT_PROFILE_NAMES", "")
+	s := &RouterService{policy: policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"a/b:free"}},
+	}}
+
+	for _, name := range []string{"Sol", "gpt-5.6-terra", "gemini-3.6-flash", "critc"} {
+		rec := httptest.NewRecorder()
+		if s.rejectUnknownProfile(rec, name) {
+			t.Errorf("%q must not be rejected by default: got %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// Still counted, so an unrecognized name is visible in /metrics even when
+	// it is allowed through — the substitution must never be silent.
+	if got := s.counters.unknownProfileRejected.Load(); got != 4 {
+		t.Errorf("unknown names counted = %d, want 4", got)
 	}
 }
