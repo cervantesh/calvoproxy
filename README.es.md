@@ -250,6 +250,55 @@ Overrides adicionales de política/comportamiento (`PROXY_DEFAULT_PROVIDER`,
 `PROXY_PROVIDER_FALLBACKS_JSON`, `PROXY_LIMITS_JSON`, `PROXY_RETRY_POLICY_JSON`,
 …) están documentados en [docs/POLICY.md](docs/POLICY.md).
 
+### Elegir un perfil
+
+Los clientes piden un **nombre de perfil**, no un id de modelo. El proxy lo
+resuelve a una cadena ordenada y baja por ella ante fallo o rate-limit.
+
+| Perfil | Para | La cadena encabeza con |
+|---|---|---|
+| `simple` (por defecto) | respuestas cortas, turnos livianos | `nemotron-3-super-120b-a12b` |
+| `coding` | código, y trabajo de agente que llama tools | `nemotron-3-super-120b-a12b` |
+| `reasoning` | análisis, revisión, planificación | `nemotron-3-ultra-550b-a55b` |
+| `agent` | bucles de tool-calling | `nemotron-3-super-120b-a12b` |
+| `creative` | prosa, borradores | `nemotron-3-super-120b-a12b` |
+| `vision` | peticiones con imágenes | solo modelos con visión |
+
+**Cómo leer los nombres.** El tamaño está en el slug, y lo que importa es la
+cantidad de parámetros **activos** en un modelo mixture-of-experts:
+`nemotron-3-ultra-550b-a55b` son 550B totales pero **55B activos por token**;
+`nemotron-3-nano-30b-a3b` son **3B activos**. Eso es una diferencia de 18× en
+cómputo real entre dos modelos que ambos anuncian "reasoning". `nano`, `mini`,
+`xs` y `flash` significan pequeño u optimizado para latencia.
+
+**Las cadenas degradan en silencio, y eso es una virtud con filo.** Si el
+primer modelo está rate-limiteado responde el segundo, y así. Para trabajo en
+bloque, una respuesta vale más que ninguna. Para una tarea donde una respuesta
+*equivocada* es peor que ninguna —una revisión adversarial, un juicio de
+corrección— una cadena que cae a un modelo mucho más chico te da una respuesta
+confiada en la que no deberías confiar. Nada en el status HTTP te avisa.
+
+Dos defensas, ambas disponibles hoy:
+
+```bash
+# La respuesta nombra el modelo que realmente la sirvió.
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer dummy" \
+  -d '{"model":"reasoning","messages":[{"role":"user","content":"hola"}]}' \
+  | jq -r '.model'
+```
+
+- **Revisá `.model` en todo lo que pienses creerle.** Un nombre de perfil es un
+  pedido, no una garantía.
+- **Mantené los modelos débiles fuera de las cadenas que usás para juzgar.** El
+  suelo de calidad se impone por *omisión*: el scoring de fiabilidad puede
+  reordenar una cadena pero nunca puede meter un modelo que no esté listado en
+  ella, así que una cadena cuyos miembros están todos por encima de tu barra se
+  mantiene por encima.
+
+Un perfil `critic` fail-closed —que devuelve 503 en vez de degradar— está
+diseñado en el [issue #10](https://github.com/cervantesh/calvoproxy/issues/10).
+
 ### Cadenas de modelos (editar sin recompilar)
 
 Las cadenas de modelos por perfil viven en **`model-policy.json`** —la fuente viva
