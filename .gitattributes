@@ -1,0 +1,15 @@
+# Normalize text in the repository; check out with the platform's convention.
+* text=auto
+
+# Vendored code is checked out byte-for-byte, with no end-of-line translation.
+# Two reasons: it is not ours to reformat, and scripts/vendor-manifest.sh is the
+# only integrity check these modules have (they carry no go.sum entries — see
+# THIRD_PARTY.md), so their bytes must not depend on the developer's git config.
+vendor/** -text
+
+# Shell scripts must be LF or they will not run on Linux, where CI runs them.
+*.sh text eol=lf
+
+# Checksums and coverage floors are compared line by line across platforms.
+*.sha256 text eol=lf
+scripts/coverage-floors.txt text eol=lf

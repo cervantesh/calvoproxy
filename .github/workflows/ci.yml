@@ -9,11 +9,17 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    # Job level, not step level. A step's own `env:` block is not visible to that
+    # step's `if:`, and the `secrets` context is not available in `if:` at all —
+    # using it there is a workflow file error, which fails the run in 0s with no
+    # log. (Learned the direct way.) Job-level env IS visible to step `if:`.
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - name: Build (offline, vendored)
         run: GOPROXY=off go build -mod=vendor ./...
       - name: Test
@@ -25,3 +31,49 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Vendored dependency integrity
+        # The cervo-* modules have NO go.sum entries and no reachable upstream
+        # (third_party/ is not in this repo). This manifest is the only thing
+        # that would notice if they changed. See THIRD_PARTY.md.
+        run: ./scripts/vendor-manifest.sh
+      - name: Coverage gate
+        # A ratchet, not a target. Floors sit at the last measured value and only
+        # move up, so a hurried PR cannot quietly trade coverage for speed. See
+        # scripts/coverage-floors.txt -- lowering a floor is a visible diff line.
+        run: ./scripts/coverage-gate.sh
+      - name: Contract tests (real upstream)
+        # Opt-in, and NEVER a reason for a red build on someone else's clone.
+        #
+        # These spend real OpenRouter quota, so they only run where a key exists.
+        # That is most of the time nowhere: forks cannot read secrets, and a
+        # contributor cloning this repo has no key at all. Requiring one would
+        # paint their CI red for a reason that has nothing to do with their
+        # change -- which is a good way to teach people to ignore CI.
+        #
+        # When the key IS present and the contract has moved, this fails, and it
+        # should: that is the only check here that tests what OpenRouter actually
+        # does rather than what our mocks assume. The 64-tool cap shipped because
+        # no mock modelled it.
+        if: env.OPENROUTER_API_KEY != ''
+        env:
+          CALVOPROXY_CONTRACT: "1"
+        run: go test ./test/contract/ -v
+      - name: Note that contract tests were skipped
+        # Absence should be VISIBLE, not fatal. Writing it to the job summary
+        # means nobody has to infer from a missing step that the upstream went
+        # unverified -- without turning a missing optional key into a failure.
+        if: env.OPENROUTER_API_KEY == ''
+        run: |
+          {
+            echo "### Upstream contract tests: skipped"
+            echo
+            echo "No \`OPENROUTER_API_KEY\` is available to this run, so nothing"
+            echo "verified what OpenRouter actually does — only what our mocks assume."
+            echo
+            echo "This is expected on forks and on clones without a key, and it is"
+            echo "not a failure. To run them locally:"
+            echo
+            echo '```'
+            echo "CALVOPROXY_CONTRACT=1 OPENROUTER_API_KEY=... go test ./test/contract/ -v"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
