@@ -130,6 +130,77 @@ func TestCheckHermesWarnsOnLocalhostHostname(t *testing.T) {
 	}
 }
 
+// Regression: model.base_url carries the same URL, so a file-wide search let a
+// custom_providers entry pointing somewhere else pass as OK — the exact class of
+// silent misconfiguration doctor exists to catch.
+func TestCheckHermesCatchesMismatchedProviderURL(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:9999/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	var seen bool
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "custom_providers") {
+			seen = true
+			if r.status != statusFail {
+				t.Errorf("mismatched provider base_url must FAIL, got %v", r.status.label())
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("no custom_providers check was produced")
+	}
+}
+
+// Regression: discover_models sits inside a list item, so it is indented; a
+// top-level lookup never matched and the check was dead code.
+func TestCheckHermesFlagsNestedDiscoverModels(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+    discover_models: true
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "discover_models") {
+			if r.status != statusWarn {
+				t.Errorf("discover_models: true should WARN, got %v", r.status.label())
+			}
+			return
+		}
+	}
+	t.Error("indented discover_models: true was not detected")
+}
+
+func TestYAMLBlockStopsAtNextTopLevelKey(t *testing.T) {
+	lines := strings.Split("custom_providers:\n  - base_url: a\nmodel:\n  base_url: b\n", "\n")
+	block := yamlBlock(lines, "custom_providers")
+	joined := strings.Join(block, "\n")
+	if !strings.Contains(joined, "base_url: a") {
+		t.Error("block should contain its own entries")
+	}
+	if strings.Contains(joined, "base_url: b") {
+		t.Error("block leaked into the following top-level key")
+	}
+}
+
 func TestCheckRoundTripReportsUpstreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

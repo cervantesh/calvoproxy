@@ -137,12 +137,51 @@ func yamlNestedScalar(lines []string, parent, child string) string {
 
 // yamlHasTopLevelKey reports whether a top-level `key:` exists at all.
 func yamlHasTopLevelKey(lines []string, key string) bool {
-	for _, raw := range lines {
+	return len(yamlBlock(lines, key)) > 0
+}
+
+// yamlBlock returns the indented body of a top-level `key:`, i.e. every line
+// until the next top-level key. Scoping matters: `model:` also carries a
+// base_url, so searching the whole file for one would let a correct
+// model.base_url mask a custom_providers entry pointing somewhere else.
+func yamlBlock(lines []string, key string) []string {
+	start := -1
+	for i, raw := range lines {
 		if raw == strings.TrimLeft(raw, " \t") && strings.HasPrefix(raw, key+":") {
-			return true
+			start = i + 1
+			break
 		}
 	}
-	return false
+	if start < 0 {
+		return nil
+	}
+	var out []string
+	for _, raw := range lines[start:] {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, raw)
+			continue
+		}
+		if raw == strings.TrimLeft(raw, " \t") {
+			break // next top-level key ends the block
+		}
+		out = append(out, raw)
+	}
+	return out
+}
+
+// yamlAnyScalar returns the value of `key:` at any indentation within lines.
+// Used for keys that live inside a list item (custom_providers entries).
+func yamlAnyScalar(lines []string, key string) string {
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		trimmed = strings.TrimPrefix(trimmed, "- ") // list item on the same line
+		trimmed = strings.TrimSpace(trimmed)
+		if strings.HasPrefix(trimmed, key+":") {
+			return strings.TrimSpace(stripYAMLComment(trimmed[len(key)+1:]))
+		}
+	}
+	return ""
 }
 
 // stripYAMLComment drops a trailing ` # ...` comment. Only when the '#' is
@@ -369,7 +408,11 @@ func checkHermes(base string) []checkResult {
 		}
 	}
 
-	if !yamlHasTopLevelKey(lines, "custom_providers") {
+	// Scoped to the custom_providers block on purpose: model.base_url carries
+	// the same URL, so a file-wide search would report OK even when the
+	// custom_providers entry points somewhere else entirely.
+	providers := yamlBlock(lines, "custom_providers")
+	if len(providers) == 0 {
 		out = append(out, checkResult{
 			status: statusFail,
 			title:  "custom_providers entry exists",
@@ -378,31 +421,36 @@ func checkHermes(base string) []checkResult {
 		})
 	} else {
 		hasURL := false
-		for _, l := range lines {
-			if strings.Contains(l, strings.TrimRight(wantURL, "/")) && strings.Contains(l, "base_url") {
+		for _, l := range providers {
+			if !strings.Contains(l, "base_url") {
+				continue
+			}
+			if strings.TrimRight(yamlAnyScalar([]string{l}, "base_url"), "/") == strings.TrimRight(wantURL, "/") {
 				hasURL = true
 				break
 			}
 		}
 		if !hasURL {
 			out = append(out, checkResult{
-				status: statusWarn,
-				title:  "custom_providers entry exists",
-				detail: "found custom_providers, but no entry whose base_url is " + wantURL,
-				fix:    "Hermes selects the provider by matching base_url — they must be identical.",
+				status: statusFail,
+				title:  "custom_providers entry points at the proxy",
+				detail: "custom_providers exists, but no entry has base_url " + wantURL,
+				fix:    "Hermes selects the provider by matching base_url — it must be identical to model.base_url.",
 			})
 		} else {
-			out = append(out, checkResult{status: statusOK, title: "custom_providers entry exists"})
+			out = append(out, checkResult{status: statusOK, title: "custom_providers entry points at the proxy"})
 		}
-	}
 
-	if v := yamlScalar(lines, "discover_models"); v == "true" {
-		out = append(out, checkResult{
-			status: statusWarn,
-			title:  "discover_models disabled",
-			detail: "the proxy does not serve /v1/models; discovery will 404",
-			fix:    "Set discover_models: false on the calvoproxy entry.",
-		})
+		// discover_models lives inside a list item, so it is indented — a
+		// top-level lookup here silently never matched.
+		if strings.EqualFold(yamlAnyScalar(providers, "discover_models"), "true") {
+			out = append(out, checkResult{
+				status: statusWarn,
+				title:  "discover_models disabled",
+				detail: "the proxy serves no /v1/models; discovery will 404",
+				fix:    "Set discover_models: false on the calvoproxy entry.",
+			})
+		}
 	}
 	return out
 }
