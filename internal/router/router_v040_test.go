@@ -157,12 +157,29 @@ type stubRoundTripper struct {
 	mu     sync.Mutex
 	status int
 	calls  int
+	// gate, when set, blocks the transport inside RoundTrip until the test
+	// releases it, and entered reports that a call has arrived. Together they
+	// let a test hold a request in flight instead of inferring concurrency from
+	// sleeps, which is what made the half-open assertion flaky on a loaded CI
+	// runner.
+	gate    chan struct{}
+	entered chan struct{}
 }
 
 func (s *stubRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls++
+	gate, entered := s.gate, s.entered
+	s.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		<-gate
+	}
 	return &http.Response{StatusCode: s.status, Body: io.NopCloser(nil), Header: http.Header{}}, nil
 }
 
@@ -204,9 +221,19 @@ func TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery(t *testing.T) {
 	}
 
 	// After the cooldown, exactly ONE probe may go through.
+	//
+	// The probe is HELD in flight while the other callers run, rather than
+	// letting the burst race the cooldown. Without that hold this assertion is
+	// flaky by construction: the probe fails fast against the stub, the circuit
+	// reopens for another 50ms, and a burst that outlives that window enters a
+	// SECOND half-open window and legitimately sends a second probe — which
+	// reads as a single-flight violation when it is really a test racing itself.
 	time.Sleep(60 * time.Millisecond)
 	stub.mu.Lock()
 	before := stub.calls
+	stub.gate = make(chan struct{})
+	stub.entered = make(chan struct{}, 1)
+	gate, entered := stub.gate, stub.entered
 	stub.mu.Unlock()
 
 	var passed atomic.Int64
@@ -220,7 +247,19 @@ func TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery(t *testing.T) {
 			}
 		}()
 	}
+	// Wait for the single probe to actually reach the host, then let the others
+	// pile up against a window that provably cannot have closed yet.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no probe reached the host in half-open")
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
 	wg.Wait()
+	stub.mu.Lock()
+	stub.gate, stub.entered = nil, nil
+	stub.mu.Unlock()
 	stub.mu.Lock()
 	after := stub.calls
 	stub.mu.Unlock()
