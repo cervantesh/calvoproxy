@@ -474,6 +474,17 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 	hb.probeUntil = time.Time{} // this attempt resolved any in-flight probe
 
 	if err != nil {
+		// A cancelled request says nothing about the host. The client hung up,
+		// or we abandoned the attempt — the host may be perfectly healthy and
+		// was simply never given time to answer. Counting it here is worse than
+		// at the model level: this circuit gates EVERY model on the host, so a
+		// handful of impatient clients would take out all of openrouter.ai.
+		//
+		// Neutral, exactly like the 429 case below: neither a failure nor a
+		// success, so it cannot erase real accumulated host faults either.
+		if errors.Is(err, context.Canceled) {
+			return resp, err
+		}
 		hb.failures++
 		if hb.failures >= t.FailureThreshold {
 			hb.openUntil = time.Now().Add(t.Cooldown)
