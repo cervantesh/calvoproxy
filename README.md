@@ -124,6 +124,8 @@ before exit.
 | `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending the env `OPENROUTER_API_KEY` for keyless requests on a **public** bind (loopback always allows it) |
 | `PROXY_OAUTH_REQUIRE_STATE` | `true` | Require a matching CSRF `state` on the `calvoproxy login` callback. OpenRouter echoes it, so this is on by default; set `false` only for a provider that doesn't (the secret callback path + PKCE still apply) |
 | `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
+| `PROXY_ALLOW_PAID_EMBEDDINGS` | `false` | Allow `/v1/embeddings`, which bills real credit — OpenRouter has no free embedding model, and that path has no chain/breaker/fallback |
+| `PROXY_MODEL_*`, `PROXY_POLICY_*` | — | Accepted as aliases for the legacy `CERVO_MODEL_*` / `CERVO_POLICY_*` names, which the vendored policy library still reads. The legacy name wins when both are set |
 
 Prometheus metrics are at **`/metrics`** (per-model score, consecutive failures,
 successes, open-circuit count, readiness, plus request rate, per-status-class
@@ -247,14 +249,26 @@ Additional policy/behaviour overrides (`PROXY_DEFAULT_PROVIDER`,
 Clients ask for a **profile name**, not a model id. The proxy resolves it to an
 ordered chain and walks down that chain on failure or rate-limit.
 
-| Profile | For | Chain leads with |
+| Profile | For | On exhaustion |
 |---|---|---|
-| `simple` (default) | short answers, light turns | `nemotron-3-super-120b-a12b` |
-| `coding` | code, and agent work that calls tools | `nemotron-3-super-120b-a12b` |
-| `reasoning` | analysis, review, planning | `nemotron-3-ultra-550b-a55b` |
-| `agent` | tool-calling loops | `nemotron-3-super-120b-a12b` |
-| `creative` | prose, drafting | `nemotron-3-super-120b-a12b` |
+| `coding` (default) | code, and agent work that calls tools | degrades, weak tail allowed |
+| `reasoning` | analysis, planning, design | degrades, but never below ~12B-class |
+| `critic` | adversarial review, correctness judgments | **503 — never degrades** |
+| `bulk` | summarizing, classification, first drafts | degrades freely |
 | `vision` | requests containing images | vision-capable models only |
+
+Aliases: `simple`→`bulk`, `agent`/`creative`→`coding`, `review`/`adversarial`→`critic`,
+`planning`/`design`→`reasoning`.
+
+**Profiles differ by the failure you can tolerate, not by task name.** `coding` and
+`bulk` may fall through to a small model because an answer beats no answer. `critic`
+may not: for a review, a confident wrong answer is worse than none, so its chain has
+no weak tail and returns **503** when every member is unavailable. Retry, or escalate
+to a stronger reviewer.
+
+A profile name that does not exist is now a **404**, not a silent substitution — a
+typo, or a client written against docs that shipped before the policy, must not be
+answered by whatever chain prompt-classification happened to pick.
 
 **Reading model names.** Size is in the slug, and the part that matters is the
 *active* parameter count of a mixture-of-experts model:
@@ -287,8 +301,9 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   introduce a model that is not listed in it, so a chain whose every member is
   above your bar stays above it.
 
-A fail-closed `critic` profile — one that returns 503 rather than degrade — is
-designed in [issue #10](https://github.com/cervantesh/calvoproxy/issues/10).
+`/v1/embeddings` is refused by default (**402**): OpenRouter publishes no free
+embedding model, so that endpoint spends real credit and is the one path with no
+chain, breaker or fallback behind it. Opt in with `PROXY_ALLOW_PAID_EMBEDDINGS=true`.
 
 ### Model chains (edit without recompiling)
 

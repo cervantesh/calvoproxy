@@ -160,3 +160,56 @@ func envDurationSeconds(key string, fallback time.Duration) time.Duration {
 	}
 	return time.Duration(parsed) * time.Second
 }
+
+// legacyEnvNames are settings still read under the pre-rename `CERVO_` prefix.
+// The project is CalvoProxy and everything else is `PROXY_`, so these are the
+// last inconsistency from the rename.
+//
+// They cannot simply be renamed here: the vendored `cervo-*` modules read
+// several of the same names independently, and `vendor/` is generated from the
+// source monorepo rather than edited in place. Renaming only this repo's reads
+// would let the proxy honor a new name while the library kept reading the old
+// one — the same setting taking effect in one half of the system and not the
+// other, which is worse than the inconsistency it replaced.
+//
+// So instead of renaming, bridge: accept `PROXY_<X>` and, when it is set and
+// the legacy name is not, publish it back into the process environment under
+// `CERVO_<X>`. Every existing read site — ours and the vendored library's —
+// keeps working untouched, and the two can no longer disagree.
+var legacyEnvNames = []string{
+	"CERVO_MODEL",
+	"CERVO_MODEL_ALIASES_JSON",
+	"CERVO_MODEL_ALLOWED",
+	"CERVO_MODEL_DEFAULT",
+	"CERVO_MODEL_DEFAULT_PROFILE",
+	"CERVO_MODEL_POLICY_MODE",
+	"CERVO_MODEL_POLICY_STRICT",
+	"CERVO_MODEL_PROFILES_JSON",
+	"CERVO_POLICY_DEBUG_INCLUDE_TRACE",
+	"CERVO_POLICY_LOG_ENABLED",
+	"CERVO_POLICY_LOG_LEVEL",
+	"CERVO_POLICY_METRICS_ENABLED",
+	"CERVO_POLICY_OBSERVATION_SAMPLE_RATE",
+	"CERVO_POLICY_TRACE_ENABLED",
+	// Read only by the vendored modules, exposed here for a consistent surface.
+	"CERVO_DEFAULT_BEARER",
+	"CERVO_FORWARD_AUTH",
+	"CERVO_HTTP_BASE_URL",
+	"CERVO_HTTP_TIMEOUT",
+	"CERVO_HTTP_TOKEN",
+}
+
+// bridgeLegacyPolicyEnv maps PROXY_<X> onto CERVO_<X> for the names above.
+// The legacy name always wins when both are set, so an existing deployment
+// cannot change behavior by upgrading. Idempotent; call before reading policy.
+func bridgeLegacyPolicyEnv() {
+	for _, legacy := range legacyEnvNames {
+		if envValue(legacy) != "" {
+			continue // explicitly set under the old name: leave it alone
+		}
+		modern := "PROXY_" + strings.TrimPrefix(legacy, "CERVO_")
+		if v := envValue(modern); v != "" {
+			_ = os.Setenv(legacy, v)
+		}
+	}
+}

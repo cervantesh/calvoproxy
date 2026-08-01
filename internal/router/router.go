@@ -19,6 +19,10 @@ import (
 )
 
 func NewRouterService() *RouterService {
+	// Accept PROXY_* names for the settings still read under the legacy
+	// CERVO_* prefix, before anything (including the vendored policy
+	// library) reads them. See bridgeLegacyPolicyEnv.
+	bridgeLegacyPolicyEnv()
 	config := breakerConfig{
 		FailureThreshold: envInt("PROXY_BREAKER_FAILURE_THRESHOLD", 3),
 		Cooldown:         envDurationSeconds("PROXY_BREAKER_COOLDOWN_SECONDS", 60*time.Second),
@@ -137,6 +141,23 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	}
 
 	if strings.Contains(r.URL.Path, "embeddings") {
+		// This proxy exists to route FREE models, and /v1/embeddings cannot honor
+		// that: OpenRouter publishes no free embedding model — none appear in its
+		// catalogue at all — so every request here bills real credit (measured:
+		// text-embedding-3-small reports cost 4e-08 per call). It is also the one
+		// endpoint with no chain, breaker or fallback behind it.
+		//
+		// Refusing by default keeps the product's promise checkable: an account
+		// that never opted in cannot be billed by a path it did not know existed.
+		// Opt in with PROXY_ALLOW_PAID_EMBEDDINGS=true.
+		if !envBool("PROXY_ALLOW_PAID_EMBEDDINGS", false) {
+			s.counters.paidEmbeddingRefused.Add(1)
+			writeJSONError(w, http.StatusPaymentRequired,
+				"/v1/embeddings is disabled: OpenRouter has no free embedding model, so this endpoint "+
+					"spends real credit and is not covered by the model chain, breaker or fallback. "+
+					"Set PROXY_ALLOW_PAID_EMBEDDINGS=true to allow it.")
+			return
+		}
 		decision, ok := s.authorizeOperationalRoute(ctx, w, r, requestFacts{
 			OperationHint: capEmbedding,
 		}, bodyBytes)
@@ -172,6 +193,9 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		hasImages := hasImageContent(messagesRaw)
 		category := s.determineProfile(r, messagesRaw, provider, hasTools)
 		requestedModel, _ := msgBody["model"].(string)
+		if s.rejectUnknownProfile(w, requestedModel) {
+			return
+		}
 		category, requestedModel = s.resolveModelAlias(category, requestedModel)
 		stream, _ := msgBody["stream"].(bool)
 		// Same policy facts as chat, so stream-deny / limits / metadata are
@@ -202,6 +226,9 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	hasImages := hasImageContent(messagesRaw)
 	category := s.determineProfile(r, messagesRaw, provider, hasTools)
 	requestedModel, _ := reqBody["model"].(string)
+	if s.rejectUnknownProfile(w, requestedModel) {
+		return
+	}
 	category, requestedModel = s.resolveModelAlias(category, requestedModel)
 	stream, _ := reqBody["stream"].(bool)
 	policyFacts := requestPolicyFacts(reqBody, category, requestedModel, stream, hasTools, hasImages, int64(len(bodyBytes)))
@@ -400,6 +427,58 @@ func (s *RouterService) determineProfile(r *http.Request, messages []interface{}
 		return pol.DefaultProfile
 	}
 	return selected
+}
+
+// rejectUnknownProfile reports whether an explicitly requested model name is a
+// bare word that names no profile and no alias — and, if so, answers 404.
+//
+// Why this exists: without it an unknown name is silently ignored and the
+// profile is chosen by keyword-classifying the prompt, so a request for a
+// profile that does not exist (a typo, or a client written against docs that
+// landed before the policy did) returns 200 from whatever chain classification
+// picked. The caller believes it got the profile it named. For a fail-closed
+// profile that guarantee is the entire feature, and silence destroys it.
+//
+// Scoped deliberately to names WITHOUT a "/": every real upstream model id is
+// `vendor/model`, so pinning a specific model — including one absent from every
+// chain — keeps working untouched. Only profile-shaped names are validated.
+func (s *RouterService) rejectUnknownProfile(w http.ResponseWriter, requestedModel string) bool {
+	name := strings.TrimSpace(requestedModel)
+	if name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	// "auto" is the conventional sentinel for "you choose" — it names no
+	// profile on purpose, so rejecting it would break every client that uses it
+	// to defer the decision to the proxy. (Caught by the integration tests,
+	// which is precisely what they are for.)
+	if strings.EqualFold(name, "auto") {
+		return false
+	}
+	if _, ok := s.resolveProfileAlias(name); ok {
+		return false
+	}
+	pol := s.getPolicy()
+	if _, ok := pol.Profiles[name]; ok {
+		return false
+	}
+	// A model configured in any chain is a legitimate pin, even when its id has
+	// no vendor prefix — the "/" test above is a shortcut for ids this proxy has
+	// never seen, not the definition of a model. (The capability tests pin a
+	// bare `model-notools`, which must reach the 422 incapable-pin path rather
+	// than being turned away here as if it were a typo.)
+	for _, chain := range pol.Profiles {
+		for _, model := range chain {
+			if strings.EqualFold(strings.TrimSpace(model), name) {
+				return false
+			}
+		}
+	}
+	known := profileNames(pol.Profiles)
+	s.counters.unknownProfileRejected.Add(1)
+	writeJSONError(w, http.StatusNotFound, fmt.Sprintf(
+		"unknown profile %q; known profiles: %s (pin a specific model with its full vendor/model id)",
+		name, strings.Join(known, ", ")))
+	return true
 }
 
 func (s *RouterService) resolveModelAlias(category string, requestedModel string) (string, string) {
