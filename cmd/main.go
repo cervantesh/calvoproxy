@@ -278,6 +278,8 @@ func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
 	fmt.Fprintf(w, "calvoproxy_unknown_profile_rejected_total %d\n", c.UnknownProfileRejected)
 	fmt.Fprintln(w, "# HELP calvoproxy_paid_embedding_refused_total Embedding requests refused because they would bill real credit\n# TYPE calvoproxy_paid_embedding_refused_total counter")
 	fmt.Fprintf(w, "calvoproxy_paid_embedding_refused_total %d\n", c.PaidEmbeddingRefused)
+	fmt.Fprintln(w, "# HELP calvoproxy_stream_first_event_timeout_total Streaming attempts abandoned before their first event (chain advanced)\n# TYPE calvoproxy_stream_first_event_timeout_total counter")
+	fmt.Fprintf(w, "calvoproxy_stream_first_event_timeout_total %d\n", c.StreamFirstEventTimeout)
 }
 
 func main() {

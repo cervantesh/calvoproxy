@@ -107,8 +107,51 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// The model answered, so release the circuit / half-open probe now — but
 		// do NOT score it a success yet: the stream still has to actually deliver.
 		s.resolveProbe(attempt)
+
+		// Fail fast on a queued model, BEFORE committing headers to the client.
+		// A 200 with an event-stream content type only means the request was
+		// accepted; upstream may still sit in a queue emitting keepalive
+		// comments. Measured healthy time-to-first-event here is 0.35-0.70s,
+		// while the slow tail ran 9-13s on the SAME model and prompt — variance,
+		// not a broken model. Waiting it out is the single largest avoidable
+		// delay in a turn.
+		//
+		// Skipped for the last attempt: with nothing left to fall back to,
+		// abandoning converts a slow success into a fast failure.
+		body := resp.Body
+		if budget := streamFirstEventTimeout(); budget > 0 && !attempt.LastInChain {
+			replayed, gotEvent, timedOut := awaitFirstStreamEvent(body, budget)
+			if timedOut {
+				_ = resp.Body.Close() // unblocks the reader still parked in Read
+				// A soft score penalty, never a breaker failure. resolveProbe
+				// above already zeroed ConsecutiveFailures, so recordFailure
+				// here could never open the circuit anyway — and slowness is not
+				// the same claim as brokenness. SkipModel advances the chain;
+				// without it shouldChosenRetry could stop the chain outright and
+				// turn a slow model into a client-visible error.
+				// scoreStatusSoftOnly, not 503: applyScoreFailure escalates on
+				// >=500, so passing the status we return to the client would
+				// apply the HARD penalty reserved for real timeouts and rate
+				// limits. Being slow to start is a weaker claim than failing.
+				s.penalizeScore(attempt, scoreStatusSoftOnly)
+				s.counters.streamFirstEventTimeout.Add(1)
+				slog.InfoContext(ctx, "[CalvoProxy] ⏭️ abandoning queued model before first token",
+					slog.String("model", attempt.Model), slog.Duration("waited", budget))
+				return &attemptError{
+					StatusCode: http.StatusServiceUnavailable,
+					Retryable:  true,
+					SkipModel:  true,
+					Message:    "no stream event from " + attempt.Model + " within the first-event budget",
+				}
+			}
+			// Not a timeout: either a real event arrived or the stream ended on
+			// its own. Either way keep going with a reader that has lost nothing.
+			_ = gotEvent
+			body = replayed
+		}
+
 		streamProxyResponse(w, resp)
-		outcome := streamCopy(ctx, w, resp.Body, streamIdleTimeout(), streamMaxDuration())
+		outcome := streamCopy(ctx, w, body, streamIdleTimeout(), streamMaxDuration())
 		s.recordStreamOutcome(outcome)
 		switch {
 		case outcome == streamCompleted:

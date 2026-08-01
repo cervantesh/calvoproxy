@@ -21,6 +21,12 @@ const (
 	scoreSuccessStep = 0.2             // fraction of the gap to 1.0 gained per success
 	scorePenaltyHard = 0.4             // rate-limit (429) / 5xx / timeout (408)
 	scorePenaltySoft = 0.2             // any other failure
+	// scoreStatusSoftOnly asks penalizeScore for the SOFT step without
+	// claiming an HTTP status. applyScoreFailure escalates on 408/429/5xx,
+	// so handing it a real status for a non-HTTP judgement — "this model was
+	// merely slow to start" — silently buys the hard penalty meant for
+	// timeouts and rate limits.
+	scoreStatusSoftOnly = 0
 )
 
 // scoringEnabled reports whether score-based reordering is active

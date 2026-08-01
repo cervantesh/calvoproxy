@@ -213,3 +213,20 @@ func bridgeLegacyPolicyEnv() {
 		}
 	}
 }
+
+// streamFirstEventTimeout bounds how long a STREAMING attempt may go without
+// producing its first real SSE event before the chain abandons it and tries the
+// next model. Default 0 = disabled.
+//
+// This is not PROXY_STREAM_IDLE_TIMEOUT: that bounds the gap BETWEEN chunks once
+// streaming has begun. This one bounds only the initial wait, and it fires
+// strictly before any byte reaches the client — which is what makes advancing
+// the chain legal at all (after headers are written there is no fallback).
+//
+// Streaming only, deliberately. On a non-streaming request the upstream headers
+// arrive when generation is essentially finished, so a short budget there would
+// abort perfectly good long answers; those are already bounded per attempt by
+// PROXY_REQUEST_TIMEOUT_SECONDS.
+func streamFirstEventTimeout() time.Duration {
+	return envDurationSeconds("PROXY_STREAM_FIRST_BYTE_TIMEOUT", 0)
+}
