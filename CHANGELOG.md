@@ -54,10 +54,23 @@ out — see v0.7.1.
   served — but changing routing semantics does not belong in a testing change.
   See `TestUpstreamStatus_AdvancesOrTerminatesTheChain`.
 
+### Changed
+- **Go 1.25.8 → 1.26.5** across `go.mod`, both CI workflows and the Dockerfile.
+  Statement counting differs slightly between toolchains, so one package's
+  coverage floor moved by 0.1pp; no critical-path function changed. That is the
+  case `--allow-lower` exists for, and it is now documented in the gate.
+
 ### Fixed
-- CI's contract-test step guards on `secrets`, not `env` — a step-level `env:`
-  block is invisible to that step's own `if`, so the guard would have been
-  permanently false and the step would never have run.
+- The vendor manifest hashed bytes on disk, so with `core.autocrlf=true` (the
+  Windows default) all 54 files read as modified on a Linux CI runner. It now
+  hashes the content **git** holds, which is identical on every platform and
+  every git config, and `.gitattributes` keeps `vendor/**` checked out
+  byte-exact besides.
+- CI's contract-test guard used the `secrets` context in a step-level `if:`,
+  which is a workflow file error — two runs failed in 0s with no log. The env
+  has to be declared at **job** level; a step's own `env:` block is invisible to
+  that step's `if:`. A missing key is now a loud failure on pushes to main and
+  dev, rather than a step that skips forever and reads as a pass.
 
 ## [0.8.0] — 2026-08-01
 ### Added

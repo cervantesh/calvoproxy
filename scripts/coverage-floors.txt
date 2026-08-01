@@ -2,7 +2,7 @@
 # --update can only RAISE these. Lowering needs --allow-lower and removing
 # needs --allow-remove, so either one shows up as an argued change.
 pkg github.com/cervantesh/calvoproxy/cmd 59.9
-pkg github.com/cervantesh/calvoproxy/internal/router 81.8
+pkg github.com/cervantesh/calvoproxy/internal/router 81.7
 pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 84.6
 pkg github.com/cervantesh/calvoproxy/internal/telemetry 100.0
 func RouteRequest 100.0

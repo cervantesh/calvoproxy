@@ -34,15 +34,24 @@ if [[ ! -d "$ROOT" ]]; then
   exit 1
 fi
 
+# Hash the content GIT holds, not the bytes on this disk.
+#
+# The working tree is not authoritative: with core.autocrlf=true (the Windows
+# default) every one of these files is CRLF locally and LF on a Linux CI runner,
+# so a disk-based hash reports all 54 files as modified on every push. That is
+# not a hypothetical -- it is what the first CI run of this script did.
+#
+# `git show :path` reads the index, which holds the canonical normalized content
+# that will actually be committed. Same answer on every platform and every git
+# config. The .gitattributes `vendor/** -text` rule keeps the checkout
+# byte-exact as well, but the manifest no longer depends on that being honoured.
+#
+# The trade-off, stated: this verifies what is staged/committed, not unstaged
+# edits in your working tree. The manifest guards what enters the repository.
 generate() {
-  # Every regular file, no extension filter. An earlier version listed
-  # *.go/*.json/*.yaml, which would have gone blind the day one of these modules
-  # gained a //go:embed asset, a .s file, or a cgo source -- each of which
-  # changes the built binary while looking like nothing to a filter.
-  find "$ROOT" -type f \
-    | LC_ALL=C sort \
-    | while read -r f; do
-        printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
+  git ls-files "$ROOT"     | LC_ALL=C sort     | while read -r f; do
+        printf '%s  %s
+' "$(git show ":$f" | sha256sum | cut -d' ' -f1)" "$f"
       done
 }
 

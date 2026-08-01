@@ -11,6 +11,12 @@
 # means this change removed coverage that existed before it — not that the repo
 # fell short of some ideal.
 #
+# One legitimate source of drops has nothing to do with tests: statement counting
+# differs slightly between Go toolchains, so a version bump can move a package by
+# a tenth of a point. That is what --allow-lower is for. Check that no CRITICAL
+# FUNCTION moved before reaching for it — a package total shifting by 0.1 is
+# noise; dispatchChain falling is not.
+#
 #   ./scripts/coverage-gate.sh                          # check
 #   ./scripts/coverage-gate.sh --update                 # raise floors to today
 #   ./scripts/coverage-gate.sh --update --allow-lower   # ... and let floors DROP
