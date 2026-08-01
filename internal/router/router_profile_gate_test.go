@@ -155,3 +155,100 @@ func TestEmbeddingsRefusedUnlessOptedIn(t *testing.T) {
 		t.Errorf("refusal counted = %d, want 1", got)
 	}
 }
+
+// An agent sends tools on essentially every turn, so the old "skip the vision
+// chain whenever tools are required" guard meant it never took that path: every
+// image it saw was answered by whatever the capability rescue happened to find,
+// which in practice was the weakest vision-capable model.
+func TestImageRequestUsesVisionChainEvenWithTools(t *testing.T) {
+	s := &RouterService{
+		policy: policyConfig{
+			DefaultProfile: "coding",
+			Profiles: map[string][]string{
+				"coding": {"text/only:free"},
+				"vision": {"sees/and-calls:free"},
+			},
+		},
+		capabilities: newCapabilityIndex(map[string][]string{
+			"text/only:free":      {"tools"},
+			"sees/and-calls:free": {"vision", "tools"},
+		}),
+	}
+	messages := []interface{}{map[string]interface{}{
+		"role": "user",
+		"content": []interface{}{map[string]interface{}{
+			"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,AA"},
+		}},
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+
+	if got := s.determineProfile(req, messages, "", true); got != "vision" {
+		t.Errorf("an image request with tools should use the curated vision chain, got %q", got)
+	}
+	if got := s.determineProfile(req, messages, "", false); got != "vision" {
+		t.Errorf("an image request without tools should use the vision chain, got %q", got)
+	}
+}
+
+// Fail-closed: if the vision chain cannot serve the request, do NOT switch to
+// it — stay put and let the capability filter rescue, rather than routing into
+// a chain guaranteed to fail.
+func TestImageRequestKeepsProfileWhenVisionChainCannotServe(t *testing.T) {
+	s := &RouterService{
+		policy: policyConfig{
+			DefaultProfile: "coding",
+			Profiles: map[string][]string{
+				"coding": {"text/only:free"},
+				"vision": {"sees/no-tools:free"}, // vision, but no tool calling
+			},
+		},
+		capabilities: newCapabilityIndex(map[string][]string{
+			"text/only:free":     {"tools"},
+			"sees/no-tools:free": {"vision"},
+		}),
+	}
+	messages := []interface{}{map[string]interface{}{
+		"role": "user",
+		"content": []interface{}{map[string]interface{}{
+			"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,AA"},
+		}},
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+
+	if got := s.determineProfile(req, messages, "", true); got == "vision" {
+		t.Error("must not switch into a vision chain that cannot satisfy the tools requirement")
+	}
+	// Without tools that same chain serves fine.
+	if got := s.determineProfile(req, messages, "", false); got != "vision" {
+		t.Errorf("without tools the vision chain serves; got %q", got)
+	}
+}
+
+// The vision chain is curated. An index with no data for a model — auto-derive
+// has not run, or the model is new — must not override that configuration and
+// strand image requests on a text-only chain.
+func TestImageRequestTrustsCuratedChainForUnknownModels(t *testing.T) {
+	s := &RouterService{
+		policy: policyConfig{
+			DefaultProfile: "coding",
+			Profiles: map[string][]string{
+				"coding": {"text/only:free"},
+				"vision": {"brand/new-model:free"}, // nothing known about it
+			},
+		},
+		capabilities: newCapabilityIndex(map[string][]string{
+			"text/only:free": {"tools"},
+		}),
+	}
+	messages := []interface{}{map[string]interface{}{
+		"role": "user",
+		"content": []interface{}{map[string]interface{}{
+			"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,AA"},
+		}},
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+
+	if got := s.determineProfile(req, messages, "", true); got != "vision" {
+		t.Errorf("an unknown model in the curated chain must not veto the switch, got %q", got)
+	}
+}

@@ -414,12 +414,22 @@ func (s *RouterService) determineProfile(r *http.Request, messages []interface{}
 		}
 	}
 	pol := s.getPolicy()
-	// Auto-switch to the curated vision chain for image requests — but NOT when
-	// tools are also required, since the vision chain is vision-only and would
-	// leave no tool-capable model; in that case stay on the classified profile
-	// and let the capability filter/rescue find a model that does both.
-	if !hasTools && s.hasImageContent(messages) {
-		if _, ok := pol.Profiles["vision"]; ok {
+	// Auto-switch to the curated vision chain for image requests.
+	//
+	// This used to be skipped whenever tools were also required, on the
+	// assumption that the vision chain held no tool-capable model. That is no
+	// longer true — every model in it declares both — and the assumption was
+	// expensive: an agent sends tools on essentially every turn, so it never
+	// took this path and always fell to the capability rescue, which picks any
+	// model satisfying the requirement rather than the curated best. In practice
+	// that meant every image an agent ever saw was answered by the weakest
+	// vision-capable model, invisibly.
+	//
+	// So switch whenever the chain can actually serve the request: checked
+	// against the capability index rather than assumed, which keeps the gate
+	// fail-closed if the chain is ever edited down to vision-only models.
+	if s.hasImageContent(messages) {
+		if chain, ok := pol.Profiles["vision"]; ok && s.visionChainServes(chain, hasTools) {
 			selected = "vision"
 		}
 	}
@@ -427,6 +437,29 @@ func (s *RouterService) determineProfile(r *http.Request, messages []interface{}
 		return pol.DefaultProfile
 	}
 	return selected
+}
+
+// visionChainServes reports whether the vision chain can plausibly serve this
+// request. With tools required that means a model declaring both capabilities;
+// without, vision alone is enough.
+//
+// A model the index has never heard of counts as usable. The chain is curated —
+// an operator put those models there deliberately — so an index that simply has
+// no data yet (auto-derive has not run, or the model is new) must not override
+// that configuration and strand image requests on a text-only chain. The
+// capability filter downstream is fail-closed and still has the final say; this
+// check only avoids switching into a chain KNOWN to be unable to serve.
+func (s *RouterService) visionChainServes(chain []string, hasTools bool) bool {
+	required := []string{"vision"}
+	if hasTools {
+		required = append(required, "tools")
+	}
+	for _, model := range chain {
+		if !s.capabilities.known(model) || s.capabilities.satisfies(model, required) {
+			return true
+		}
+	}
+	return false
 }
 
 // rejectUnknownProfile reports whether an explicitly requested model name is a
