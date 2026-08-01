@@ -288,6 +288,8 @@ func main() {
 			os.Exit(runLogout())
 		case "whoami":
 			os.Exit(runWhoami())
+		case "doctor":
+			os.Exit(runDoctor(os.Args[2:]))
 		case "version", "--version", "-v":
 			fmt.Println("CalvoProxy " + version)
 			return
