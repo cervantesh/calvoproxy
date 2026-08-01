@@ -1,0 +1,377 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestYAMLScalarHelpers(t *testing.T) {
+	lines := strings.Split(`# comment
+model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1     # trailing comment
+  default: coding
+custom_providers:
+  - name: calvoproxy
+    discover_models: false
+discover_models: true
+`, "\n")
+
+	if got := yamlNestedScalar(lines, "model", "provider"); got != "custom" {
+		t.Errorf("model.provider = %q, want custom", got)
+	}
+	if got := yamlNestedScalar(lines, "model", "base_url"); got != "http://127.0.0.1:8080/v1" {
+		t.Errorf("model.base_url = %q (trailing comment not stripped?)", got)
+	}
+	// A nested key must not be mistaken for a top-level one.
+	if got := yamlNestedScalar(lines, "model", "name"); got != "" {
+		t.Errorf("model.name = %q, want empty", got)
+	}
+	if !yamlHasTopLevelKey(lines, "custom_providers") {
+		t.Error("custom_providers should be detected as top-level")
+	}
+	if yamlHasTopLevelKey(lines, "provider") {
+		t.Error("indented `provider:` must not count as top-level")
+	}
+	if got := yamlScalar(lines, "discover_models"); got != "true" {
+		t.Errorf("top-level discover_models = %q, want true", got)
+	}
+}
+
+func TestStripYAMLCommentKeepsFragment(t *testing.T) {
+	// A '#' not preceded by whitespace is part of the value, not a comment.
+	if got := stripYAMLComment("http://host/path#frag"); got != "http://host/path#frag" {
+		t.Errorf("fragment was stripped: %q", got)
+	}
+	if got := strings.TrimSpace(stripYAMLComment("value  # note")); got != "value" {
+		t.Errorf("comment not stripped: %q", got)
+	}
+}
+
+// A config missing model.base_url is the exact failure that silently routes to
+// OpenRouter, so doctor must report it as FAIL, not a warning.
+func TestCheckHermesFlagsMissingBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfg, []byte("model:\n  provider: custom\n  default: coding\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	var found bool
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "model.base_url") {
+			found = true
+			if r.status != statusFail {
+				t.Errorf("missing model.base_url should FAIL, got %v", r.status.label())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no model.base_url check was produced")
+	}
+}
+
+// Regression: Windows tooling writes config.yaml with a UTF-8 BOM, which hid
+// the first top-level key and made doctor report a bogus "model.provider" FAIL
+// against a perfectly valid config.
+func TestCheckHermesHandlesUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	body := append([]byte{0xEF, 0xBB, 0xBF}, []byte(hermesConfigBlock("http://127.0.0.1:8080/v1"))...)
+	if err := os.WriteFile(cfg, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("BOM must not break parsing: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+func TestCheckHermesAcceptsCorrectConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	body := hermesConfigBlock("http://127.0.0.1:8080/v1")
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("the block doctor prints must itself pass: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+// A hostname base_url resolves to ::1 on some hosts while the proxy listens on
+// IPv4 only — warn rather than pass silently.
+func TestCheckHermesWarnsOnLocalhostHostname(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	body := "model:\n  provider: custom\n  base_url: http://localhost:8080/v1\ncustom_providers:\n  - base_url: http://localhost:8080/v1\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "model.base_url") && r.status != statusWarn {
+			t.Errorf("localhost hostname should WARN, got %v", r.status.label())
+		}
+	}
+}
+
+// Regression: model.base_url carries the same URL, so a file-wide search let a
+// custom_providers entry pointing somewhere else pass as OK — the exact class of
+// silent misconfiguration doctor exists to catch.
+func TestCheckHermesCatchesMismatchedProviderURL(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:9999/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	var seen bool
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "custom_providers") {
+			seen = true
+			if r.status != statusFail {
+				t.Errorf("mismatched provider base_url must FAIL, got %v", r.status.label())
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("no custom_providers check was produced")
+	}
+}
+
+// Regression: discover_models sits inside a list item, so it is indented; a
+// top-level lookup never matched and the check was dead code.
+func TestCheckHermesFlagsNestedDiscoverModels(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+    discover_models: true
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "discover_models") {
+			if r.status != statusWarn {
+				t.Errorf("discover_models: true should WARN, got %v", r.status.label())
+			}
+			return
+		}
+	}
+	t.Error("indented discover_models: true was not detected")
+}
+
+func TestYAMLBlockStopsAtNextTopLevelKey(t *testing.T) {
+	lines := strings.Split("custom_providers:\n  - base_url: a\nmodel:\n  base_url: b\n", "\n")
+	block := yamlBlock(lines, "custom_providers")
+	joined := strings.Join(block, "\n")
+	if !strings.Contains(joined, "base_url: a") {
+		t.Error("block should contain its own entries")
+	}
+	if strings.Contains(joined, "base_url: b") {
+		t.Error("block leaked into the following top-level key")
+	}
+}
+
+// Grok finding 1 (false OK): each side was compared to the proxy URL
+// independently, never to each other. A pair that disagrees means Hermes binds
+// nothing and silently uses OpenRouter — the exact bypass doctor exists to catch.
+func TestCheckHermesCatchesDisagreeingPair(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	var sawFail bool
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			sawFail = true
+		}
+	}
+	if !sawFail {
+		t.Error("model.base_url and the provider entry disagree — must FAIL, not exit green")
+	}
+}
+
+// Hermes normalizes with strip().rstrip("/").lower(), so a trailing slash is
+// NOT a real mismatch — doctor must agree and stay green.
+func TestCheckHermesToleratesTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1/
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("a trailing slash is normalized by Hermes; must not FAIL: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+// Grok finding 2 (false FAIL): quoted scalars are valid YAML.
+func TestCheckHermesAcceptsQuotedScalars(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: "custom"
+  base_url: "http://127.0.0.1:8080/v1"
+custom_providers:
+  - name: calvoproxy
+    base_url: 'http://127.0.0.1:8080/v1'
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("quoted YAML is valid; must not FAIL: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+// Grok finding 4 (soft false OK): with several providers, discover_models must
+// be read from the entry that actually points at the proxy.
+func TestCheckHermesReadsDiscoverModelsFromSelectedEntry(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: other
+    base_url: http://example.invalid/v1
+    discover_models: false
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+    discover_models: true
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "discover_models") {
+			return // detected on the correct entry
+		}
+	}
+	t.Error("discover_models on the selected entry was masked by an earlier entry")
+}
+
+// Grok finding 3 (false FAIL): /health sits behind PROXY_ADMIN_TOKEN. A
+// hardened proxy must not be reported as unreachable, and the live check —
+// which is not admin-gated — must still run.
+func TestCheckReachableHandlesAdminTokenGate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "configured_api_key": true})
+	}))
+	defer srv.Close()
+
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
+	res, health, answered := checkReachable(srv.Client(), srv.URL)
+	if res.status == statusFail {
+		t.Errorf("an admin-gated /health must not read as unreachable, got %v", res.status.label())
+	}
+	if !answered {
+		t.Error("the proxy answered; the live check must still run")
+	}
+	if health != nil {
+		t.Error("health details are not readable without the token")
+	}
+
+	t.Setenv("PROXY_ADMIN_TOKEN", "secret")
+	res, health, _ = checkReachable(srv.Client(), srv.URL)
+	if res.status != statusOK || health == nil {
+		t.Errorf("with the token present the probe must succeed, got %v", res.status.label())
+	}
+}
+
+func TestCheckRoundTripReportsUpstreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	got := checkRoundTrip(srv.Client(), srv.URL, "simple")
+	if got.status != statusFail {
+		t.Fatalf("HTTP 429 should FAIL, got %v", got.status.label())
+	}
+	if !strings.Contains(got.detail, "429") {
+		t.Errorf("detail should surface the status code, got %q", got.detail)
+	}
+}
+
+func TestCheckRoundTripSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "vendor/model:free",
+			"choices": []any{map[string]any{"message": map[string]any{"content": "pong"}}},
+		})
+	}))
+	defer srv.Close()
+
+	got := checkRoundTrip(srv.Client(), srv.URL, "coding")
+	if got.status != statusOK {
+		t.Fatalf("healthy upstream should pass, got %v (%s)", got.status.label(), got.detail)
+	}
+	if !strings.Contains(got.detail, "vendor/model:free") {
+		t.Errorf("detail should name the model actually used, got %q", got.detail)
+	}
+}
+
+func TestProxyBaseURLUsesLoopbackForWildcardBind(t *testing.T) {
+	t.Setenv("HOST", "0.0.0.0")
+	t.Setenv("PORT", "9999")
+	if got := proxyBaseURL(); got != "http://127.0.0.1:9999" {
+		t.Errorf("wildcard bind should be probed over loopback, got %q", got)
+	}
+}
