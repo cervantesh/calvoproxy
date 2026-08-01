@@ -11,11 +11,22 @@
 # means this change removed coverage that existed before it — not that the repo
 # fell short of some ideal.
 #
-# One legitimate source of drops has nothing to do with tests: statement counting
-# differs slightly between Go toolchains, so a version bump can move a package by
-# a tenth of a point. That is what --allow-lower is for. Check that no CRITICAL
-# FUNCTION moved before reaching for it — a package total shifting by 0.1 is
-# noise; dispatchChain falling is not.
+# Two legitimate sources of drops have nothing to do with tests:
+#
+#   - Statement counting differs between Go toolchains, so a version bump can
+#     move a package by a tenth of a point.
+#   - Coverage differs by PLATFORM. cmd/ contains GOOS-specific code, so the
+#     same commit measures 59.9% on Windows and 59.6% on Linux.
+#
+# Because of the second one, THE FLOORS ARE THE CI (linux/amd64) NUMBERS. If you
+# regenerate them on Windows or macOS you will encode values CI cannot meet, and
+# the gate will fail for everyone. Regenerate on Linux, or take the numbers from
+# the failing CI log -- the gate prints its full measured table on failure for
+# exactly this reason.
+#
+# --allow-lower is for these cases. Before reaching for it, check that no
+# CRITICAL FUNCTION moved: a package total shifting 0.1 is noise, dispatchChain
+# falling is not.
 #
 #   ./scripts/coverage-gate.sh                          # check
 #   ./scripts/coverage-gate.sh --update                 # raise floors to today
@@ -137,6 +148,13 @@ while read -r kind name floor; do
 done < "$FLOORS"
 
 if [[ $fail -ne 0 ]]; then
+  # Print everything measured, not just the failures. Coverage varies by
+  # platform (GOOS-specific code in cmd/) and by toolchain (statement counting
+  # changes between Go versions), so whoever has to fix this needs the numbers
+  # from the machine that failed -- which is usually not the machine they are on.
+  echo "" >&2
+  echo "Measured on $(go env GOOS)/$(go env GOARCH), $(go version | awk '{print $3}'):" >&2
+  sed 's/^/  /' "$measured" | grep -E '^  pkg |^  func ' >&2
   cat >&2 <<'MSG'
 
 Coverage went down. Add the tests, or — if the drop is correct (code deleted,
