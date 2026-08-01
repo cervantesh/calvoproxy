@@ -92,6 +92,25 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			span.SetStatus(codes.Error, "Upstream HTTP Error")
 		}
 		attErr := classifyHTTPError(resp.StatusCode, string(respBytes))
+		// A 400 from ONE upstream is not a verdict on the request. The same body
+		// goes to providers with different limits, so "invalid" here can be
+		// perfectly valid there — and 400 is otherwise terminal, which ends the
+		// whole chain on the first picky provider.
+		//
+		// Observed: a client exposing more than 64 tools received
+		//   400 invalid_request_error: "at most 64 tools are allowed"
+		// from one provider. Every other model in the chain would have served the
+		// request, but the chain stopped and the user got an error in 0.8s.
+		//
+		// Advancing costs at most K fast attempts when the request really is
+		// malformed — every model rejects it immediately — and the client still
+		// gets a 400 at the end. Worth it against losing a request a later model
+		// would have answered.
+		if resp.StatusCode == http.StatusBadRequest {
+			attErr.SkipModel = true
+			slog.WarnContext(ctx, "[CalvoProxy] upstream rejected the request; trying the next model",
+				slog.String("model", attempt.Model))
+		}
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
 			// A 429/503 may carry Retry-After — respect it as a minimum cooldown.
