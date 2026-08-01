@@ -1,6 +1,6 @@
 module github.com/cervantesh/calvoproxy
 
-go 1.25.8
+go 1.26.5
 
 require (
 	github.com/cervantesh/cervo-contracts v0.0.0-00010101000000-000000000000

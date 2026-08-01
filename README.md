@@ -595,4 +595,20 @@ model"). Minimal config: a reachable proxy (or set `CALVOPROXY_BIN` +
 - `internal/telemetry/` — OpenTelemetry setup.
 - `docs/POLICY.md` — CervoRules v3 / CervoModelPolicy integration and runtime
   overrides.
+- `test/contract/` — opt-in tests against the **real** OpenRouter API. Mocks
+  encode assumptions; these check the assumptions. Run with
+  `CALVOPROXY_CONTRACT=1 OPENROUTER_API_KEY=... go test ./test/contract/ -v`.
 - `vendor/` — vendored dependencies (do not edit by hand).
+
+## Changes and dependencies
+
+- [CHANGELOG.md](CHANGELOG.md) — every release, what it changed, and the failure
+  it came from. Retractions stay in the record.
+- [THIRD_PARTY.md](THIRD_PARTY.md) — the `cervo-*` modules have **no `go.sum`
+  entries and no reachable upstream**. Read this before trusting, auditing, or
+  forking the build.
+
+CI enforces three ratchets beyond the test suite: a coverage floor
+(`scripts/coverage-gate.sh`), a checksum manifest over the vendored modules
+(`scripts/vendor-manifest.sh`), and — when the repository secret is present —
+the upstream contract tests.
