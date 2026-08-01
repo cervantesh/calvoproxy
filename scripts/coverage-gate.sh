@@ -89,6 +89,15 @@ if [[ $UPDATE -eq 1 ]]; then
   trap 'rm -f "$measured" "$proposed"' EXIT
   { grep '^pkg ' "$measured" | sort; grep -E "$CRITICAL" "$measured" | sort; } > "$proposed"
 
+  if [[ "$(go env GOOS)/$(go env GOARCH)" != "linux/amd64" ]]; then
+    echo "REFUSING to regenerate floors on $(go env GOOS)/$(go env GOARCH)." >&2
+    echo "  The floors are the CI (linux/amd64) numbers; package totals differ by" >&2
+    echo "  platform, so writing them here would encode values CI cannot meet." >&2
+    echo "  Regenerate on Linux, or copy the measured table the gate prints when" >&2
+    echo "  it fails in CI." >&2
+    exit 1
+  fi
+
   refused=0
   if [[ -f "$FLOORS" ]]; then
     while read -r kind name floor; do
@@ -129,9 +138,34 @@ if [[ ! -f "$FLOORS" ]]; then
   exit 1
 fi
 
+# The floors are the CI numbers (linux/amd64). Elsewhere, PACKAGE TOTALS are
+# advisory and FUNCTION floors still bind.
+#
+# That split is not a convenience, it is what the measurements show. The same
+# commit reports cmd/ at 59.6% on Linux and 59.9% on Windows, and
+# internal/router at 81.8% vs 81.7% — GOOS-specific code shifts the totals in
+# both directions. Every pinned FUNCTION measured identically on both. So the
+# per-function floors are portable and stay hard everywhere; a package total off
+# by a tenth on a developer's laptop is noise, and failing on it would train
+# people to skip the gate — which costs more than the total was ever worth.
+HARD_PKG=1
+if [[ "$(go env GOOS)/$(go env GOARCH)" != "linux/amd64" ]]; then
+  HARD_PKG=0
+fi
+
 fail=0
 while read -r kind name floor; do
   [[ -z "${kind:-}" || "$kind" == \#* ]] && continue
+  matches=$(awk -v k="$kind" -v n="$name" '$1 == k && $2 == n' "$measured" | wc -l | tr -d ' ')
+  if [[ "$matches" -gt 1 ]]; then
+    # Floors key on a bare function name, so two same-named functions in
+    # different files would silently compare against whichever sorted first.
+    echo "AMBIGUOUS  $kind $name matches $matches measured entries."
+    echo "           Rename one, or drop it from $FLOORS — a floor that compares"
+    echo "           against an arbitrary one of them protects nothing."
+    fail=1
+    continue
+  fi
   now=$(awk -v k="$kind" -v n="$name" '$1 == k && $2 == n { print $3; exit }' "$measured")
   if [[ -z "$now" ]]; then
     echo "GONE  $kind $name — floor $floor%, but it no longer reports coverage."
@@ -142,8 +176,12 @@ while read -r kind name floor; do
   # 0.001, not a slack budget: coverage reports one decimal, so this absorbs
   # float representation only. The 0.05 this replaced quietly allowed real drops.
   if awk -v a="$now" -v b="$floor" 'BEGIN { exit !(a + 0.001 < b) }'; then
-    echo "DROP  $kind $name: $now% < floor $floor%"
-    fail=1
+    if [[ "$kind" == "pkg" && $HARD_PKG -eq 0 ]]; then
+      echo "note  $kind $name: $now% < floor $floor% (advisory off linux/amd64)"
+    else
+      echo "DROP  $kind $name: $now% < floor $floor%"
+      fail=1
+    fi
   fi
 done < "$FLOORS"
 
@@ -154,7 +192,9 @@ if [[ $fail -ne 0 ]]; then
   # from the machine that failed -- which is usually not the machine they are on.
   echo "" >&2
   echo "Measured on $(go env GOOS)/$(go env GOARCH), $(go version | awk '{print $3}'):" >&2
-  sed 's/^/  /' "$measured" | grep -E '^  pkg |^  func ' >&2
+  # Only the entries that are actually compared. Dumping every function produced
+  # 300 lines of log in which the four that mattered were invisible.
+  { grep '^pkg ' "$measured"; grep -E "$CRITICAL" "$measured"; } | sed 's/^/  /' >&2
   cat >&2 <<'MSG'
 
 Coverage went down. Add the tests, or — if the drop is correct (code deleted,
