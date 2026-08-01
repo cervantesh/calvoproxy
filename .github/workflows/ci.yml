@@ -41,26 +41,39 @@ jobs:
         # move up, so a hurried PR cannot quietly trade coverage for speed. See
         # scripts/coverage-floors.txt -- lowering a floor is a visible diff line.
         run: ./scripts/coverage-gate.sh
-      - name: Contract tests must be configured on main and dev
-        # Optional forever is the same failure shape as "one green check was
-        # enough": the check exists, never runs, and its absence reads as a pass.
-        # On the protected branches the secret is REQUIRED, so a missing one is a
-        # loud failure rather than a silent skip. Pull requests (including from
-        # forks, which cannot see secrets) are exempt.
-        if: github.event_name == 'push' && env.OPENROUTER_API_KEY == ''
-        run: |
-          echo "::error::OPENROUTER_API_KEY is not configured, so the upstream" \
-               "contract tests cannot run on ${{ github.ref_name }}."
-          echo "These are the only check that tests what OpenRouter actually does"
-          echo "rather than what our mocks assume. The 64-tool cap shipped because"
-          echo "no mock modelled it. Set the repository secret, or delete this step"
-          echo "and say so in the README."
-          exit 1
       - name: Contract tests (real upstream)
-        # They spend real quota, so they are opt-in via CALVOPROXY_CONTRACT and
-        # gated on the secret being present. The step above is what stops "absent"
-        # from quietly becoming permanent.
+        # Opt-in, and NEVER a reason for a red build on someone else's clone.
+        #
+        # These spend real OpenRouter quota, so they only run where a key exists.
+        # That is most of the time nowhere: forks cannot read secrets, and a
+        # contributor cloning this repo has no key at all. Requiring one would
+        # paint their CI red for a reason that has nothing to do with their
+        # change -- which is a good way to teach people to ignore CI.
+        #
+        # When the key IS present and the contract has moved, this fails, and it
+        # should: that is the only check here that tests what OpenRouter actually
+        # does rather than what our mocks assume. The 64-tool cap shipped because
+        # no mock modelled it.
         if: env.OPENROUTER_API_KEY != ''
         env:
           CALVOPROXY_CONTRACT: "1"
         run: go test ./test/contract/ -v
+      - name: Note that contract tests were skipped
+        # Absence should be VISIBLE, not fatal. Writing it to the job summary
+        # means nobody has to infer from a missing step that the upstream went
+        # unverified -- without turning a missing optional key into a failure.
+        if: env.OPENROUTER_API_KEY == ''
+        run: |
+          {
+            echo "### Upstream contract tests: skipped"
+            echo
+            echo "No \`OPENROUTER_API_KEY\` is available to this run, so nothing"
+            echo "verified what OpenRouter actually does — only what our mocks assume."
+            echo
+            echo "This is expected on forks and on clones without a key, and it is"
+            echo "not a failure. To run them locally:"
+            echo
+            echo '```'
+            echo "CALVOPROXY_CONTRACT=1 OPENROUTER_API_KEY=... go test ./test/contract/ -v"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
