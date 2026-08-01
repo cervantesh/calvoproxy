@@ -201,6 +201,139 @@ func TestYAMLBlockStopsAtNextTopLevelKey(t *testing.T) {
 	}
 }
 
+// Grok finding 1 (false OK): each side was compared to the proxy URL
+// independently, never to each other. A pair that disagrees means Hermes binds
+// nothing and silently uses OpenRouter — the exact bypass doctor exists to catch.
+func TestCheckHermesCatchesDisagreeingPair(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	var sawFail bool
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			sawFail = true
+		}
+	}
+	if !sawFail {
+		t.Error("model.base_url and the provider entry disagree — must FAIL, not exit green")
+	}
+}
+
+// Hermes normalizes with strip().rstrip("/").lower(), so a trailing slash is
+// NOT a real mismatch — doctor must agree and stay green.
+func TestCheckHermesToleratesTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1/
+custom_providers:
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("a trailing slash is normalized by Hermes; must not FAIL: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+// Grok finding 2 (false FAIL): quoted scalars are valid YAML.
+func TestCheckHermesAcceptsQuotedScalars(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: "custom"
+  base_url: "http://127.0.0.1:8080/v1"
+custom_providers:
+  - name: calvoproxy
+    base_url: 'http://127.0.0.1:8080/v1'
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if r.status == statusFail {
+			t.Errorf("quoted YAML is valid; must not FAIL: %s — %s", r.title, r.detail)
+		}
+	}
+}
+
+// Grok finding 4 (soft false OK): with several providers, discover_models must
+// be read from the entry that actually points at the proxy.
+func TestCheckHermesReadsDiscoverModelsFromSelectedEntry(t *testing.T) {
+	dir := t.TempDir()
+	body := `model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+custom_providers:
+  - name: other
+    base_url: http://example.invalid/v1
+    discover_models: false
+  - name: calvoproxy
+    base_url: http://127.0.0.1:8080/v1
+    discover_models: true
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", dir)
+
+	for _, r := range checkHermes("http://127.0.0.1:8080") {
+		if strings.Contains(r.title, "discover_models") {
+			return // detected on the correct entry
+		}
+	}
+	t.Error("discover_models on the selected entry was masked by an earlier entry")
+}
+
+// Grok finding 3 (false FAIL): /health sits behind PROXY_ADMIN_TOKEN. A
+// hardened proxy must not be reported as unreachable, and the live check —
+// which is not admin-gated — must still run.
+func TestCheckReachableHandlesAdminTokenGate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "configured_api_key": true})
+	}))
+	defer srv.Close()
+
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
+	res, health, answered := checkReachable(srv.Client(), srv.URL)
+	if res.status == statusFail {
+		t.Errorf("an admin-gated /health must not read as unreachable, got %v", res.status.label())
+	}
+	if !answered {
+		t.Error("the proxy answered; the live check must still run")
+	}
+	if health != nil {
+		t.Error("health details are not readable without the token")
+	}
+
+	t.Setenv("PROXY_ADMIN_TOKEN", "secret")
+	res, health, _ = checkReachable(srv.Client(), srv.URL)
+	if res.status != statusOK || health == nil {
+		t.Errorf("with the token present the probe must succeed, got %v", res.status.label())
+	}
+}
+
 func TestCheckRoundTripReportsUpstreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

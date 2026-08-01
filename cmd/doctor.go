@@ -109,7 +109,7 @@ func yamlScalar(lines []string, key string) string {
 			continue // indented: not top-level
 		}
 		if strings.HasPrefix(raw, prefix) {
-			return strings.TrimSpace(stripYAMLComment(raw[len(prefix):]))
+			return unquoteYAML(stripYAMLComment(raw[len(prefix):]))
 		}
 	}
 	return ""
@@ -129,7 +129,7 @@ func yamlNestedScalar(lines []string, parent, child string) string {
 			continue
 		}
 		if inParent && strings.HasPrefix(trimmed, child+":") {
-			return strings.TrimSpace(stripYAMLComment(trimmed[len(child)+1:]))
+			return unquoteYAML(stripYAMLComment(trimmed[len(child)+1:]))
 		}
 	}
 	return ""
@@ -178,14 +178,15 @@ func yamlAnyScalar(lines []string, key string) string {
 		trimmed = strings.TrimPrefix(trimmed, "- ") // list item on the same line
 		trimmed = strings.TrimSpace(trimmed)
 		if strings.HasPrefix(trimmed, key+":") {
-			return strings.TrimSpace(stripYAMLComment(trimmed[len(key)+1:]))
+			return unquoteYAML(stripYAMLComment(trimmed[len(key)+1:]))
 		}
 	}
 	return ""
 }
 
 // stripYAMLComment drops a trailing ` # ...` comment. Only when the '#' is
-// preceded by whitespace, so a value like http://h/#frag survives.
+// preceded by whitespace, so a value like http://h/#frag survives — per the
+// YAML spec, a '#' not preceded by whitespace is part of the scalar.
 func stripYAMLComment(s string) string {
 	for i := 1; i < len(s); i++ {
 		if s[i] == '#' && (s[i-1] == ' ' || s[i-1] == '\t') {
@@ -193,6 +194,50 @@ func stripYAMLComment(s string) string {
 		}
 	}
 	return s
+}
+
+// unquoteYAML removes matching surrounding quotes. `provider: "custom"` is
+// perfectly valid YAML, and reading it line-wise would otherwise compare
+// `"custom"` against `custom` and report a bogus FAIL.
+func unquoteYAML(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// normBaseURL mirrors Hermes' own comparison (`strip().rstrip("/").lower()`),
+// so doctor agrees with Hermes about whether two base_urls are the same route.
+func normBaseURL(s string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/"))
+}
+
+// yamlListEntries splits a block of list items into one []string per `- ` item,
+// so a key can be read from the specific entry it belongs to rather than from
+// whichever entry happens to come first.
+func yamlListEntries(block []string) [][]string {
+	var entries [][]string
+	var cur []string
+	for _, raw := range block {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "- ") || trimmed == "-" {
+			if len(cur) > 0 {
+				entries = append(entries, cur)
+			}
+			cur = []string{raw}
+			continue
+		}
+		if cur != nil {
+			cur = append(cur, raw)
+		}
+	}
+	if len(cur) > 0 {
+		entries = append(entries, cur)
+	}
+	return entries
 }
 
 // hermesConfigPath locates Hermes' config.yaml the same way Hermes does:
@@ -234,8 +279,20 @@ func proxyBaseURL() string {
 	return "http://" + net.JoinHostPort(host, envOrDefault("PORT", "8080"))
 }
 
-func checkReachable(client *http.Client, base string) (checkResult, map[string]any) {
-	resp, err := client.Get(base + "/health")
+// checkReachable probes /health. The third return says whether the proxy
+// answered at all (as opposed to the connection failing): /v1/chat/completions
+// is not admin-gated, so a 401 on /health must not stop the live check.
+func checkReachable(client *http.Client, base string) (checkResult, map[string]any, bool) {
+	req, err := http.NewRequest(http.MethodGet, base+"/health", nil)
+	if err != nil {
+		return checkResult{status: statusFail, title: "Proxy reachable at " + base, detail: err.Error()}, nil, false
+	}
+	// /health is behind PROXY_ADMIN_TOKEN when that is set. Present it when we
+	// have it, so a hardened install is not reported red for being hardened.
+	if tok := strings.TrimSpace(os.Getenv("PROXY_ADMIN_TOKEN")); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return checkResult{
 			status: statusFail,
@@ -243,16 +300,26 @@ func checkReachable(client *http.Client, base string) (checkResult, map[string]a
 			detail: err.Error(),
 			fix: "Start it:  calvoproxy\n" +
 				"Or with Docker:  docker run -p 8080:8080 -e OPENROUTER_API_KEY=... ghcr.io/cervantesh/calvoproxy",
-		}, nil
+		}, nil, false
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusUnauthorized {
+		return checkResult{
+			status: statusWarn,
+			title:  "Proxy reachable at " + base,
+			detail: "/health is gated by PROXY_ADMIN_TOKEN and no matching token was presented,\n" +
+				"so credential and model-policy details cannot be inspected.",
+			fix: "Set PROXY_ADMIN_TOKEN in doctor's environment to the proxy's value.\n" +
+				"The live completion check below does not need it.",
+		}, nil, true
+	}
 	if resp.StatusCode != http.StatusOK {
 		return checkResult{
 			status: statusFail,
 			title:  "Proxy reachable at " + base,
 			detail: fmt.Sprintf("/health returned HTTP %d", resp.StatusCode),
-		}, nil
+		}, nil, true
 	}
 	var health map[string]any
 	if err := json.Unmarshal(body, &health); err != nil {
@@ -260,9 +327,9 @@ func checkReachable(client *http.Client, base string) (checkResult, map[string]a
 			status: statusWarn,
 			title:  "Proxy reachable at " + base,
 			detail: "/health did not return JSON — is something else on this port?",
-		}, nil
+		}, nil, true
 	}
-	return checkResult{status: statusOK, title: "Proxy reachable at " + base}, health
+	return checkResult{status: statusOK, title: "Proxy reachable at " + base}, health, true
 }
 
 func checkAPIKey(health map[string]any) checkResult {
@@ -420,36 +487,63 @@ func checkHermes(base string) []checkResult {
 			fix:    "Add the custom_providers block printed below.",
 		})
 	} else {
-		hasURL := false
-		for _, l := range providers {
-			if !strings.Contains(l, "base_url") {
-				continue
-			}
-			if strings.TrimRight(yamlAnyScalar([]string{l}, "base_url"), "/") == strings.TrimRight(wantURL, "/") {
-				hasURL = true
+		// Find the entry Hermes itself would select: the one whose base_url
+		// matches model.base_url under Hermes' own normalization
+		// (strip + rstrip("/") + lower). Selecting the entry first — rather
+		// than scanning for any line that mentions the proxy URL — is what
+		// makes the remaining per-entry checks apply to the right provider.
+		var selected []string
+		for _, entry := range yamlListEntries(providers) {
+			if normBaseURL(yamlAnyScalar(entry, "base_url")) == normBaseURL(modelURL) && modelURL != "" {
+				selected = entry
 				break
 			}
 		}
-		if !hasURL {
+
+		switch {
+		case selected == nil:
+			// The pair does not agree, so Hermes binds nothing and quietly
+			// falls back to OpenRouter. This must be FAIL: it is the exact
+			// silent bypass doctor exists to catch, and checking each side
+			// against the proxy URL independently would miss it.
 			out = append(out, checkResult{
 				status: statusFail,
-				title:  "custom_providers entry points at the proxy",
-				detail: "custom_providers exists, but no entry has base_url " + wantURL,
-				fix:    "Hermes selects the provider by matching base_url — it must be identical to model.base_url.",
+				title:  "custom_providers entry matches model.base_url",
+				detail: fmt.Sprintf("no custom_providers entry has base_url %q\n"+
+					"Hermes binds `provider: custom` by matching these two values;\n"+
+					"when they disagree it silently uses OpenRouter instead.", modelURL),
+				fix: "Make the entry's base_url identical to model.base_url (" + wantURL + ").",
 			})
-		} else {
-			out = append(out, checkResult{status: statusOK, title: "custom_providers entry points at the proxy"})
-		}
-
-		// discover_models lives inside a list item, so it is indented — a
-		// top-level lookup here silently never matched.
-		if strings.EqualFold(yamlAnyScalar(providers, "discover_models"), "true") {
+		case normBaseURL(yamlAnyScalar(selected, "base_url")) != normBaseURL(wantURL):
 			out = append(out, checkResult{
 				status: statusWarn,
-				title:  "discover_models disabled",
-				detail: "the proxy serves no /v1/models; discovery will 404",
-				fix:    "Set discover_models: false on the calvoproxy entry.",
+				title:  "custom_providers entry matches model.base_url",
+				detail: "the pair agrees, but points at " + yamlAnyScalar(selected, "base_url") +
+					" while this proxy answers on " + wantURL,
 			})
+		default:
+			out = append(out, checkResult{status: statusOK, title: "custom_providers entry matches model.base_url"})
+		}
+
+		if selected != nil {
+			// Read from the SELECTED entry: with several providers configured,
+			// the first `discover_models:` in the block may belong to another one.
+			if strings.EqualFold(yamlAnyScalar(selected, "discover_models"), "true") {
+				out = append(out, checkResult{
+					status: statusWarn,
+					title:  "discover_models disabled",
+					detail: "the proxy serves no /v1/models; discovery will 404",
+					fix:    "Set discover_models: false on the calvoproxy entry.",
+				})
+			}
+			if mode := yamlAnyScalar(selected, "api_mode"); mode != "" && mode != "chat_completions" {
+				out = append(out, checkResult{
+					status: statusWarn,
+					title:  "api_mode is chat_completions",
+					detail: fmt.Sprintf("entry declares api_mode: %q; the proxy speaks the OpenAI chat API", mode),
+					fix:    "Set api_mode: chat_completions.",
+				})
+			}
 		}
 	}
 	return out
@@ -485,20 +579,23 @@ func runDoctor(args []string) int {
 	base := proxyBaseURL()
 
 	var results []checkResult
-	reach, health := checkReachable(client, base)
+	reach, health, answered := checkReachable(client, base)
 	results = append(results, reach)
 
 	if health != nil {
 		results = append(results, checkAPIKey(health))
-		if !skipLive {
-			profile := "simple"
-			if mp, ok := health["model_policy"].(map[string]any); ok {
-				if dp, ok := mp["default_profile"].(string); ok && dp != "" {
-					profile = dp
-				}
+	}
+	// Run the live check whenever the proxy answered at all — it is not
+	// admin-gated, so it still works when /health is behind a token, and it is
+	// the check that actually proves the chain end to end.
+	if answered && !skipLive {
+		profile := "simple"
+		if mp, ok := health["model_policy"].(map[string]any); ok {
+			if dp, ok := mp["default_profile"].(string); ok && dp != "" {
+				profile = dp
 			}
-			results = append(results, checkRoundTrip(client, base, profile))
 		}
+		results = append(results, checkRoundTrip(client, base, profile))
 	}
 	results = append(results, checkHermes(base)...)
 
