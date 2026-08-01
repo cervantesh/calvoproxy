@@ -50,6 +50,7 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
 		execution.RequestBody["model"] = attempt.Model
 		upBytes, _ := json.Marshal(execution.RequestBody)
+		attempt.LastInChain = attemptIndex == len(execution.Attempts)-1
 
 		// Each non-streaming attempt gets its own deadline so a slow model is cut
 		// at PerAttemptTimeout, leaving the rest of the overall budget for the
