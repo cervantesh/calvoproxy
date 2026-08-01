@@ -68,6 +68,12 @@ out — see v0.7.1.
   Statement counting differs slightly between toolchains, so one package's
   coverage floor moved by 0.1pp; no critical-path function changed. That is the
   case `--allow-lower` exists for, and it is now documented in the gate.
+- Every GitHub Action bumped to its current major: `checkout` v4→v7, `setup-go`
+  v5→v7 (both were pinned to a deprecated Node 20 runtime), `action-gh-release`
+  v2→v3, `setup-buildx` v3→v4, `login-action` v3→v4, `metadata-action` v5→v6,
+  `build-push-action` v6→v7. Every input this repo passes was checked against
+  each new major's `action.yml` first — the release workflow signs binaries and
+  publishes images, and it cannot be tested without cutting a release.
 
 ### Fixed
 - The vendor manifest hashed bytes on disk, so with `core.autocrlf=true` (the
