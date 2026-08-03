@@ -11,6 +11,25 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+- **A provider's failure no longer ends the whole chain, whatever its status.**
+  On 2026-08-03 a request died on `401 authentication_error: "invalid API key"`
+  — from a *provider*, relayed by OpenRouter, while the account's own key was
+  valid and answering `/api/v1/key` with 200. 401 is terminal, so the chain
+  stopped on a provider-side credential problem the next model would not have
+  hit; a direct request to the same profile succeeded first try on a different
+  provider minutes later.
+
+  This is the 64-tool incident again with a different number. Both bodies have
+  the same shape — `"message":"Provider returned error"` plus a
+  `metadata.provider_name` — and both came from the same provider. So the rule
+  is no longer "which status codes advance" but **who refused**: a relayed
+  provider failure advances, whatever the code, and a genuine account-level
+  rejection (no `provider_name`) still terminates, because a bad key is bad for
+  every model and burning the chain would bury the one error worth reading.
+
+  Recorded as unchanged in 0.9.0, 402 is now covered by the same rule.
+
 ## [0.9.0] — 2026-08-01
 
 Nothing in this release changes how the proxy routes a request. It changes what

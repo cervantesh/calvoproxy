@@ -106,10 +106,26 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// malformed — every model rejects it immediately — and the client still
 		// gets a 400 at the end. Worth it against losing a request a later model
 		// would have answered.
-		if resp.StatusCode == http.StatusBadRequest {
+		// A 401 arrived the same way on 2026-08-03: OpenRouter relaying
+		//   401 authentication_error: "invalid API key"
+		// from the same provider, while the account's own key was valid and
+		// answering /api/v1/key with 200. 401 is terminal, so the chain died on
+		// a provider-side credential problem that the next model — routed to a
+		// different provider — would not have hit.
+		//
+		// So the rule is not "which status codes advance" but "who refused".
+		// OpenRouter marks a relayed provider failure explicitly; see
+		// isProviderRelayedError. That covers 400, 401, 402 and whatever the
+		// next provider invents, while a genuine account-level rejection (no
+		// provider_name) still terminates as it must — a bad key is bad for
+		// every model, and burning the chain would hide the one error that
+		// matters.
+		if resp.StatusCode == http.StatusBadRequest || isProviderRelayedError(string(respBytes)) {
 			attErr.SkipModel = true
 			slog.WarnContext(ctx, "[CalvoProxy] upstream rejected the request; trying the next model",
-				slog.String("model", attempt.Model))
+				slog.String("model", attempt.Model),
+				slog.Int("status", resp.StatusCode),
+				slog.Bool("provider_relayed", isProviderRelayedError(string(respBytes))))
 		}
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
