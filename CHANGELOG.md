@@ -257,8 +257,8 @@ change to the running proxy.
 
 ## [0.2.0] — 2026-07-30
 ### Changed
-- Resilience/reliability/DX hardening; completed the CervoProxy → CalvoProxy
-  rename.
+- Resilience/reliability/DX hardening; completed the project rename to
+  CalvoProxy.
 
 ## [0.1.2] — 2026-07-30
 ### Added
