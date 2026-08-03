@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-03
+
 ### Fixed
 - **A provider's failure no longer ends the whole chain, whatever its status.**
   On 2026-08-03 a request died on `401 authentication_error: "invalid API key"`
@@ -292,7 +294,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.1
 [0.9.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.0
 [0.8.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.8.0
 [0.7.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.7.2
