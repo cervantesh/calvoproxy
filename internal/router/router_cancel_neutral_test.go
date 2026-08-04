@@ -60,7 +60,7 @@ func TestCancelledRequestDoesNotPenalizeModel(t *testing.T) {
 	// scoreForAttempt, not the raw field: a fresh state stores Score 0 and only
 	// becomes meaningful once ScoreUpdatedAt is set, so the raw field cannot
 	// distinguish "never scored" from "scored to zero".
-	if got := s.scoreForAttempt(attempt); got != scoreInitial {
+	if got := s.scoreForAttempt(attempt, s.scoreEnv()); got != scoreInitial {
 		t.Errorf("client cancel moved the model score off neutral: %.3f (want %.3f)", got, scoreInitial)
 	}
 }

@@ -123,10 +123,10 @@ func TestFirstEventBudgetDefaultsDisabled(t *testing.T) {
 func TestAbandonmentUsesSoftPenaltyNotHard(t *testing.T) {
 	now := time.Now()
 	soft := &modelBreakerState{Score: 1.0, ScoreUpdatedAt: now}
-	applyScoreFailure(soft, scoreStatusSoftOnly, now)
+	applyScoreFailure(soft, scoreStatusSoftOnly, newScoreEnv(now, 0))
 
 	hard := &modelBreakerState{Score: 1.0, ScoreUpdatedAt: now}
-	applyScoreFailure(hard, 503, now)
+	applyScoreFailure(hard, 503, newScoreEnv(now, 0))
 
 	if soft.Score <= hard.Score {
 		t.Fatalf("the abandonment penalty must be gentler than a 5xx: soft=%.3f hard=%.3f", soft.Score, hard.Score)
