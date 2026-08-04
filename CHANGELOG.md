@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-04
+
 ### Added
 - **Failed requests now say why.** Measured on a live instance (v0.9.1, 183
   requests, 2.8h uptime): 26 requests — 14% — returned 5xx and nothing recorded
