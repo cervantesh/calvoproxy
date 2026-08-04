@@ -52,11 +52,62 @@ type routerCounters struct {
 	// capabilityRefused) are counted; this client-visible 503 was not.
 	allModelsCooling atomic.Int64
 
-	// Per-model time-to-first-stream-event. Guarded by a mutex only for map
-	// lookup/insert; the accumulators themselves are atomic, so the hot path
-	// never holds the lock while doing arithmetic.
-	firstEventMu    sync.Mutex
+	// Per-model latency, two DIFFERENT quantities that must never be summed
+	// together. Guarded by a mutex only for map lookup/insert; the accumulators
+	// themselves are atomic, so the hot path never holds the lock while doing
+	// arithmetic.
+	//
+	// firstEventStats: the wait AFTER response headers, which is exactly what
+	// PROXY_STREAM_FIRST_BYTE_TIMEOUT compares against. This is the series that
+	// says whether that budget is tuned correctly, and nothing else does.
+	//
+	// firstTokenStats: the whole request → first token, measured from before
+	// the upstream call. Measured on a live upstream, these differ by more than
+	// rounding: a request with a 1.51s time-to-first-token recorded under 5ms of
+	// post-header wait, because OpenRouter held the headers and then flushed its
+	// queue keepalives and the first data event together. The post-header wait
+	// alone therefore cannot rank models by responsiveness — which is the
+	// question an operator actually asks — and the end-to-end number alone
+	// cannot say whether the budget is mistuned. Hence both.
+	latencyMu       sync.Mutex
 	firstEventStats map[string]*firstEventStat
+	firstTokenStats map[string]*firstEventStat
+}
+
+// observe accumulates one latency sample for a model under the given map.
+func (c *routerCounters) observe(into *map[string]*firstEventStat, key string, d time.Duration) {
+	c.latencyMu.Lock()
+	if *into == nil {
+		*into = make(map[string]*firstEventStat)
+	}
+	stat := (*into)[key]
+	if stat == nil {
+		stat = &firstEventStat{}
+		(*into)[key] = stat
+	}
+	c.latencyMu.Unlock()
+	stat.sumNanos.Add(int64(d))
+	stat.count.Add(1)
+}
+
+// snapshotLatency renders one latency map, sorted by model so /metrics output
+// is stable between scrapes.
+// Takes the map by POINTER so the field read happens under the lock: observe
+// lazily assigns the map, so reading the field unsynchronized is a data race
+// even though every value in it is atomic.
+func (c *routerCounters) snapshotLatency(from *map[string]*firstEventStat) []ModelLatency {
+	c.latencyMu.Lock()
+	out := make([]ModelLatency, 0, len(*from))
+	for model, stat := range *from {
+		out = append(out, ModelLatency{
+			Model:      model,
+			SumSeconds: float64(stat.sumNanos.Load()) / float64(time.Second),
+			Count:      stat.count.Load(),
+		})
+	}
+	c.latencyMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
 }
 
 // firstEventStat accumulates a sum/count pair — the same shape as the
@@ -116,9 +167,12 @@ type RouterCounters struct {
 	ChainFailedExecutorError int64
 	AllModelsCooling         int64
 
-	// FirstEventLatency is sorted by model so the /metrics output is stable
-	// between scrapes.
+	// FirstEventLatency is the post-header wait the fail-fast budget acts on;
+	// FirstTokenLatency is the end-to-end request → first token. Different
+	// quantities over different populations — see routerCounters. Both sorted by
+	// model so the /metrics output is stable between scrapes.
 	FirstEventLatency []ModelLatency
+	FirstTokenLatency []ModelLatency
 }
 
 // Counters returns a snapshot of the router's event counters.
@@ -142,7 +196,8 @@ func (s *RouterService) Counters() RouterCounters {
 		ChainFailedExecutorError: s.counters.chainFailedExecutorError.Load(),
 		AllModelsCooling:         s.counters.allModelsCooling.Load(),
 
-		FirstEventLatency: s.firstEventLatency(),
+		FirstEventLatency: s.counters.snapshotLatency(&s.counters.firstEventStats),
+		FirstTokenLatency: s.counters.snapshotLatency(&s.counters.firstTokenStats),
 	}
 }
 
@@ -176,34 +231,29 @@ func (s *RouterService) recordChainFailure(reason chainFailureReason) {
 // set, that are not last in the chain. Non-streaming attempts and last-chain
 // attempts contribute nothing, so Count here is not the model's request count.
 func (s *RouterService) recordFirstEventLatency(attempt modelAttempt, d time.Duration) {
-	key := s.breakerKey(attempt)
-	s.counters.firstEventMu.Lock()
-	if s.counters.firstEventStats == nil {
-		s.counters.firstEventStats = make(map[string]*firstEventStat)
-	}
-	stat := s.counters.firstEventStats[key]
-	if stat == nil {
-		stat = &firstEventStat{}
-		s.counters.firstEventStats[key] = stat
-	}
-	s.counters.firstEventMu.Unlock()
-	stat.sumNanos.Add(int64(d))
-	stat.count.Add(1)
+	s.counters.observe(&s.counters.firstEventStats, s.breakerKey(attempt), d)
 }
 
-func (s *RouterService) firstEventLatency() []ModelLatency {
-	s.counters.firstEventMu.Lock()
-	out := make([]ModelLatency, 0, len(s.counters.firstEventStats))
-	for model, stat := range s.counters.firstEventStats {
-		out = append(out, ModelLatency{
-			Model:      model,
-			SumSeconds: float64(stat.sumNanos.Load()) / float64(time.Second),
-			Count:      stat.count.Load(),
-		})
-	}
-	s.counters.firstEventMu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
-	return out
+// recordFirstTokenLatency records the whole request → first token: the clock
+// starts before the upstream call, so unlike recordFirstEventLatency it
+// INCLUDES the time spent waiting for response headers. That is where the delay
+// actually lived on a live upstream — a 1.51s time-to-first-token recorded as
+// under 5ms of post-header wait — so this is the series that ranks models by
+// responsiveness.
+//
+// Recorded ONLY when a real token arrived. An abandoned attempt would otherwise
+// contribute "how long we waited before giving up", which is not a
+// time-to-first-token at all; averaging the two would drag the number toward
+// the budget and make a model look slower the more often it was abandoned. The
+// abandonments are counted separately, by
+// calvoproxy_stream_first_event_timeout_total.
+//
+// Same coverage limit as recordFirstEventLatency: sampled only where the
+// first-event wait runs — streaming attempts, with
+// PROXY_STREAM_FIRST_BYTE_TIMEOUT set, that are not last in the chain. Count is
+// therefore not the model's request count.
+func (s *RouterService) recordFirstTokenLatency(attempt modelAttempt, d time.Duration) {
+	s.counters.observe(&s.counters.firstTokenStats, s.breakerKey(attempt), d)
 }
 
 // recordStreamOutcome tallies how a streamed response ended.

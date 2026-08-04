@@ -91,6 +91,9 @@ func TestWriteRouterMetrics_RendersFailureCausesAndFirstEventLatency(t *testing.
 		FirstEventLatency: []router.ModelLatency{
 			{Model: "coding:a/one:free", SumSeconds: 1.5, Count: 3},
 		},
+		FirstTokenLatency: []router.ModelLatency{
+			{Model: "coding:a/one:free", SumSeconds: 4.5, Count: 3},
+		},
 	})
 	body := rec.Body.String()
 
@@ -103,6 +106,10 @@ func TestWriteRouterMetrics_RendersFailureCausesAndFirstEventLatency(t *testing.
 		`calvoproxy_all_models_cooling_total 5`,
 		`calvoproxy_attempt_first_event_seconds_sum{model="coding:a/one:free"} 1.500000`,
 		`calvoproxy_attempt_first_event_seconds_count{model="coding:a/one:free"} 3`,
+		// Distinct series names: emitting first_token under the first_event name
+		// would make a scraper sum two different quantities into nonsense.
+		`calvoproxy_attempt_first_token_seconds_sum{model="coding:a/one:free"} 4.500000`,
+		`calvoproxy_attempt_first_token_seconds_count{model="coding:a/one:free"} 3`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("router metrics missing %q", want)

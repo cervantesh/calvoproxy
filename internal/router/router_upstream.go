@@ -44,6 +44,11 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		return classifyTransportError(err)
 	}
 
+	// Clock for time-to-first-token, started BEFORE the upstream call so it
+	// includes the wait for response headers. Only the streaming branch below
+	// consumes it, so a non-streaming attempt — whose headers arrive when
+	// generation is essentially finished — can never contribute a sample.
+	attemptStart := time.Now()
 	resp, err := s.Client.Do(proxyReq)
 	if err != nil {
 		span.RecordError(err)
@@ -192,7 +197,12 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			}
 			// Not a timeout: either a real event arrived or the stream ended on
 			// its own. Either way keep going with a reader that has lost nothing.
-			_ = gotEvent
+			if gotEvent {
+				// A real token, so this is a time-to-first-token. A stream that
+				// merely ended (gotEvent false) never produced one and must not
+				// be averaged in as if it had.
+				s.recordFirstTokenLatency(attempt, time.Since(attemptStart))
+			}
 			body = replayed
 		}
 

@@ -51,12 +51,35 @@ out — see v0.7.1.
   from `chain_failed`: the chain never ran, and folding it in would report a
   failure for attempts that were never made.
 
-- **`calvoproxy_attempt_first_event_seconds_{sum,count}{model}`** — per-model
-  time to first stream event, so "which model is slowest to first token" is
-  answerable. Measured around the first-event wait, and recorded on **both**
-  outcomes: if only timeouts were sampled every value would equal the budget,
-  and the healthy population that decides whether the budget is tuned correctly
-  would never appear.
+- **Two per-model latency series, which must never be summed together.**
+
+  `calvoproxy_attempt_first_event_seconds_{sum,count}{model}` is the wait
+  **after** response headers — exactly the quantity
+  `PROXY_STREAM_FIRST_BYTE_TIMEOUT` compares against, so it is the series, and
+  the only one, that says whether that budget is tuned correctly. Recorded on
+  **both** outcomes: if only timeouts were sampled every value would equal the
+  budget, and the healthy population that decides the tuning question would
+  never appear.
+
+  `calvoproxy_attempt_first_token_seconds_{sum,count}{model}` is the whole
+  request → first token, clock started before the upstream call so it includes
+  the wait for headers. This is the series that ranks models by responsiveness.
+  Recorded only when a token actually arrived — folding in "how long we waited
+  before giving up" would drag a model's number toward the budget and make it
+  look slower the more often it was abandoned, which is the backwards-ranking
+  bug this design set out to avoid, in a new place. Abandonments stay counted by
+  `calvoproxy_stream_first_event_timeout_total`.
+
+  The second series exists because the first one, run against the real upstream,
+  under-measured badly: a request with a **1.51s** time-to-first-token recorded
+  **under 5ms** of post-header wait. OpenRouter held the headers and then
+  flushed its `: OPENROUTER PROCESSING` keepalives and the first data event
+  together, so nearly all the delay landed before the headers did — invisible to
+  a stopwatch that starts when `Client.Do` returns. Across 12 further live
+  requests the recorded post-header waits were 0.00-0.67s while measured
+  time-to-first-token was 0.42-2.24s. The post-header wait was measuring what
+  the budget acts on, correctly, and answering the operator's actual question
+  ("which model is slowest") wrongly.
 
   Deliberately *not* measured at `Client.Do` returning, despite that being the
   obvious "comparable" choice. Those are two different quantities: for a
@@ -67,11 +90,11 @@ out — see v0.7.1.
   abandonments happen *after* `Do` returns, so a model that accepts instantly
   and then queues would record a fast sample while being abandoned for slowness.
 
-  Labelled with the same `profile:model` key as `calvoproxy_model_score`, so the
-  two join and cardinality stays bounded by the policy. Sampled only where the
-  first-event wait actually runs — streaming attempts, with
-  `PROXY_STREAM_FIRST_BYTE_TIMEOUT` set, that are not last in the chain — so the
-  count is not the model's request count.
+  Both are labelled with the same `profile:model` key as
+  `calvoproxy_model_score`, so they join and cardinality stays bounded by the
+  policy. Both are sampled only where the first-event wait actually runs —
+  streaming attempts, with `PROXY_STREAM_FIRST_BYTE_TIMEOUT` set, that are not
+  last in the chain — so neither count is the model's request count.
 
   Context for reading it: the same live instance abandoned 53 of 183 requests
   (29%) at the first-event budget, with `PROXY_STREAM_FIRST_BYTE_TIMEOUT=3`.

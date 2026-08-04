@@ -306,6 +306,97 @@ func TestFirstEventLatency_RecordedWhenTheBudgetExpires(t *testing.T) {
 	}
 }
 
+// headerDelayTransport reproduces what a live upstream actually did: hold the
+// response headers, then flush the queue keepalives and the first data event
+// together. The post-header wait is then ~0 even though time-to-first-token was
+// seconds — measured on OpenRouter, 1.51s TTFT recorded as under 5ms of
+// post-header wait. This is the whole reason first_token exists next to
+// first_event.
+type headerDelayTransport struct {
+	delay time.Duration
+}
+
+func (t *headerDelayTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	time.Sleep(t.delay) // the upstream sits on the headers
+	h := http.Header{}
+	h.Set("Content-Type", "text/event-stream")
+	return &http.Response{StatusCode: http.StatusOK, Header: h,
+		Body: io.NopCloser(strings.NewReader(": OPENROUTER PROCESSING\n\ndata: {}\n\n"))}, nil
+}
+
+func firstTokenSample(t *testing.T, svc *RouterService, model string) ModelLatency {
+	t.Helper()
+	for _, m := range svc.Counters().FirstTokenLatency {
+		if m.Model == "coding:"+model {
+			return m
+		}
+	}
+	t.Fatalf("no first-token sample recorded for %q", model)
+	return ModelLatency{}
+}
+
+// The defect that running this against a real upstream exposed: measuring only
+// the post-header wait reports a slow model as instant, because the delay
+// arrives before the headers do. first_token must include it.
+func TestFirstTokenLatency_IncludesTheWaitForResponseHeaders(t *testing.T) {
+	t.Setenv("PROXY_STREAM_FIRST_BYTE_TIMEOUT", "5")
+	svc := newChainTestService(t, &http.Client{Transport: &headerDelayTransport{delay: 300 * time.Millisecond}},
+		[]string{"a/one:free"})
+
+	attempt := modelAttempt{Profile: "coding", Model: "a/one:free"}
+	if err := svc.executeAttempt(context.Background(), httptest.NewRecorder(), []byte(`{}`), "k", attempt); err != nil {
+		t.Fatalf("premise: the stream should have succeeded: %v", err)
+	}
+
+	token := firstTokenSample(t, svc, "a/one:free")
+	if token.Count != 1 {
+		t.Fatalf("first-token samples not recorded: count=%d", token.Count)
+	}
+	if token.SumSeconds < 0.25 {
+		t.Errorf("first-token %.3fs excludes the 0.3s header wait — this is the exact blind spot the metric exists to close", token.SumSeconds)
+	}
+
+	// And the two series must stay distinct: the post-header wait saw almost
+	// none of that delay. If these ever converge, one of them is measuring the
+	// wrong thing and summing them would be meaningless.
+	event := firstEventSample(t, svc, "a/one:free")
+	if event.SumSeconds > 0.15 {
+		t.Errorf("post-header wait %.3fs unexpectedly absorbed the header delay", event.SumSeconds)
+	}
+	if token.SumSeconds <= event.SumSeconds {
+		t.Errorf("first_token (%.3fs) must exceed first_event (%.3fs): it starts earlier", token.SumSeconds, event.SumSeconds)
+	}
+}
+
+// An abandoned attempt never produced a token. Averaging "how long we waited
+// before giving up" into first_token would drag the number toward the budget
+// and make a model look slower the more often it was abandoned — the same
+// backwards-ranking bug in a new place. The abandonment is counted separately.
+func TestFirstTokenLatency_AbandonedAttemptContributesNoSample(t *testing.T) {
+	t.Setenv("PROXY_STREAM_FIRST_BYTE_TIMEOUT", "1")
+	svc := newChainTestService(t, &http.Client{Transport: &queuedStreamTransport{
+		body: &slowBody{chunks: []string{": OPENROUTER PROCESSING\n"}, delay: 3 * time.Second},
+	}}, []string{"a/one:free"})
+
+	attempt := modelAttempt{Profile: "coding", Model: "a/one:free"}
+	if err := svc.executeAttempt(context.Background(), httptest.NewRecorder(), []byte(`{}`), "k", attempt); err == nil {
+		t.Fatal("premise: the attempt should have been abandoned")
+	}
+
+	if got := svc.Counters().FirstTokenLatency; len(got) != 0 {
+		t.Errorf("an attempt that produced no token contributed a first-token sample: %+v", got)
+	}
+	// The abandonment is not lost — it is counted where it belongs.
+	if svc.Counters().StreamFirstEventTimeout != 1 {
+		t.Error("the abandonment should still be counted as a first-event timeout")
+	}
+	// And the post-header wait DOES sample it, since that series exists to show
+	// what the budget acted on.
+	if got := firstEventSample(t, svc, "a/one:free"); got.Count != 1 {
+		t.Errorf("first_event must still sample the abandoned wait: count=%d", got.Count)
+	}
+}
+
 // The label space must match calvoproxy_model_score's, so the two metrics join
 // on the same key and cardinality stays bounded by the policy.
 func TestFirstEventLatency_UsesTheModelScoreKeySpace(t *testing.T) {
