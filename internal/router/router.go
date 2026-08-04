@@ -99,10 +99,17 @@ func NewRouterService() *RouterService {
 	return svc
 }
 
-// Close releases the service's background workers. Safe to call more than once.
+// Close releases the service's background workers and, when score persistence
+// is running, flushes the learned scores one last time so a clean shutdown
+// never loses the tail of what the process learned. Safe to call more than once.
 func (s *RouterService) Close() {
 	if s.cancelRefresh != nil {
 		s.cancelRefresh()
+	}
+	if s.persistScores.Load() {
+		if err := s.SaveScores(); err != nil {
+			slog.Warn("[CalvoProxy] could not persist model scores on shutdown", slog.String("error", err.Error()))
+		}
 	}
 }
 

@@ -11,6 +11,59 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-08-03
+
+### Fixed
+- **Per-model reliability scoring was inert in production; it now works.**
+  Measured on a live instance on 2026-08-03 (v0.9.1, 183 requests of real
+  traffic), every model in `/metrics` reported exactly `calvoproxy_model_score
+  0.8000` — a model with 96 successes scoring identically to one with 0
+  successes and a standing consecutive failure. The subsystem that exists to
+  reorder the chain was reordering nothing.
+
+  Two independent causes, both fixed:
+
+  - **Decay was measured in wall-clock time over a five-minute window.** Every
+    score drifted linearly to the neutral baseline (0.8) after five idle
+    minutes, and `rankAttemptsByScore` stable-sorts — so with all scores equal
+    it reproduced the policy-defined order verbatim. Five minutes suits a
+    service under constant load; this workload is bursty and interactive (used
+    for a while, idle for 30+ minutes, used again), so the memory evaporated
+    precisely during the gaps, when nothing had actually changed about the
+    models. Decay is now measured against **two** clocks and advances at the
+    slower of them: elapsed time (`PROXY_SCORING_RECOVERY_SECONDS`, default
+    6 h — hours, not minutes) and the proxy-wide count of scored attempts
+    (`PROXY_SCORING_RECOVERY_ATTEMPTS`, default 50). A model nobody has retried
+    has produced no new evidence either way, so its score no longer moves.
+  - **The score map was in-memory only.** `modelBreakers` was created fresh in
+    `NewRouterService` and nothing persisted it, so every restart discarded all
+    learned reliability — installing v0.9.1 on 2026-08-03 wiped it. Scores now
+    persist to `PROXY_SCORE_FILE` (default
+    `<user-config-dir>/calvoproxy/scores.json`, `off` to disable), flushed every
+    30 s when dirty and once more on clean shutdown, reloaded at startup.
+    Deliberately narrow: breaker state (`OpenUntil`, `ProbeUntil`,
+    `ConsecutiveFailures`) is **not** persisted, because a cooldown is a
+    statement about right now and a restart is a good reason to re-probe. Files
+    and entries older than `PROXY_SCORE_MAX_AGE_SECONDS` (default 24 h) are
+    discarded, and keys the current policy no longer names are dropped on load.
+
+  Why it mattered: 53 of 183 requests (29%) hit `stream_first_event_timeout` —
+  the first-chosen model was too slow to emit an event and the chain advanced —
+  at an average handler latency of 14.9 s. The chain learned which model worked,
+  forgot within five minutes, and re-paid the abandonment cost on the next
+  burst.
+
+### Changed
+- **A model that has never once succeeded is now treated differently from one
+  that had a bad day.** Zero successes is not the same evidence as a bad spell:
+  a bad spell is contradicted by the successes around it, while "0 successes,
+  N failures" has no counter-evidence at all. Such a model now drifts back to a
+  lower baseline (0.5) instead of the neutral 0.8, so it ranks below a model
+  that actually recovered. It is still tried — last — and one real success moves
+  it onto the normal baseline for good. This is the case the live instance
+  showed directly: gemma-4-31b, 0 successes and a standing failure, scoring
+  identically to everything else.
+
 ## [0.9.1] — 2026-08-03
 
 ### Fixed
@@ -294,7 +347,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.2
 [0.9.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.1
 [0.9.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.0
 [0.8.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.8.0

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cervomodelpolicy "github.com/cervantesh/cervo-model-policy"
@@ -33,6 +34,11 @@ type modelBreakerState struct {
 	ProbeUntil     time.Time `json:"-"`
 	Score          float64   `json:"score"`
 	ScoreUpdatedAt time.Time `json:"score_updated_at,omitempty"`
+	// ScoreAttemptSeq is the proxy-wide scored-attempt counter as of the last
+	// score update. Decay is measured against how much evidence has accumulated
+	// since — not only how much time has passed — so an idle proxy does not
+	// quietly forget which of its models actually work.
+	ScoreAttemptSeq int64 `json:"score_attempt_seq,omitempty"`
 }
 
 type BreakerSnapshot struct {
@@ -108,10 +114,18 @@ type RouterService struct {
 	policyMetadata cervoruntime.PolicyMetadata
 	breakerMu      sync.RWMutex
 	modelBreakers  map[string]*modelBreakerState
-	admission      *admissionControl
-	capabilities   *capabilityIndex
-	counters       routerCounters
-	cancelRefresh  context.CancelFunc
+	// scoreAttempts counts every scored outcome, proxy-wide. It is the "evidence
+	// clock" score decay is measured against (see router_scoring.go).
+	scoreAttempts atomic.Int64
+	// scoresDirty marks the map as diverged from the persisted file;
+	// persistScores marks that a flusher is running and Close() should do a
+	// final write. See router_scoring_store.go.
+	scoresDirty   atomic.Bool
+	persistScores atomic.Bool
+	admission     *admissionControl
+	capabilities  *capabilityIndex
+	counters      routerCounters
+	cancelRefresh context.CancelFunc
 	// AmbientKeyPresent, when set by the binary, reports whether an ambient
 	// upstream key is configured from ANY source (env or the `calvoproxy login`
 	// file). The router only knows about the env var, so /health used to claim no
