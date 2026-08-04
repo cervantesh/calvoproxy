@@ -5,6 +5,11 @@
 # local ops
 *.exe
 *.exe~
+# A renamed binary is still a binary. `*.exe` does not match calvoproxy.exe.old
+# (what `calvoproxy update` leaves behind) or calvoproxy.exe.bak-pre-v0.7.0,
+# which is how 21 MB of stale binary got committed in #32 and had to be removed
+# again in #39.
+*.exe.*
 *.log
 *~
 .env
