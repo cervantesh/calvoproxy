@@ -17,13 +17,19 @@ import (
 // failure mode is silence.
 
 // repoFile reads a file from the repo root (tests run in ./cmd).
+//
+// Line endings are normalised to \n. The repo sets `text=auto`, so on Windows
+// these files sit in the working tree as CRLF while CI checks them out as LF —
+// and every match below is written with \n. Without this the tests pass on
+// Linux and fail on a Windows developer's machine for a reason that has nothing
+// to do with what they assert. (They did exactly that once.)
 func repoFile(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", name))
 	if err != nil {
 		t.Fatalf("reading %s: %v", name, err)
 	}
-	return string(data)
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
 }
 
 // scoreFilePath in the router returns "" when it cannot determine a config dir,
