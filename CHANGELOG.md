@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-08-04
+
 ### Fixed
 - **Score persistence now actually works in a container.** 0.9.2 made learned
   reliability scores survive a restart, and that fix stopped at the host: the
@@ -480,7 +482,9 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
+[0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0
 [0.9.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.2
 [0.9.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.1
 [0.9.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.0
