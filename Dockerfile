@@ -29,6 +29,24 @@ ENV HOST=0.0.0.0
 # Marks the runtime as containerized so the update notice recommends pulling a
 # new image (rather than `calvoproxy update`, which can't swap a container's fs).
 ENV CALVOPROXY_CONTAINER=1
+# Learned per-model reliability scores live here, and the path is pinned rather
+# than left to the default.
+#
+# The default is <user-config-dir>/calvoproxy/scores.json, and on Linux that
+# resolves through $XDG_CONFIG_HOME or $HOME. A container is not guaranteed to
+# define either — run with `--user` and neither is set — and when both are
+# missing the store returns no path and silently disables itself. That failure
+# is invisible: the proxy starts fine, serves fine, and quietly relearns its
+# models from scratch on every restart, which is the exact bug 0.9.2 fixed.
+# Pinning an absolute path removes the dependency on the environment entirely.
+#
+# Mount a volume at /data to make scores outlive the container:
+#   docker run -v calvoproxy-scores:/data ...
+# Without one they still work for the container's lifetime, but are lost on
+# recreation. No VOLUME directive here on purpose — it would litter an anonymous
+# volume per `docker run`; docker-compose.yml declares a named one instead.
+ENV PROXY_SCORE_FILE=/data/scores.json
+RUN mkdir -p /data
 # OPENROUTER_API_KEY must be supplied at runtime:
 #   docker run -e OPENROUTER_API_KEY=sk-or-v1-... -p 8080:8080 calvoproxy
 CMD ["./calvoproxy"]

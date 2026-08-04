@@ -11,6 +11,36 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+- **Score persistence now actually works in a container.** 0.9.2 made learned
+  reliability scores survive a restart, and that fix stopped at the host: the
+  image never set `PROXY_SCORE_FILE` and Compose mounted no volume, so a
+  container kept relearning which models work on every recreation — the exact
+  bug 0.9.2 fixed, still standing where it is most likely to bite. Compose sets
+  `PROXY_IDLE_TIMEOUT` and `restart: on-failure`, so recreation is the normal
+  cycle there, not a rare event.
+
+  Two things were wrong, not one. Beyond the missing volume, the **default path
+  cannot be trusted inside a container at all**: it resolves through
+  `os.UserConfigDir()`, which on Linux reads `$XDG_CONFIG_HOME` or `$HOME` and
+  returns an error when neither is set — and `scoreFilePath()` treats that as
+  "no store" and disables persistence. Nothing logs, nothing fails; the proxy
+  just quietly forgets. Running with `--user`, or any runtime that does not
+  populate `HOME`, lands exactly there. The image now pins an absolute
+  `PROXY_SCORE_FILE=/data/scores.json`, removing the dependency on the
+  environment, and `docker-compose.yml` mounts a named `calvoproxy-scores`
+  volume over `/data`.
+
+  Guarded by tests that assert the two files agree, because the failure mode is
+  silence: there is no behaviour to observe when this breaks, only a proxy that
+  performs worse than it should.
+
+### Changed
+- `.gitignore` now covers `*.exe.*`. The existing `*.exe` did not match a
+  *renamed* binary — `calvoproxy.exe.old` (left by `calvoproxy update`) or
+  `calvoproxy.exe.bak-pre-v0.7.0` — which is how 21 MB of stale binary got
+  committed in #32 and had to be removed again in #39.
+
 ## [0.10.0] — 2026-08-04
 
 ### Added

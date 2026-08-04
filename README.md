@@ -242,6 +242,11 @@ build — discarded everything the proxy had learned. Deliberate limits:
 - Set `PROXY_SCORE_FILE=off` to turn persistence off entirely. Nothing is ever
   written to the working directory: if no config directory can be determined,
   persistence simply stays off.
+- **In a container, pin the path and mount a volume.** The default resolves
+  through `$XDG_CONFIG_HOME`/`$HOME`, which a container need not define, and
+  with neither set the store disables itself silently. The image therefore pins
+  `PROXY_SCORE_FILE=/data/scores.json`; mount a volume at `/data` (Compose
+  already does) or scores are lost on every recreation.
 
 ### Capacity & tuning
 
@@ -535,8 +540,16 @@ Pull the published image and run it with your OpenRouter key:
 ```bash
 docker run -d --name calvoproxy -p 8080:8080 \
   -e OPENROUTER_API_KEY=sk-or-v1-... \
+  -v calvoproxy-scores:/data \
   ghcr.io/cervantesh/calvoproxy:latest
 ```
+
+> **Why the volume.** The proxy learns which of its free models actually answer
+> and reorders the chain accordingly. That is written to `/data/scores.json`;
+> without a volume it is lost every time the container is recreated, and the
+> chain re-pays the whole discovery cost on the next burst. Compose declares a
+> named volume for you. Omit it only if you genuinely want a stateless
+> container.
 
 > **Exposing it safely.** The container binds `0.0.0.0`, so it is reachable by
 > anything that can reach the port. It therefore does **not** spend its

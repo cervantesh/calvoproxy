@@ -248,6 +248,11 @@ descartaba todo lo aprendido. Límites deliberados:
 - Poné `PROXY_SCORE_FILE=off` para desactivar la persistencia del todo. Nunca se
   escribe nada en el directorio de trabajo: si no se puede determinar un
   directorio de config, la persistencia simplemente queda apagada.
+- **En un contenedor, fijá la ruta y montá un volumen.** El default se resuelve
+  vía `$XDG_CONFIG_HOME`/`$HOME`, que un contenedor no tiene por qué definir, y
+  sin ninguno de los dos el store se apaga en silencio. Por eso la imagen fija
+  `PROXY_SCORE_FILE=/data/scores.json`; montá un volumen en `/data` (Compose ya
+  lo hace) o los scores se pierden en cada recreación.
 
 ### Capacidad y tuning
 
@@ -548,8 +553,16 @@ Bajá la imagen publicada y correla con tu key de OpenRouter:
 ```bash
 docker run -d --name calvoproxy -p 8080:8080 \
   -e OPENROUTER_API_KEY=sk-or-v1-... \
+  -v calvoproxy-scores:/data \
   ghcr.io/cervantesh/calvoproxy:latest
 ```
+
+> **Por qué el volumen.** El proxy aprende cuáles de sus modelos gratis
+> responden de verdad y reordena la cadena en consecuencia. Eso se escribe en
+> `/data/scores.json`; sin volumen se pierde cada vez que se recrea el
+> contenedor, y la cadena vuelve a pagar entero el costo de descubrimiento en la
+> ráfaga siguiente. Compose ya declara un volumen nombrado. Omitilo solo si
+> realmente querés un contenedor sin estado.
 
 > **Exponerlo de forma segura.** El contenedor bindea `0.0.0.0`, así que es
 > alcanzable por cualquier cosa que llegue al puerto. Por eso **no** gasta su
