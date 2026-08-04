@@ -29,6 +29,29 @@ ENV HOST=0.0.0.0
 # Marks the runtime as containerized so the update notice recommends pulling a
 # new image (rather than `calvoproxy update`, which can't swap a container's fs).
 ENV CALVOPROXY_CONTAINER=1
+# Learned per-model reliability scores live here, and the path is pinned rather
+# than left to the default.
+#
+# The default is <user-config-dir>/calvoproxy/scores.json, which on Linux
+# resolves through $XDG_CONFIG_HOME or $HOME. Docker always defines HOME (/root,
+# or / for a --user UID absent from /etc/passwd), so the store does not go
+# pathless here — but under `--user` that default lands on /.config, which the
+# process cannot create: measured, it fails every flush with
+# "mkdir /.config: permission denied". Pinning a path we control removes the
+# question entirely.
+#
+# 1777 (sticky, like /tmp) rather than 755: a volume mounted here inherits these
+# bits, and with `--user 1234` a root-owned 755 directory is not writable — also
+# measured, "open /data/.scores-*.tmp: permission denied". Sticky keeps one UID
+# from deleting another's files, and the store itself writes the score file 0600.
+#
+# Mount a volume at /data to make scores outlive the container:
+#   docker run -v calvoproxy-scores:/data ...
+# Without one they still work for the container's lifetime, but are lost on
+# recreation. No VOLUME directive here on purpose — it would litter an anonymous
+# volume per `docker run`; docker-compose.yml declares a named one instead.
+ENV PROXY_SCORE_FILE=/data/scores.json
+RUN mkdir -p /data && chmod 1777 /data
 # OPENROUTER_API_KEY must be supplied at runtime:
 #   docker run -e OPENROUTER_API_KEY=sk-or-v1-... -p 8080:8080 calvoproxy
 CMD ["./calvoproxy"]

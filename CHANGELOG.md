@@ -11,6 +11,42 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-08-04
+
+### Fixed
+- **Score persistence now actually works in a container.** 0.9.2 made learned
+  reliability scores survive a restart, and that fix stopped at the host: the
+  image never set `PROXY_SCORE_FILE` and Compose mounted no volume, so a
+  container kept relearning which models work on every recreation — the exact
+  bug 0.9.2 fixed, still standing where it is most likely to bite. Compose sets
+  `PROXY_IDLE_TIMEOUT` and `restart: on-failure`, so recreation is the normal
+  cycle there, not a rare event.
+
+  The missing volume was the silent half: nothing errors, the proxy serves
+  normally, and the scores are simply gone after `docker compose down && up`.
+  `docker-compose.yml` now mounts a named `calvoproxy-scores` volume over
+  `/data`, and the image pins `PROXY_SCORE_FILE=/data/scores.json`.
+
+  The pinned path is not only tidiness. Under `--user`, the default resolves to
+  `/.config` (Docker sets `HOME=/` for a UID absent from `/etc/passwd`) and
+  every flush fails with `mkdir /.config: permission denied`. And `/data` is
+  created `1777`, not `755`: a mounted volume inherits the image directory's
+  bits, so a root-owned `755` broke `--user` with
+  `open /data/.scores-*.tmp: permission denied`. Both were measured against a
+  running container, not reasoned about — the first draft of this fix claimed
+  the default went *pathless* without `$HOME`, which testing disproved: Docker
+  always defines it.
+
+  Guarded by tests asserting the Dockerfile and Compose agree, because the
+  headline failure mode is silence: there is no behaviour to observe when the
+  volume goes missing, only a proxy that performs worse than it should.
+
+### Changed
+- `.gitignore` now covers `*.exe.*`. The existing `*.exe` did not match a
+  *renamed* binary — `calvoproxy.exe.old` (left by `calvoproxy update`) or
+  `calvoproxy.exe.bak-pre-v0.7.0` — which is how 21 MB of stale binary got
+  committed in #32 and had to be removed again in #39.
+
 ## [0.10.0] — 2026-08-04
 
 ### Added
@@ -446,7 +482,9 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
+[0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0
 [0.9.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.2
 [0.9.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.1
 [0.9.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.0

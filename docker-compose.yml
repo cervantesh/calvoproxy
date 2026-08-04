@@ -18,9 +18,14 @@ services:
       #    their own Authorization header.
       PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:-}"
       PROXY_ALLOW_ENV_KEY_PUBLIC: "${PROXY_ALLOW_ENV_KEY_PUBLIC:-}"
-    # Optional: edit chains without rebuilding by mounting your own file:
-    # volumes:
-    #   - ./model-policy.json:/app/model-policy.json:ro
+    volumes:
+      # Learned reliability scores. Without this the container relearns which
+      # models actually work on every recreation — and with PROXY_IDLE_TIMEOUT
+      # plus `restart: on-failure` below, recreation is the normal cycle, not a
+      # rare event. The image pins PROXY_SCORE_FILE=/data/scores.json.
+      - calvoproxy-scores:/data
+      # Optional: edit chains without rebuilding by mounting your own file:
+      # - ./model-policy.json:/app/model-policy.json:ro
     # on-failure (not unless-stopped): a clean idle self-shutdown exits 0 and
     # must NOT be auto-restarted into a loop; a crash (non-zero) still restarts.
     restart: on-failure
@@ -31,3 +36,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  # Named, so `docker compose down` keeps the scores and only `down -v` discards
+  # them — the same distinction the rest of the file already relies on.
+  calvoproxy-scores:
