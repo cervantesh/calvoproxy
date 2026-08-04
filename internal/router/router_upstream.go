@@ -155,7 +155,18 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// abandoning converts a slow success into a fast failure.
 		body := resp.Body
 		if budget := streamFirstEventTimeout(); budget > 0 && !attempt.LastInChain {
+			// Time-to-first-event, per model — NOT time to `s.Client.Do`
+			// returning. Those measure different things: for a non-streaming
+			// attempt the upstream headers arrive when generation is essentially
+			// finished (tens of seconds), for a streaming one they mean only
+			// "accepted" (~0.5s), so one average over both populations is
+			// meaningless. Worse, a Do-level number ranks backwards for exactly
+			// the failure this budget exists to catch — a model that accepts
+			// instantly and then queues records a FAST sample while being
+			// abandoned for slowness right here.
+			firstEventStart := time.Now()
 			replayed, gotEvent, timedOut := awaitFirstStreamEvent(body, budget)
+			s.recordFirstEventLatency(attempt, time.Since(firstEventStart))
 			if timedOut {
 				_ = resp.Body.Close() // unblocks the reader still parked in Read
 				// A soft score penalty, never a breaker failure. resolveProbe

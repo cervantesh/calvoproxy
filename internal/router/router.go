@@ -323,6 +323,12 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		// Tell the client WHEN to come back: the soonest cooldown expiry across
 		// the planned chain. Without this, clients retry immediately and amplify
 		// the outage they're already suffering.
+		// Counted separately from calvoproxy_chain_failed_total on purpose: the
+		// chain never ran, so there is no attempt to attribute a failure to.
+		// Folding it in would report "the chain failed" for requests the chain
+		// never saw, and hide the one condition an operator can act on directly —
+		// every model open or cooling at once.
+		s.counters.allModelsCooling.Add(1)
 		if wait := s.retryAfterForAttempts(attemptsToTry); wait > 0 {
 			secs := int(wait.Seconds())
 			if secs < 1 {
@@ -350,8 +356,13 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
+	// The single classification site: one chain, one reason, one increment.
+	reason := classifyChainFailure(ctx, err)
+	s.recordChainFailure(reason)
+
 	statusCode, message := fallbackErrorResponse(err)
-	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed", slog.String("profile", category))
+	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed",
+		slog.String("profile", category), slog.String("reason", string(reason)))
 	writeJSONError(w, statusCode, message)
 }
 

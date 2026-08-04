@@ -280,6 +280,31 @@ func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
 	fmt.Fprintf(w, "calvoproxy_paid_embedding_refused_total %d\n", c.PaidEmbeddingRefused)
 	fmt.Fprintln(w, "# HELP calvoproxy_stream_first_event_timeout_total Streaming attempts abandoned before their first event (chain advanced)\n# TYPE calvoproxy_stream_first_event_timeout_total counter")
 	fmt.Fprintf(w, "calvoproxy_stream_first_event_timeout_total %d\n", c.StreamFirstEventTimeout)
+
+	// Why a fallback chain died. NOTE: total_timeout reads ~0 on a
+	// streaming-heavy instance — the whole-chain budget is only applied to
+	// non-streaming requests — so a zero there is not evidence of health.
+	fmt.Fprintln(w, "# HELP calvoproxy_chain_failed_total Fallback chains that ended without serving the request, by cause\n# TYPE calvoproxy_chain_failed_total counter")
+	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"cancelled\"} %d\n", c.ChainFailedCancelled)
+	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"total_timeout\"} %d\n", c.ChainFailedTotalTimeout)
+	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"terminal\"} %d\n", c.ChainFailedTerminal)
+	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"exhausted\"} %d\n", c.ChainFailedExhausted)
+	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"executor_error\"} %d\n", c.ChainFailedExecutorError)
+	fmt.Fprintln(w, "# HELP calvoproxy_all_models_cooling_total Requests refused before the chain ran because every planned model was open or cooling down\n# TYPE calvoproxy_all_models_cooling_total counter")
+	fmt.Fprintf(w, "calvoproxy_all_models_cooling_total %d\n", c.AllModelsCooling)
+
+	// Time-to-first-stream-event per model: the wait the fail-fast budget acts
+	// on, and the only per-model latency that is comparable across models.
+	// Sampled only on streaming attempts that are not last in the chain, so the
+	// count is not the model's request count.
+	fmt.Fprintln(w, "# HELP calvoproxy_attempt_first_event_seconds_sum Total time streaming attempts waited for their first event\n# TYPE calvoproxy_attempt_first_event_seconds_sum counter")
+	for _, m := range c.FirstEventLatency {
+		fmt.Fprintf(w, "calvoproxy_attempt_first_event_seconds_sum{model=%q} %.6f\n", m.Model, m.SumSeconds)
+	}
+	fmt.Fprintln(w, "# HELP calvoproxy_attempt_first_event_seconds_count First-event wait observations\n# TYPE calvoproxy_attempt_first_event_seconds_count counter")
+	for _, m := range c.FirstEventLatency {
+		fmt.Fprintf(w, "calvoproxy_attempt_first_event_seconds_count{model=%q} %d\n", m.Model, m.Count)
+	}
 }
 
 func main() {

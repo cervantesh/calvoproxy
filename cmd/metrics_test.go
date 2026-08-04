@@ -75,6 +75,51 @@ func TestStatusRecorder_CapturesStatus(t *testing.T) {
 	}
 }
 
+// The whole point of the chain-failure counters is that an operator can read a
+// cause off /metrics. Rendering them wrong — a dropped label, a series that
+// never gets emitted — is exactly as useless as not counting them, and the
+// renderer is hand-written Prometheus text with no library to catch it.
+func TestWriteRouterMetrics_RendersFailureCausesAndFirstEventLatency(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeRouterMetrics(rec, router.RouterCounters{
+		ChainFailedCancelled:     3,
+		ChainFailedTotalTimeout:  1,
+		ChainFailedTerminal:      4,
+		ChainFailedExhausted:     7,
+		ChainFailedExecutorError: 2,
+		AllModelsCooling:         5,
+		FirstEventLatency: []router.ModelLatency{
+			{Model: "coding:a/one:free", SumSeconds: 1.5, Count: 3},
+		},
+	})
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		`calvoproxy_chain_failed_total{reason="cancelled"} 3`,
+		`calvoproxy_chain_failed_total{reason="total_timeout"} 1`,
+		`calvoproxy_chain_failed_total{reason="terminal"} 4`,
+		`calvoproxy_chain_failed_total{reason="exhausted"} 7`,
+		`calvoproxy_chain_failed_total{reason="executor_error"} 2`,
+		`calvoproxy_all_models_cooling_total 5`,
+		`calvoproxy_attempt_first_event_seconds_sum{model="coding:a/one:free"} 1.500000`,
+		`calvoproxy_attempt_first_event_seconds_count{model="coding:a/one:free"} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("router metrics missing %q", want)
+		}
+	}
+	// A counter without its TYPE line is silently dropped by some scrapers.
+	for _, want := range []string{
+		"# TYPE calvoproxy_chain_failed_total counter",
+		"# TYPE calvoproxy_all_models_cooling_total counter",
+		"# TYPE calvoproxy_attempt_first_event_seconds_sum counter",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("router metrics missing type hint %q", want)
+		}
+	}
+}
+
 func TestWriteMetrics_RendersRequestSeries(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeMetrics(rec, router.NewRouterService().Health())
