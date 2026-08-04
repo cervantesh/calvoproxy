@@ -116,6 +116,10 @@ en vuelo antes de salir.
 | `PROXY_MAX_CONCURRENT` | off | Tope de requests concurrentes en vuelo. Una ráfaga que supera el tope espera y luego recibe `503 Retry-After`; evita que un pico estampide el upstream más allá de sus rate limits |
 | `PROXY_ADMISSION_TIMEOUT_SECONDS` | `5` | Cuánto espera un request por encima del tope antes del `503` (solo cuando `PROXY_MAX_CONCURRENT` está seteado) |
 | `PROXY_SCORING_ENABLED` | `true` | Reordena la cadena por score de fiabilidad por-modelo (ver abajo) |
+| `PROXY_SCORING_RECOVERY_SECONDS` | `21600` (6 h) | Mitad de wall-clock de la ventana de decay del score: cuánto tarda en perdonarse del todo un modelo degradado |
+| `PROXY_SCORING_RECOVERY_ATTEMPTS` | `50` | Mitad de evidencia de la misma ventana: cuántos intentos scoreados más, a nivel proxy, hacen falta. El decay avanza al ritmo del **más lento** de los dos, así un proxy ocioso no olvida |
+| `PROXY_SCORE_FILE` | `<dir-de-config>/calvoproxy/scores.json` | Dónde se persisten los scores aprendidos entre reinicios. Poné `off` para desactivar la persistencia |
+| `PROXY_SCORE_MAX_AGE_SECONDS` | `86400` (24 h) | Descarta un archivo de scores (y entradas individuales) más viejo que esto |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Fallos consecutivos antes de abrir el circuito de un modelo |
 | `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | Cuánto tiempo un circuito abierto saltea un modelo |
 | `PROXY_OPENROUTER_URL` | OpenRouter | Override del endpoint de chat de OpenRouter (ej. un mock) |
@@ -196,9 +200,54 @@ Dos capas mantienen a los modelos inestables fuera del camino:
   errores de servidor (5xx) y timeouts, y también baja por 404 de "modelo no
   disponible"—. La cadena elegible se **reordena por score** (más fiable primero)
   antes de cada request, así un modelo con problemas se hunde al fondo sin ser
-  removido, y **se recupera hacia neutral en ~5 min** para reintentarse después.
-  Los scores se ven en `circuits[].score` en `/health`. Poné
-  `PROXY_SCORING_ENABLED=false` para mantener el orden estático de la cadena.
+  removido, y se recupera hacia una línea de base neutral para reintentarse
+  después. Los scores se ven en `circuits[].score` en `/health` y como
+  `calvoproxy_model_score` en `/metrics`. Poné `PROXY_SCORING_ENABLED=false`
+  para mantener el orden estático de la cadena.
+
+**Cómo se recupera un score.** El decay se mide contra dos relojes y avanza al
+ritmo del **más lento**: el wall-clock transcurrido
+(`PROXY_SCORING_RECOVERY_SECONDS`, default 6 h) y la cuenta de intentos
+scoreados a nivel proxy (`PROXY_SCORING_RECOVERY_ATTEMPTS`, default 50). El
+reloj de intentos es el que importa: nada cambia en un modelo mientras nadie lo
+llama, así que un hueco de inactividad no debe borrar lo aprendido. Solo los
+intentos posteriores —evidencia nueva real, a favor o en contra— mueven un score
+de vuelta hacia su línea de base.
+
+Antes de v0.9.2 el decay era puro wall-clock sobre una ventana de cinco minutos,
+lo que dejaba todo el subsistema inerte en una carga interactiva y a ráfagas:
+cada score convergía a la línea neutral durante cualquier hueco entre sesiones,
+la cadena quedaba re-rankeada exactamente en su orden configurado, y la ráfaga
+siguiente volvía a pagar entero el costo de descubrimiento. En una instancia real
+eso se vio como 29% de los requests abandonados en el presupuesto de primer
+evento, y como un modelo con 96 éxitos scoreando idéntico (0.8000) a uno con 0
+éxitos y un fallo vigente.
+
+**Modelos que nunca tuvieron éxito.** Un modelo que no acertó ni una vez en la
+memoria del proxy deriva hacia una línea de base más baja (`0.5`) que uno que
+solo tuvo un mal día (`0.8`). Cero éxitos no es la misma evidencia que un mal
+día: un mal día está contradicho por los éxitos que lo rodean. Ese modelo igual
+se intenta —último— y un solo éxito real lo pasa a la línea normal para siempre.
+
+**Persistencia.** Los scores se escriben en `PROXY_SCORE_FILE` (default
+`<dir-de-config>/calvoproxy/scores.json`) cada 30 s cuando cambian, y una vez más
+en un apagado limpio; se recargan al arrancar. Antes de v0.9.2 el mapa de scores
+vivía solo en memoria, así que cada reinicio —incluido instalar un build nuevo—
+descartaba todo lo aprendido. Límites deliberados:
+
+- **El estado del breaker no se persiste.** Un cooldown es una afirmación sobre
+  el ahora, y un reinicio es una buena razón para volver a sondear. Solo
+  sobreviven el score, sus dos lecturas de reloj y la cuenta de éxitos.
+- **Los archivos viejos se descartan** enteros, igual que las entradas
+  individuales más viejas que `PROXY_SCORE_MAX_AGE_SECONDS` (default 24 h). Los
+  slugs del tier gratuito se retiran y re-aprovisionan en esa escala de tiempo.
+- **Las claves que la policy actual ya no nombra se descartan** al cargar. Editar
+  una cadena es justamente la señal de que cambió el set de modelos, y una clave
+  que no está en ninguna cadena solo se alcanza con un pin explícito, donde la
+  cadena tiene un solo modelo y el score no ordena nada.
+- Poné `PROXY_SCORE_FILE=off` para desactivar la persistencia del todo. Nunca se
+  escribe nada en el directorio de trabajo: si no se puede determinar un
+  directorio de config, la persistencia simplemente queda apagada.
 
 ### Capacidad y tuning
 

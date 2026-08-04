@@ -342,6 +342,14 @@ func main() {
 	routerService.AmbientKeyPresent = func() bool {
 		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || storedAPIKey() != ""
 	}
+	// Reliability scores are learned from real traffic and are worth keeping
+	// across restarts — a new build or a crash used to wipe them, and the chain
+	// then re-paid the whole discovery cost on the next burst. Loads now and
+	// flushes periodically; Close() writes the tail on a clean shutdown.
+	scoreCtx, cancelScores := context.WithCancel(context.Background())
+	defer cancelScores()
+	routerService.StartScorePersistence(scoreCtx)
+
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
 

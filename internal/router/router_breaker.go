@@ -165,6 +165,7 @@ func (s *RouterService) resolveProbe(attempt modelAttempt) {
 }
 
 func (s *RouterService) recordSuccess(attempt modelAttempt) {
+	env := s.countScoredAttempt()
 	s.breakerMu.Lock()
 	defer s.breakerMu.Unlock()
 
@@ -181,7 +182,8 @@ func (s *RouterService) recordSuccess(attempt modelAttempt) {
 	state.LastFailureCode = 0
 	state.LastFailureReason = ""
 	state.LastFailureAt = time.Time{}
-	applyScoreSuccess(state, time.Now())
+	applyScoreSuccess(state, env)
+	s.markScoresDirty()
 }
 
 func (s *RouterService) breakerKey(attempt modelAttempt) string {
@@ -303,7 +305,8 @@ func (s *RouterService) Health() ProxyHealth {
 
 	snapshots := make([]BreakerSnapshot, 0, len(s.modelBreakers))
 	openCount := 0
-	now := time.Now()
+	env := s.scoreEnv()
+	now := env.now
 	for model, state := range s.modelBreakers {
 		snapshot := BreakerSnapshot{
 			Model:               model,
@@ -313,7 +316,7 @@ func (s *RouterService) Health() ProxyHealth {
 			LastFailureReason:   state.LastFailureReason,
 			LastFailureAt:       state.LastFailureAt,
 			OpenUntil:           state.OpenUntil,
-			Score:               decayedScore(state.Score, state.ScoreUpdatedAt, now),
+			Score:               decayedScore(state, env),
 			State:               "closed",
 		}
 		if state.OpenUntil.After(now) {
