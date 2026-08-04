@@ -11,6 +11,105 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-04
+
+### Added
+- **Failed requests now say why.** Measured on a live instance (v0.9.1, 183
+  requests, 2.8h uptime): 26 requests — 14% — returned 5xx and nothing recorded
+  a cause. `/metrics` could say a request failed and could say which circuits
+  were open, but never why a fallback chain gave up.
+
+  New `calvoproxy_chain_failed_total{reason}` with five causes: `cancelled`
+  (the client hung up), `total_timeout` (the whole-chain budget expired),
+  `terminal` (a non-retryable error stopped the chain **with models still
+  untried**), `exhausted` (every model tried, every one failed), and
+  `executor_error` (misconfiguration). Counted once per failed chain at a single
+  site, from the chain's own verdict plus the request context.
+
+  The reason cannot be inferred from how the loop exited, which is the trap this
+  went through two designs to avoid. `executeAttempt` turns a cancelled parent
+  context into `SkipModel`, and the fallback loop treats `SkipModel` as
+  *continue* — so a client hanging up does **not** stop the chain. It burns every
+  remaining model one cancelled attempt at a time and leaves through the normal
+  end of the loop, where the exit path reads `exhausted` and the error's shape
+  (`Retryable:false`) reads `terminal`. Both would blame the models for the
+  client. Only `ctx.Err()` separates them, so it is checked first and wins.
+
+  Likewise `terminal` is not "did we break": a non-retryable error on the *last*
+  model breaks with nothing left untried, which is diagnostically `exhausted`.
+  What makes `terminal` worth alerting on is that options remained unspent.
+
+  **Known limit, stated rather than left to be discovered:** `total_timeout`
+  will read at or near zero on a streaming-heavy instance. The whole-chain
+  budget is only applied to non-streaming requests, and 139 of the 183 measured
+  requests were streams. A zero there is not evidence that chains never time
+  out.
+
+- **`calvoproxy_all_models_cooling_total`** — the client-visible 503 that had no
+  instrumentation at all. When every planned model is circuit-open or cooling
+  down, the request is refused *before* the fallback executor runs, so it never
+  reached any chain-level counter, even though its neighbours (admission
+  rejections, capability refusals) were both counted. Kept deliberately separate
+  from `chain_failed`: the chain never ran, and folding it in would report a
+  failure for attempts that were never made.
+
+- **Two per-model latency series, which must never be summed together.**
+
+  `calvoproxy_attempt_first_event_seconds_{sum,count}{model}` is the wait
+  **after** response headers — exactly the quantity
+  `PROXY_STREAM_FIRST_BYTE_TIMEOUT` compares against, so it is the series, and
+  the only one, that says whether that budget is tuned correctly. Recorded on
+  **both** outcomes: if only timeouts were sampled every value would equal the
+  budget, and the healthy population that decides the tuning question would
+  never appear.
+
+  `calvoproxy_attempt_first_token_seconds_{sum,count}{model}` is the whole
+  request → first token, clock started before the upstream call so it includes
+  the wait for headers. This is the series that ranks models by responsiveness.
+  Recorded only when a token actually arrived — folding in "how long we waited
+  before giving up" would drag a model's number toward the budget and make it
+  look slower the more often it was abandoned, which is the backwards-ranking
+  bug this design set out to avoid, in a new place. Abandonments stay counted by
+  `calvoproxy_stream_first_event_timeout_total`.
+
+  The second series exists because the first one, run against the real upstream,
+  under-measured badly: a request with a **1.51s** time-to-first-token recorded
+  **under 5ms** of post-header wait. OpenRouter held the headers and then
+  flushed its `: OPENROUTER PROCESSING` keepalives and the first data event
+  together, so nearly all the delay landed before the headers did — invisible to
+  a stopwatch that starts when `Client.Do` returns. Across 12 further live
+  requests the recorded post-header waits were 0.00-0.67s while measured
+  time-to-first-token was 0.42-2.24s. The post-header wait was measuring what
+  the budget acts on, correctly, and answering the operator's actual question
+  ("which model is slowest") wrongly.
+
+  Deliberately *not* measured at `Client.Do` returning, despite that being the
+  obvious "comparable" choice. Those are two different quantities: for a
+  non-streaming attempt the upstream headers arrive when generation is
+  essentially finished (tens of seconds), for a streaming one they only mean
+  "accepted" (~0.5s) — averaging both per model produces a meaningless number.
+  Worse, it ranks backwards for the exact failure worth catching: the
+  abandonments happen *after* `Do` returns, so a model that accepts instantly
+  and then queues would record a fast sample while being abandoned for slowness.
+
+  Both are labelled with the same `profile:model` key as
+  `calvoproxy_model_score`, so they join and cardinality stays bounded by the
+  policy. Both are sampled only where the first-event wait actually runs —
+  streaming attempts, with `PROXY_STREAM_FIRST_BYTE_TIMEOUT` set, that are not
+  last in the chain — so neither count is the model's request count.
+
+  Context for reading it: the same live instance abandoned 53 of 183 requests
+  (29%) at the first-event budget, with `PROXY_STREAM_FIRST_BYTE_TIMEOUT=3`.
+  Healthy time-to-first-event is 0.35-0.70s with a slow tail of 9-13s on the
+  *same model and prompt* — variance, not a broken model. A 3s budget abandons
+  that whole tail, so 29% is at least as consistent with a budget tuned too
+  tight as with bad models. This histogram is what decides which; the knob is
+  free to change. No behaviour was changed here.
+
+`calvoproxy_requests_by_status` and `calvoproxy_request_latency_*` are
+unchanged. The latter still answers "what did the user wait", which is a
+different and still-valid question from per-model first-token latency.
+
 ## [0.9.2] — 2026-08-03
 
 ### Fixed

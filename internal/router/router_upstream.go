@@ -44,6 +44,11 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		return classifyTransportError(err)
 	}
 
+	// Clock for time-to-first-token, started BEFORE the upstream call so it
+	// includes the wait for response headers. Only the streaming branch below
+	// consumes it, so a non-streaming attempt — whose headers arrive when
+	// generation is essentially finished — can never contribute a sample.
+	attemptStart := time.Now()
 	resp, err := s.Client.Do(proxyReq)
 	if err != nil {
 		span.RecordError(err)
@@ -155,7 +160,18 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// abandoning converts a slow success into a fast failure.
 		body := resp.Body
 		if budget := streamFirstEventTimeout(); budget > 0 && !attempt.LastInChain {
+			// Time-to-first-event, per model — NOT time to `s.Client.Do`
+			// returning. Those measure different things: for a non-streaming
+			// attempt the upstream headers arrive when generation is essentially
+			// finished (tens of seconds), for a streaming one they mean only
+			// "accepted" (~0.5s), so one average over both populations is
+			// meaningless. Worse, a Do-level number ranks backwards for exactly
+			// the failure this budget exists to catch — a model that accepts
+			// instantly and then queues records a FAST sample while being
+			// abandoned for slowness right here.
+			firstEventStart := time.Now()
 			replayed, gotEvent, timedOut := awaitFirstStreamEvent(body, budget)
+			s.recordFirstEventLatency(attempt, time.Since(firstEventStart))
 			if timedOut {
 				_ = resp.Body.Close() // unblocks the reader still parked in Read
 				// A soft score penalty, never a breaker failure. resolveProbe
@@ -181,7 +197,12 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			}
 			// Not a timeout: either a real event arrived or the stream ended on
 			// its own. Either way keep going with a reader that has lost nothing.
-			_ = gotEvent
+			if gotEvent {
+				// A real token, so this is a time-to-first-token. A stream that
+				// merely ended (gotEvent false) never produced one and must not
+				// be averaged in as if it had.
+				s.recordFirstTokenLatency(attempt, time.Since(attemptStart))
+			}
 			body = replayed
 		}
 
