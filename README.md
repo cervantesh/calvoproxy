@@ -242,11 +242,10 @@ build — discarded everything the proxy had learned. Deliberate limits:
 - Set `PROXY_SCORE_FILE=off` to turn persistence off entirely. Nothing is ever
   written to the working directory: if no config directory can be determined,
   persistence simply stays off.
-- **In a container, pin the path and mount a volume.** The default resolves
-  through `$XDG_CONFIG_HOME`/`$HOME`, which a container need not define, and
-  with neither set the store disables itself silently. The image therefore pins
-  `PROXY_SCORE_FILE=/data/scores.json`; mount a volume at `/data` (Compose
-  already does) or scores are lost on every recreation.
+- **In a container, mount a volume.** The image pins
+  `PROXY_SCORE_FILE=/data/scores.json` and creates `/data` world-writable so it
+  works under `--user` too; without a volume mounted there, scores are lost on
+  every recreation. Compose declares one for you.
 
 ### Capacity & tuning
 

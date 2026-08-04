@@ -45,10 +45,16 @@ func TestDockerfilePinsAnAbsoluteScorePath(t *testing.T) {
 	if strings.Contains(value, "$") {
 		t.Fatalf("PROXY_SCORE_FILE must not depend on the environment, got %q", value)
 	}
-	// The directory has to exist and be writable, or the first flush fails.
+	// The directory has to exist, or the first flush fails.
 	dir := pathDir(value)
 	if !strings.Contains(dockerfile, "mkdir -p "+dir) {
 		t.Errorf("the image must create %s, or the first score flush fails", dir)
+	}
+	// …and be writable by a UID that isn't root. A mounted volume inherits the
+	// image directory's bits, so a root-owned 755 /data breaks `--user` with
+	// "open /data/.scores-*.tmp: permission denied" — measured, not theorised.
+	if !strings.Contains(dockerfile, "chmod 1777 "+dir) {
+		t.Errorf("%s must be world-writable (1777), or --user cannot persist scores", dir)
 	}
 }
 

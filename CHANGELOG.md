@@ -20,20 +20,24 @@ out — see v0.7.1.
   `PROXY_IDLE_TIMEOUT` and `restart: on-failure`, so recreation is the normal
   cycle there, not a rare event.
 
-  Two things were wrong, not one. Beyond the missing volume, the **default path
-  cannot be trusted inside a container at all**: it resolves through
-  `os.UserConfigDir()`, which on Linux reads `$XDG_CONFIG_HOME` or `$HOME` and
-  returns an error when neither is set — and `scoreFilePath()` treats that as
-  "no store" and disables persistence. Nothing logs, nothing fails; the proxy
-  just quietly forgets. Running with `--user`, or any runtime that does not
-  populate `HOME`, lands exactly there. The image now pins an absolute
-  `PROXY_SCORE_FILE=/data/scores.json`, removing the dependency on the
-  environment, and `docker-compose.yml` mounts a named `calvoproxy-scores`
-  volume over `/data`.
+  The missing volume was the silent half: nothing errors, the proxy serves
+  normally, and the scores are simply gone after `docker compose down && up`.
+  `docker-compose.yml` now mounts a named `calvoproxy-scores` volume over
+  `/data`, and the image pins `PROXY_SCORE_FILE=/data/scores.json`.
 
-  Guarded by tests that assert the two files agree, because the failure mode is
-  silence: there is no behaviour to observe when this breaks, only a proxy that
-  performs worse than it should.
+  The pinned path is not only tidiness. Under `--user`, the default resolves to
+  `/.config` (Docker sets `HOME=/` for a UID absent from `/etc/passwd`) and
+  every flush fails with `mkdir /.config: permission denied`. And `/data` is
+  created `1777`, not `755`: a mounted volume inherits the image directory's
+  bits, so a root-owned `755` broke `--user` with
+  `open /data/.scores-*.tmp: permission denied`. Both were measured against a
+  running container, not reasoned about — the first draft of this fix claimed
+  the default went *pathless* without `$HOME`, which testing disproved: Docker
+  always defines it.
+
+  Guarded by tests asserting the Dockerfile and Compose agree, because the
+  headline failure mode is silence: there is no behaviour to observe when the
+  volume goes missing, only a proxy that performs worse than it should.
 
 ### Changed
 - `.gitignore` now covers `*.exe.*`. The existing `*.exe` did not match a

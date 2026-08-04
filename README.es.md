@@ -248,11 +248,10 @@ descartaba todo lo aprendido. Límites deliberados:
 - Poné `PROXY_SCORE_FILE=off` para desactivar la persistencia del todo. Nunca se
   escribe nada en el directorio de trabajo: si no se puede determinar un
   directorio de config, la persistencia simplemente queda apagada.
-- **En un contenedor, fijá la ruta y montá un volumen.** El default se resuelve
-  vía `$XDG_CONFIG_HOME`/`$HOME`, que un contenedor no tiene por qué definir, y
-  sin ninguno de los dos el store se apaga en silencio. Por eso la imagen fija
-  `PROXY_SCORE_FILE=/data/scores.json`; montá un volumen en `/data` (Compose ya
-  lo hace) o los scores se pierden en cada recreación.
+- **En un contenedor, montá un volumen.** La imagen fija
+  `PROXY_SCORE_FILE=/data/scores.json` y crea `/data` escribible por cualquier
+  UID, así también funciona con `--user`; sin un volumen montado ahí, los scores
+  se pierden en cada recreación. Compose ya declara uno.
 
 ### Capacidad y tuning
 
