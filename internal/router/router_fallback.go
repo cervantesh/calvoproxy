@@ -11,6 +11,56 @@ import (
 
 var errAllFallbackModelsFailed = errors.New("all fallback models failed")
 
+// chainError carries the fallback loop's own verdict on WHY it stopped, which
+// the returned error otherwise loses: a break (a terminal error) and a normal
+// end of loop (everything tried) both `return lastErr`, so the caller cannot
+// tell them apart, and the error's shape does not say either — a cancelled
+// attempt and a genuinely terminal one are both Retryable:false.
+//
+// It is only the loop's verdict, not the final answer. Context state outranks
+// it; see classifyChainFailure.
+type chainError struct {
+	reason chainFailureReason
+	err    error
+}
+
+func (e *chainError) Error() string { return e.err.Error() }
+func (e *chainError) Unwrap() error { return e.err }
+
+// classifyChainFailure names why a chain failed, for
+// calvoproxy_chain_failed_total.
+//
+// ctx.Err() is checked FIRST and wins over the loop's verdict, because the loop
+// physically cannot see a client disconnect. executeAttempt converts a cancelled
+// parent context into attemptError{Retryable:false, SkipModel:true}, and the
+// loop treats SkipModel as `continue` — so a client hanging up does not stop the
+// chain. It burns every remaining model, one cancelled attempt at a time, and
+// leaves through the normal end of the loop, where the verdict reads
+// "exhausted". Inferring from the error instead is no better: Retryable:false
+// reads as "terminal", and DeadlineExceeded has the same shape as Canceled but
+// is deliberately excluded from that branch in executeAttempt.
+//
+// Caveat on total_timeout: this reads the context dispatchChain built, whose
+// deadline is the total chain budget — but that budget is only applied when
+// !stream (see dispatchChain), so on a streaming-heavy instance this bucket
+// will sit at or near zero and is NOT evidence that chains never time out.
+// Per-attempt deadlines cannot leak in here: they live on a child context.
+func classifyChainFailure(ctx context.Context, err error) chainFailureReason {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return chainCancelled
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return chainTotalTimeout
+	}
+	var chainErr *chainError
+	if errors.As(err, &chainErr) {
+		return chainErr.reason
+	}
+	// A custom FallbackExecutor returning a bare error: everything was tried as
+	// far as we can tell.
+	return chainExhausted
+}
+
 // isModelUnavailable reports whether the upstream rejected this specific model
 // (rather than the request as a whole). The canonical case is OpenRouter
 // returning 404 "This model is unavailable for free" once it retires a :free
@@ -42,10 +92,16 @@ type DefaultFallbackExecutor struct {
 
 func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWriter, execution FallbackExecution) error {
 	if e.AttemptExecutor == nil {
-		return errors.New("fallback attempt executor is not configured")
+		return &chainError{reason: chainExecutorError, err: errors.New("fallback attempt executor is not configured")}
 	}
 
 	var lastErr error
+	// stoppedEarly, not "did we break": a non-retryable error on the LAST model
+	// breaks out of the loop with nothing left untried, which is diagnostically
+	// "exhausted" — the chain got its full run. What makes "terminal" worth
+	// alerting on is that models REMAINED, so the failure cost the request
+	// options it never spent.
+	stoppedEarly := false
 	for attemptIndex, attempt := range execution.Attempts {
 		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
 		execution.RequestBody["model"] = attempt.Model
@@ -82,6 +138,7 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 				// Otherwise honour the retry policy: a terminal error that
 				// every model would hit (auth, malformed request) stops here.
 				if !shouldRetryAttempt(execution.RetryPolicy, attErr) {
+					stoppedEarly = attemptIndex < len(execution.Attempts)-1
 					break
 				}
 			}
@@ -91,10 +148,18 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 		}
 	}
 
-	if lastErr != nil {
-		return lastErr
+	reason := chainExhausted
+	if stoppedEarly {
+		reason = chainTerminal
 	}
-	return errAllFallbackModelsFailed
+	if lastErr != nil {
+		return &chainError{reason: reason, err: lastErr}
+	}
+	// Reached only with an empty Attempts slice. dispatchChain catches that case
+	// before calling the executor (it is the "all models cooling down" 503, which
+	// has its own counter), so in the served path this is unreachable; it stays
+	// as the executor's own contract for a direct caller.
+	return &chainError{reason: chainExhausted, err: errAllFallbackModelsFailed}
 }
 
 func fallbackErrorResponse(err error) (int, string) {
