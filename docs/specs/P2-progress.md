@@ -15,3 +15,11 @@
   en el free tier. Hasta medirlo, sin `PROXY_QUOTA_LIMITS_JSON` el gate no actúa:
   cuenta, pero no degrada. Eso es deliberado — inventar un techo sería peor.
 - El defecto es **blando**: `PROXY_QUOTA_HARD_SKIP` sigue apagado.
+- **CI cazó un test flaky que en local pasaba siempre.**
+  `TestQuota_SoftDegradationLeavesScoreUntouched` comparaba dos lecturas de
+  `scoreForAttempt` con igualdad exacta, y esa función aplica decay temporal en
+  cada llamada: la diferencia observada fue de ~1.5e-10, puro reloj. Pasaba en el
+  portátil por ser más rápido que el runner. Ahora lee el score **almacenado**
+  bajo el lock, que es la medida honesta del invariante ("la cuota no escribe en
+  el score"). Lección: cualquier aserción de igualdad exacta sobre un valor con
+  decay es flaky por construcción.
