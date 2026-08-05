@@ -306,8 +306,17 @@ func TestQuota_SoftDegradationLeavesScoreUntouched(t *testing.T) {
 	// Give both a real, equal score so ranking has something to reorder.
 	svc.recordSuccess(alpha)
 	svc.recordSuccess(beta)
-	env := svc.scoreEnv()
-	before := svc.scoreForAttempt(alpha, env)
+	// Read the STORED score, not the decayed one. scoreForAttempt applies
+	// time-based decay on every call, so comparing two of its results for exact
+	// equality is flaky by construction — it drifts by ~1e-10 per millisecond of
+	// wall clock, which CI (slower than a dev laptop) reliably exposed. The
+	// invariant is about what quota writes, and quota must write nothing here.
+	storedScore := func() float64 {
+		svc.breakerMu.RLock()
+		defer svc.breakerMu.RUnlock()
+		return svc.modelBreakers[svc.breakerKey(alpha)].Score
+	}
+	before := storedScore()
 
 	// Spend alpha's window down to nothing.
 	for i := 0; i < 4; i++ {
@@ -318,7 +327,7 @@ func TestQuota_SoftDegradationLeavesScoreUntouched(t *testing.T) {
 	if ranked[0].Model != "org/beta:free" {
 		t.Errorf("ranked first = %s, want the model with headroom left", ranked[0].Model)
 	}
-	if after := svc.scoreForAttempt(alpha, svc.scoreEnv()); after != before {
+	if after := storedScore(); after != before {
 		t.Errorf("persisted score moved from %v to %v; quota must not touch it", before, after)
 	}
 }
