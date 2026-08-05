@@ -282,6 +282,25 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
+### Compression (off by default)
+
+Agent histories are dominated by tool results — one `cat` of a large file travels
+again on every later turn. Two deterministic engines can shrink that:
+
+```bash
+PROXY_COMPRESS_DRYRUN=true PROXY_COMPRESS_PROFILES=coding calvoproxy
+```
+
+`toolcap` clips oversized `role: tool` results keeping both ends with a marker in
+between, and never touches one that is valid JSON. `dedup` replaces repeated
+copies of the same block inside one request with a reference, always leaving the
+last copy whole.
+
+This is the only feature that alters your request, so it is **off unless you name
+a profile**, `PROXY_COMPRESS_DRYRUN=true` measures without applying, and every
+turn reports what it saved in the `cmp=` field of `X-Calvoproxy-Route`. Start
+with the dry run and read the numbers before trusting it.
+
 ### Dashboard (`/dashboard`)
 
 Open `http://127.0.0.1:8080/dashboard` for a live read-only view: circuits and

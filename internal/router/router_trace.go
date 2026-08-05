@@ -51,6 +51,10 @@ type routeTrace struct {
 	Attempts []traceAttempt
 	Served   *traceAttempt
 
+	// compression is what P3 achieved on this request. cmp= is emitted always,
+	// so "not compressed" stays distinguishable from "this field does not exist".
+	compression compressionStat
+
 	// scores is written once, when the chain is ranked, and read when an attempt
 	// is recorded. Never exported: it is a rendering detail.
 	scores map[string]float64
@@ -90,6 +94,14 @@ func (t *routeTrace) recordQuotaExclusions(n int) {
 		return
 	}
 	t.ExcludedByQuota = n
+}
+
+// recordCompression stores what the engines achieved, for the cmp= field.
+func (t *routeTrace) recordCompression(stat compressionStat) {
+	if t == nil {
+		return
+	}
+	t.compression = stat
 }
 
 func (t *routeTrace) recordScores(models []string, scores []float64) {
@@ -197,7 +209,7 @@ func (t *routeTrace) header() string {
 		"p=" + traceSanitize(t.Profile),
 		// Always emitted, so "not compressed" stays distinguishable from "this
 		// field does not exist" once P3 lands.
-		"cmp=" + traceNoCompress,
+		"cmp=" + t.compression.header(),
 	}
 	// Only on the unserved paths: on a served request the outcome is implicit in
 	// the presence of X-Calvoproxy-Model, and spending header bytes to repeat it
