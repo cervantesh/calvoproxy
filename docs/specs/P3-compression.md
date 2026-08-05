@@ -1,91 +1,68 @@
-# P3 — Compresión de peticiones
+# P3 — Guardia de tamaño de resultados de herramienta
 
 Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
 
-## 1. Problema, y por qué este es el punto peligroso
+> **Esta spec cambió de alcance después de implementarse.** La versión original
+> describía dos motores de compresión dentro del proxy. Estaban en la capa
+> equivocada y se movieron a `github.com/cervantesh/cervo-compress`. Lo que queda
+> aquí es lo único que sí es competencia de un proxy. El razonamiento completo
+> está en §2, porque el error es más instructivo que el resultado.
 
-Las cargas de agente reenvían el historial entero en cada turno, y lo que más lo infla son los
-resultados de herramientas: un `cat` de un fichero grande viaja otra vez en cada turno
-posterior, para siempre. Contra un free tier con cupo por peticiones, eso no cuesta dinero
-pero sí contexto útil.
+## 1. Qué hace
 
-**Este es el único punto del plan que modifica la petición del usuario**, y por tanto el único
-que puede degradar respuestas *en silencio*. Todo el diseño está subordinado a eso.
+Recorta un resultado de herramienta que supere `PROXY_TOOL_RESULT_LIMIT`,
+conservando **los dos extremos** con un marcador explícito en medio. **Apagado
+por defecto**: sin esa variable el proxy reenvía exactamente lo que recibió.
 
-## 2. Qué NO se hace
+Es de la misma familia que `PROXY_MAX_RESPONSE_BYTES`: una declaración de qué
+está dispuesto a transportar este proxy, no un juicio sobre lo que el modelo
+necesita.
 
-- **Dedup de sesión entre turnos: descartado.** El upstream es stateless. No reenviar el
-  contexto no lo comprime: hace que el modelo deje de verlo. Eso es amnesia, no compresión, y
-  un LRU con hash de prefijo no lo arregla — el problema no es recordar el prefijo, es que hay
-  que mandarlo igual.
-- **Poda semántica de prosa: descartada en v1.** "Semántico, determinista y sin ML" es una
-  contradicción práctica: preservar código byte a byte mientras se poda texto exige delimitar
-  código en Markdown arbitrario, y un fence mal cerrado por el modelo convierte la poda en
-  corrupción.
+## 2. Por qué los motores se fueron
 
-## 3. Los dos motores que quedan
+Decidir qué puede tirarse de una conversación exige **conocer esa conversación**:
+qué resultado de herramienta sigue importando, qué está haciendo el usuario, si
+un bloque puede recuperarse cuando el modelo lo pida. El proxy ve una foto
+stateless y no sabe nada de eso. Hermes y los agentes sí — son dueños de la
+conversación.
 
-**`toolcap`** — recorta el contenido de mensajes `role: "tool"` que superen el límite,
-conservando el principio y el final con un marcador explícito en medio. Los dos extremos
-porque un resultado de herramienta puede llevar la información al principio (un fichero) o al
-final (el error de un comando), y quedarse con uno solo elige mal la mitad de las veces.
+Un detalle de OmniRoute lo confirma: su motor CCR, el único que **quita**
+contenido de verdad, solo inyecta su protocolo de recuperación si el llamante
+expone la herramienta `omniroute_ccr_retrieve`. Es decir, ni siquiera ellos
+quitan contexto sin un contrato con el cliente.
 
-**Nunca toca un resultado que sea JSON válido.** Recortar JSON produce JSON inválido, y un
-resultado corrupto es peor que uno largo.
+`dedup` se fue entero. `toolcap` se quedó, reencuadrado: ya no es "comprimir",
+es "no transportar medio megabyte en un mensaje".
 
-**`dedup`** — dentro del historial **de esta misma petición**, las copias repetidas de un
-bloque idéntico se sustituyen por una referencia a la copia que sí viaja. Determinista por
-hash de contenido, sin estado y sin persistencia.
+## 3. Reglas
 
-**La última aparición siempre sobrevive intacta.** Es la que el modelo está mirando; sustituir
-esa por una referencia dejaría al modelo sin el contenido justo cuando lo necesita.
+- **Solo mensajes `role: "tool"`.** Un mensaje de usuario es lo que se pidió.
+- **Nunca contenido que sea JSON válido.** Recortarlo produce JSON inválido, y
+  un resultado corrupto es peor que uno largo.
+- **Nunca contenido estructurado** (arrays de bloques: imágenes, `tool_result`
+  del dialecto Anthropic). No hay forma genérica segura de recortarlo.
+- **Suelo de 512 bytes.** Por debajo, el marcador sería casi todo lo que
+  sobrevive.
+- **Si el marcador cuesta más que el recorte**, no se toca.
+- **Ante cualquier pánico**, se reenvía el cuerpo original y se registra un
+  aviso. Un fallo aquí degrada a "sin recortar", nunca a un 500.
 
-## 4. Enganche
-
-Una sola pasada en `dispatchChain`, antes de `executeFallbacks` — **nunca dentro del bucle**,
-que ya re-serializa por intento y multiplicaría el coste por el número de modelos.
-
-```go
-type Compressor interface {
-    Name() string
-    Apply(body map[string]any) (map[string]any, compressionStat)
-}
-```
-
-**Devuelve un mapa nuevo, nunca muta el de entrada**, porque `execution.RequestBody["model"]`
-([router_fallback.go:107](../../internal/router/router_fallback.go)) escribe sobre el mapa
-compartido.
-
-## 5. Interruptores, todos conservadores
-
-| Variable | Defecto | Qué hace |
-|---|---|---|
-| `PROXY_COMPRESS_PROFILES` | *(vacío)* | perfiles con compresión. **Vacío = apagado del todo** |
-| `PROXY_COMPRESS_DRYRUN` | `false` | calcula el ahorro y **no aplica nada** |
-| `PROXY_COMPRESS_TOOL_LIMIT` | `4096` | bytes por encima de los cuales se recorta un tool result |
-
-**Apagado por defecto** es deliberado: nadie debería descubrir que su proxy comprime porque
-una respuesta salió peor.
-
-Ante **cualquier** error de un motor, o si el ahorro queda por debajo del umbral, se reenvía
-el cuerpo original intacto.
-
-## 6. Invariantes verificables
+## 4. Invariantes verificables
 
 | # | Invariante | Cómo se prueba |
 |---|---|---|
-| 1 | Sin perfiles configurados, el cuerpo sale idéntico | comparación byte a byte |
-| 2 | Nunca muta el mapa de entrada | se guarda copia y se compara tras aplicar |
-| 3 | `toolcap` no toca un tool result que sea JSON válido | resultado JSON largo |
-| 4 | `toolcap` conserva principio y final, y marca el recorte | contenido largo no-JSON |
-| 5 | `toolcap` no toca mensajes que no sean `role: tool` | mensaje de usuario largo |
-| 6 | `dedup` deja intacta la **última** aparición | tres copias; la tercera sobrevive |
-| 7 | `dedup` no toca bloques que solo aparecen una vez | historial sin repeticiones |
-| 8 | `dry-run` reporta ahorro y no aplica nada | cuerpo idéntico, stat > 0 |
-| 9 | Un cuerpo sin `messages` o con formas raras no revienta | mensajes nulos, tipos mezclados |
-| 10 | El ahorro llega a la traza como `cmp=` | header tras comprimir |
+| 1 | Apagado por defecto: el cuerpo sale idéntico | comparación byte a byte |
+| 2 | Nunca muta el mapa de entrada | copia guardada y comparada |
+| 3 | No toca JSON válido | resultado JSON largo |
+| 4 | Conserva principio y final, y marca el recorte | contenido largo no-JSON |
+| 5 | No toca mensajes que no sean `role: tool` | mensaje de usuario largo |
+| 6 | Un límite absurdo se ajusta al suelo | `PROXY_TOOL_RESULT_LIMIT=1` |
+| 7 | Formas raras no revientan | mensajes nulos, tipos mezclados |
+| 8 | El recorte llega a la traza como `cmp=` | header tras recortar |
+| 9 | Funciona por el camino real del router, y apagado no altera nada | dos tests de integración |
 
-## 7. Fuera de alcance
+## 5. Fuera de alcance
 
-Comprimir la respuesta (el cliente la necesita entera), contar tokens reales en vez de bytes
-(exigiría un tokenizador vendorizado por modelo), y cualquier motor que requiera un modelo.
+Todo lo que sea gestión de contexto. Vive en
+[`cervo-compress`](https://github.com/cervantesh/cervo-compress), como librería,
+para que la use quien es dueño de la conversación.

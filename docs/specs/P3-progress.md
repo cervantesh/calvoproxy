@@ -16,3 +16,20 @@
 - Pendiente antes de encenderlo en real: correr con `PROXY_COMPRESS_DRYRUN=true`
   una temporada y comparar el ahorro medido con la calidad de las respuestas. El
   diseño lo permite; el juicio es humano.
+
+## Corrección de alcance (posterior al release 0.11.0)
+
+- El usuario señaló que la compresión de contexto **no parece trabajo de un
+  proxy**, y tenía razón. Los cinco puntos restantes observan, deciden o
+  informan; este mutaba la petición, y encima con menos información que
+  cualquiera de los clientes.
+- **El panel ya lo había apuntado en la ronda 1** y no le hice suficiente caso:
+  uno de los tres dijo que de los seis puntos "el que menos vale tal como está en
+  el brief es P3". Reduje el alcance pero lo construí igual.
+- Los dos motores se movieron a `github.com/cervantesh/cervo-compress`, donde
+  Hermes puede importarlos. `dedup` salió del proxy entero; `toolcap` se quedó
+  reencuadrado como guardia de transporte, gobernado por
+  `PROXY_TOOL_RESULT_LIMIT` en vez de `PROXY_COMPRESS_*`.
+- La librería se llevó además el corpus adversarial (fences sin cerrar, JSON
+  anidado, bloques que difieren en un byte, contenido estructurado de Anthropic),
+  que era lo que menos pintaba en la suite de un gateway.

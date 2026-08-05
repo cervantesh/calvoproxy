@@ -374,13 +374,14 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
 	}
-	// Compression runs ONCE here, never inside the fallback loop: that loop
-	// re-serialises the body per attempt, so compressing there would multiply the
-	// cost by the number of models for no extra benefit.
+	// The tool-result size guard runs ONCE here, never inside the fallback loop:
+	// that loop re-serialises the body per attempt, so doing it there would
+	// multiply the cost by the number of models for no extra benefit.
 	//
-	// Any failure forwards the original body untouched — this is the only place
-	// the proxy alters what the user asked for, and a compression bug must
-	// degrade to "no compression", never to a worse answer.
+	// Any failure forwards the original body untouched. This is the only place
+	// the proxy alters what the caller sent, and it is a transport limit — not a
+	// judgement about what the model needs. Deciding what a CONVERSATION may lose
+	// belongs to whoever owns it; see cervo-compress.
 	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
 		if cstat.applied() {
 			reqBody = compressed
