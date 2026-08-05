@@ -11,6 +11,11 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-05
+
+A correction. v0.11.0 put context compression inside the proxy; it did not
+belong there, and this release takes it back out.
+
 ### Changed
 - **Compression left the proxy; a size guard stayed.** v0.11.0 shipped two
   compression engines inside the router. They were in the wrong layer.
@@ -720,6 +725,7 @@ change to the running proxy.
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
 [Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.12.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.12.0
 [0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
 [0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
 [0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0
