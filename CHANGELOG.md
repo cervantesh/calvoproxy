@@ -12,6 +12,34 @@ out — see v0.7.1.
 ## [Unreleased]
 
 ### Added
+- **Request compression, off by default.** Agent workloads resend the whole
+  history every turn, and what inflates it most is tool results: one `cat` of a
+  large file travels again on every subsequent turn, forever.
+
+  Two engines, both pure Go and deterministic. **`toolcap`** clips oversized
+  `role: tool` results keeping **both ends** with an explicit marker between —
+  both, because a tool result can carry its point at the start (a file) or at the
+  end (a command error), and keeping one end picks wrong half the time. It never
+  touches a result that parses as valid JSON: truncating JSON yields invalid
+  JSON, and a corrupt result is worse than a long one. **`dedup`** replaces
+  repeated copies of an identical block *within the same request* with a
+  reference, always leaving the **last** occurrence whole — that is the copy the
+  model is looking at.
+
+  This is the only place the proxy alters what the user asked for, so it is the
+  only one that can degrade an answer silently, and everything about it is
+  subordinate to that: **off unless `PROXY_COMPRESS_PROFILES` names a profile**,
+  a `PROXY_COMPRESS_DRYRUN` mode that measures the saving without applying it, a
+  panic guard that forwards the original body, and the saving reported in the
+  routing trace `cmp=` field so a turn can be audited afterwards.
+
+  Two engines that did NOT survive the design are worth recording. Cross-turn
+  session dedup: the upstream is stateless, so not resending context does not
+  compress it — it makes the model stop seeing it. That is amnesia. Semantic
+  prose pruning: "semantic, deterministic, no ML" is a practical contradiction,
+  since preserving code byte-for-byte while pruning text means delimiting code in
+  arbitrary Markdown, and one unclosed fence turns pruning into corruption.
+
 - **A local dashboard at `/dashboard` — one place to see what the proxy is doing.**
   The proxy already computed everything interesting: scores, circuits, quota
   budgets, routing decisions. It just exposed them in three places you had to
