@@ -306,6 +306,9 @@ func renderTrace(h http.Header) string {
 		}
 		segments = append(segments, brk+" "+word)
 	}
+	if q := fields["q"]; q != "" && q != "0" {
+		segments = append(segments, q+" sin cuota")
+	}
 	if caps := fields["caps"]; caps != "" {
 		segments = append(segments, "requiere "+caps)
 	}

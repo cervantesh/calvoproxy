@@ -90,6 +90,15 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	defer func() { _ = resp.Body.Close() }()
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 
+	// The upstream answered, so this attempt spent a slot in the window whatever
+	// the status — a 429 costs quota too. Transport failures above never reached
+	// the upstream and are deliberately NOT counted.
+	s.quota.record(attempt)
+	s.quota.ingestHeaders(attempt,
+		resp.Header.Get("X-RateLimit-Limit"),
+		resp.Header.Get("X-RateLimit-Remaining"),
+		parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset")))
+
 	if resp.StatusCode != http.StatusOK {
 		// Error bodies are only used for classification/logging — cap the read so
 		// a hostile/broken upstream can't flood memory with a giant error body.
@@ -139,6 +148,12 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// misleads exactly the operator trying to find out what OpenRouter said.
 		recordTraceFailure(ctx, attempt, resp.StatusCode, traceKindFor(attErr), attErr.Message)
 		s.penalizeScore(attempt, attErr.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			// Learn WHEN to come back, never how many fit: a 429 says "not now".
+			// The breaker still opens below — quota is predictive, the breaker is
+			// reactive, and this is the case where the prediction already failed.
+			s.quota.learnFrom429(attempt, parseRetryAfter(resp.Header.Get("Retry-After")))
+		}
 		if attErr.BreakerEligible {
 			// A 429/503 may carry Retry-After — respect it as a minimum cooldown.
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message, parseRetryAfter(resp.Header.Get("Retry-After")))

@@ -35,6 +35,15 @@ func (s *RouterService) isModelAvailable(attempt modelAttempt) bool {
 // availability is never computed via a second, re-entrant RLock — Go's RWMutex
 // is not recursive and a nested RLock deadlocks whenever a writer is waiting.
 func (s *RouterService) isModelAvailableLocked(attempt modelAttempt) bool {
+	// Quota is consulted here so hard exclusion inherits the breaker's own choke
+	// points (filterAvailableAttempts, Health readiness) without sharing its
+	// STATE — writing a quota window into OpenUntil would be erased by the next
+	// recordSuccess and would report a spent budget as a broken circuit.
+	// Lock order: the caller already holds breakerMu, and the ledger never calls
+	// back into the breaker, so breakerMu -> quota.mu is the only direction.
+	if s.quota.exhausted(attempt) {
+		return false
+	}
 	state := s.modelBreakers[s.breakerKey(attempt)]
 	if state == nil {
 		return true
@@ -235,6 +244,13 @@ func (s *RouterService) retryAfterForAttempts(attempts []modelAttempt) time.Dura
 			soonest = d
 		}
 	}
+	// A chain emptied by quota rather than by breakers still owes the client a
+	// Retry-After; without this the 503 says "come back sometime".
+	for _, attempt := range attempts {
+		if d := s.quota.retryAfter(attempt); d > 0 && (soonest == 0 || d < soonest) {
+			soonest = d
+		}
+	}
 	return soonest
 }
 
@@ -329,6 +345,12 @@ func (s *RouterService) Health() ProxyHealth {
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Model < snapshots[j].Model })
 
+	// Budget is reported beside health, never mixed into it: an exhausted window
+	// is not a degraded circuit, and Status must not say "unavailable" because
+	// the day's allowance ran out.
+	quotas := s.quota.observe()
+	sort.Slice(quotas, func(i, j int) bool { return quotas[i].Scope < quotas[j].Scope })
+
 	status := "ok"
 	ready := true
 	if openCount > 0 {
@@ -372,6 +394,7 @@ func (s *RouterService) Health() ProxyHealth {
 		PolicyVocabHash:    s.policyMetadata.VocabularyHash,
 		ModelPolicy:        s.ModelPolicyHealth(),
 		Circuits:           snapshots,
+		Quotas:             quotas,
 		Timestamp:          now,
 	}
 }
