@@ -87,6 +87,7 @@ func NewRouterService() *RouterService {
 		modelBreakers:  make(map[string]*modelBreakerState),
 		admission:      newAdmissionControl(),
 		capabilities:   newCapabilityIndex(loadCapabilityOverrides()),
+		quota:          newQuotaLedger(quotaLimitsFromEnv()),
 	}
 	// Best-effort background auto-derive of model capabilities from OpenRouter;
 	// the manual overrides above already cover the chain models synchronously.
@@ -111,6 +112,11 @@ func (s *RouterService) Close() {
 			slog.Warn("[CalvoProxy] could not persist model scores on shutdown", slog.String("error", err.Error()))
 		}
 	}
+	if s.persistQuotas.Load() {
+		if err := s.SaveQuotas(); err != nil {
+			slog.Warn("[CalvoProxy] could not persist quotas on shutdown", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // --- Route dispatch ---
@@ -124,6 +130,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	tracer := otel.Tracer("calvoproxy/router")
 	ctx, span := tracer.Start(ctx, "RouteRequest_Proxy")
 	defer span.End()
+	ctx = withTraceOptIn(ctx, r)
 
 	// Bound the request body before reading it into memory, so an oversized or
 	// malicious payload can't OOM the process. Configurable via
@@ -261,6 +268,13 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
 func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
+	// The route trace rides the context, not FallbackExecution: the header is
+	// materialised inside executeAttempt (setServedModelHeaders), and
+	// AttemptExecutor.ExecuteAttempt does not receive the execution struct.
+	ctx = withTrace(ctx, newRouteTrace(category))
+	// One publish per request, on every exit: the ring is what /decisions/{id}
+	// reads, and an unserved request is exactly the one worth looking up.
+	defer s.finishTrace(ctx)
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
 	// loop). Streaming requests get NO total deadline here — they are bounded by
@@ -279,11 +293,13 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if len(required) > 0 && requestedModel != "" && !strings.EqualFold(strings.TrimSpace(requestedModel), "auto") {
 		if !s.capabilities.satisfies(requestedModel, required) {
 			s.counters.capabilityRefused.Add(1)
+			failTrace(ctx, w, outcomeCapsPinned)
 			writeJSONError(w, http.StatusUnprocessableEntity, "requested model "+requestedModel+" does not support "+strings.Join(required, "+"))
 			return
 		}
 	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
+	planned := len(attemptsToTry)
 	if opPath != "" {
 		for i := range attemptsToTry {
 			attemptsToTry[i].Path = opPath
@@ -296,17 +312,30 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		attemptsToTry = s.applyCapabilityFilter(attemptsToTry, category, opPath, required)
 		if len(attemptsToTry) == 0 {
 			s.counters.capabilityRefused.Add(1)
+			failTrace(ctx, w, outcomeCapsNone)
 			writeJSONError(w, http.StatusServiceUnavailable, "No available model supports "+strings.Join(required, "+")+" for this request.")
 			return
 		}
 	}
+	afterCaps := len(attemptsToTry)
+	// Count budget exclusions before the generic filter runs, so the trace can
+	// say "out of allowance" instead of mislabelling it as an open circuit.
+	quotaExcluded := 0
+	for _, a := range attemptsToTry {
+		if s.quota.exhausted(a) {
+			quotaExcluded++
+		}
+	}
+	traceFrom(ctx).recordQuotaExclusions(quotaExcluded)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	// Reorder the breaker-eligible chain by reliability score (most reliable
 	// first) before truncating to MaxAttempts, so flaky models sink to the back.
-	availableModels = s.rankAttemptsByScore(availableModels)
+	availableModels = s.rankAttemptsByScoreTraced(traceFrom(ctx), availableModels)
 	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
 		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
 	}
+
+	traceFrom(ctx).recordChain(planned, afterCaps, len(availableModels), required)
 
 	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
 		slog.String("category", category),
@@ -336,6 +365,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 		}
+		failTrace(ctx, w, outcomeAllCooling)
 		writeJSONError(w, http.StatusServiceUnavailable, "All models are temporarily rate-limited or unhealthy. Cooling down before retry.")
 		return
 	}
@@ -344,6 +374,20 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
 	}
+	// Compression runs ONCE here, never inside the fallback loop: that loop
+	// re-serialises the body per attempt, so compressing there would multiply the
+	// cost by the number of models for no extra benefit.
+	//
+	// Any failure forwards the original body untouched — this is the only place
+	// the proxy alters what the user asked for, and a compression bug must
+	// degrade to "no compression", never to a worse answer.
+	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
+		if cstat.applied() {
+			reqBody = compressed
+		}
+		traceFrom(ctx).recordCompression(cstat)
+	}
+
 	err := s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody:       reqBody,
 		APIKey:            apiKey,
@@ -363,6 +407,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	statusCode, message := fallbackErrorResponse(err)
 	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed",
 		slog.String("profile", category), slog.String("reason", string(reason)))
+	failTrace(ctx, w, outcomeChainFailed)
 	writeJSONError(w, statusCode, message)
 }
 

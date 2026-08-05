@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cervantesh/calvoproxy/internal/dashboard"
 	"github.com/cervantesh/calvoproxy/internal/router"
 	"github.com/cervantesh/calvoproxy/internal/telemetry"
 	httpx "github.com/cervantesh/cervo-httpkit"
@@ -121,6 +122,41 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeJSON(w, routerService.Health())
 	}))
 
+	// /decisions/{id} is the ONE channel that carries the upstream reason text
+	// from a routing decision, which is why it sits behind the same admin gate as
+	// /health. The short X-Calvoproxy-Route header and the client opt-in both
+	// stop at status codes and a closed set of reason words.
+	mux.HandleFunc("/decisions/", admin(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/decisions/")
+		decision, ok := routerService.Decision(id)
+		if !ok {
+			// The ring is bounded, so an id that existed a thousand requests ago
+			// is simply gone. Not an error worth distinguishing.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": "no decision recorded for that id"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, decision)
+	}))
+
+	// The dashboard sits behind the SAME gate as /health because it shows exactly
+	// what that gate protects: model chains, upstream error text and the router's
+	// internal state. Since the channel is admin, decisions are served WITH their
+	// reason — the gate authorises, not the path.
+	mux.Handle("/dashboard", admin(dashboard.Handler()))
+	mux.HandleFunc("/dashboard/state", admin(func(w http.ResponseWriter, r *http.Request) {
+		health := routerService.Health()
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, map[string]any{
+			"health":    health,
+			"counters":  routerService.Counters(),
+			"quotas":    health.Quotas,
+			"decisions": routerService.RecentDecisions(dashboardDecisions),
+		})
+	}))
+
 	mux.HandleFunc("/health/model-policy", admin(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, routerService.ModelPolicyHealth())
@@ -184,6 +220,11 @@ func presentedToken(r *http.Request) string {
 // admin gates a handler behind PROXY_ADMIN_TOKEN. When the env var is unset the
 // endpoint is open (unchanged default); when set, callers must present it as a
 // Bearer token or X-Admin-Token header. The comparison is constant-time.
+// dashboardDecisions is how many recent routing decisions the dashboard shows.
+// Bounded on purpose: the ring holds up to PROXY_TRACE_RING entries, and
+// shipping all of them on every 2s poll would make the view its own load.
+const dashboardDecisions = 25
+
 func admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := os.Getenv("PROXY_ADMIN_TOKEN")
@@ -336,6 +377,10 @@ func main() {
 			os.Exit(runWhoami())
 		case "doctor":
 			os.Exit(runDoctor(os.Args[2:]))
+		case "chat":
+			os.Exit(runChat(os.Args[2:]))
+		case "setup":
+			os.Exit(runSetup(os.Args[2:]))
 		case "version", "--version", "-v":
 			fmt.Println("CalvoProxy " + version)
 			return
@@ -389,6 +434,9 @@ func main() {
 	scoreCtx, cancelScores := context.WithCancel(context.Background())
 	defer cancelScores()
 	routerService.StartScorePersistence(scoreCtx)
+	// Quotas persist on the same clock but in their own file: a budget's expiry
+	// is its reset time, which is nothing like the score store's max-age rule.
+	routerService.StartQuotaPersistence(scoreCtx)
 
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/cervantesh/calvoproxy/internal/router"
 )
 
 func TestAdminGate(t *testing.T) {
@@ -32,5 +34,27 @@ func TestAdminGate(t *testing.T) {
 	}
 	if code, called := call("sec"); code != 200 || !called {
 		t.Fatalf("expected pass with correct token: code=%d", code)
+	}
+}
+
+// /decisions/{id} is the admin-gated channel for a routing decision's detail
+// (spec §5). An id the ring no longer holds is a 404, not an error worth
+// distinguishing: the buffer is bounded on purpose.
+func TestDecisionsEndpointIsAdminGatedAnd404sUnknownIds(t *testing.T) {
+	svc := router.NewRouterService()
+	t.Cleanup(svc.Close)
+	mux := newMux(svc, nil)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/decisions/ffffffffffffffff", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown decision id should be 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	t.Setenv("PROXY_ADMIN_TOKEN", "secret")
+	gated := httptest.NewRecorder()
+	mux.ServeHTTP(gated, httptest.NewRequest(http.MethodGet, "/decisions/ffffffffffffffff", nil))
+	if gated.Code != http.StatusUnauthorized {
+		t.Errorf("decision detail carries upstream error text and must be gated, got %d", gated.Code)
 	}
 }

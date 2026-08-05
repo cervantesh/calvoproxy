@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>CalvoProxy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --fg: #e6e9ef; --dim: #8b93a7; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e2e5ea; --fg:#1a1d23; --dim:#666f80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.02em; }
+  .status { font-weight:600; }
+  .status.ok { color:var(--ok); } .status.degraded { color:var(--warn); } .status.unavailable { color:var(--bad); }
+  .meta { color:var(--dim); font-size:12px; }
+  main { padding:20px; display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 14px; white-space:nowrap; }
+  th { color:var(--dim); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+  tr + tr td { border-top:1px solid var(--line); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pill { padding:1px 7px; border-radius:99px; font-size:11px; border:1px solid var(--line); }
+  .pill.open { color:var(--bad); border-color:var(--bad); }
+  .pill.half-open { color:var(--warn); border-color:var(--warn); }
+  .pill.closed { color:var(--ok); border-color:var(--ok); }
+  .bar { height:4px; background:var(--line); border-radius:2px; overflow:hidden; min-width:60px; }
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  .bar > i.warn { background:var(--warn); } .bar > i.bad { background:var(--bad); }
+  .empty { padding:14px; color:var(--dim); font-size:13px; }
+  code { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CalvoProxy</h1>
+  <span id="status" class="status">…</span>
+  <span class="meta" id="meta"></span>
+  <span class="meta" id="updated" style="margin-left:auto"></span>
+</header>
+
+<main>
+  <section>
+    <h2>Circuitos y fiabilidad</h2>
+    <div class="scroll"><table id="circuits"><thead><tr>
+      <th>Modelo</th><th>Estado</th><th class="num">Score</th><th class="num">Éxitos</th><th class="num">Fallos</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="empty" id="circuits-empty" hidden>Sin datos todavía.</div>
+  </section>
+
+  <section>
+    <h2>Presupuesto de cuota</h2>
+    <div class="scroll"><table id="quotas"><thead><tr>
+      <th>Ámbito</th><th>Consumo</th><th class="num">Usado</th><th class="num">Límite</th><th>Origen</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="empty" id="quotas-empty" hidden>Sin límites configurados: el ledger cuenta pero no degrada.</div>
+  </section>
+
+  <section style="grid-column:1/-1">
+    <h2>Últimas decisiones</h2>
+    <div class="scroll"><table id="decisions"><thead><tr>
+      <th>Perfil</th><th>Servido</th><th class="num">Score</th><th class="num">Intento</th><th>Cadena</th><th>Antes falló</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="empty" id="decisions-empty" hidden>Ninguna petición todavía. Manda una y aparecerá aquí.</div>
+  </section>
+</main>
+
+<script>
+// Everything rendered here comes straight from /dashboard/state. This file
+// deliberately computes nothing: if a number needs deriving, it gets derived on
+// the router where a test can see it.
+const $ = (id) => document.getElementById(id);
+
+function shortModel(m) {
+  if (!m) return "";
+  const slash = m.indexOf("/");
+  return (slash >= 0 ? m.slice(slash + 1) : m).replace(/:free$/, "");
+}
+
+function fill(tableId, emptyId, rows, render) {
+  const body = $(tableId).querySelector("tbody");
+  body.replaceChildren();
+  const empty = $(emptyId);
+  if (!rows || rows.length === 0) {
+    $(tableId).hidden = true; empty.hidden = false; return;
+  }
+  $(tableId).hidden = false; empty.hidden = true;
+  for (const row of rows) body.appendChild(render(row));
+}
+
+function td(text, cls) {
+  const cell = document.createElement("td");
+  if (cls) cell.className = cls;
+  cell.textContent = text ?? "";
+  return cell;
+}
+
+function bar(fraction) {
+  const cell = document.createElement("td");
+  const outer = document.createElement("div");
+  outer.className = "bar";
+  const inner = document.createElement("i");
+  const pct = Math.max(0, Math.min(1, fraction)) * 100;
+  inner.style.width = pct + "%";
+  if (pct >= 90) inner.className = "bad"; else if (pct >= 70) inner.className = "warn";
+  outer.appendChild(inner); cell.appendChild(outer);
+  return cell;
+}
+
+function render(state) {
+  const health = state.health || {};
+  const st = $("status");
+  st.textContent = health.status || "?";
+  st.className = "status " + (health.status || "");
+  $("meta").textContent = [
+    (health.profiles || []).length + " perfiles",
+    (health.open_circuit_count || 0) + " circuitos abiertos",
+    health.configured_api_key ? "clave OK" : "sin clave",
+  ].join(" · ");
+  $("updated").textContent = new Date().toLocaleTimeString();
+
+  fill("circuits", "circuits-empty", health.circuits, (c) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(td(shortModel(c.model)));
+    const state = document.createElement("td");
+    const pill = document.createElement("span");
+    pill.className = "pill " + (c.state || "");
+    pill.textContent = c.state || "";
+    state.appendChild(pill); tr.appendChild(state);
+    tr.appendChild(td((c.score ?? 0).toFixed(2), "num"));
+    tr.appendChild(td(c.successes ?? 0, "num"));
+    tr.appendChild(td(c.consecutive_failures ?? 0, "num"));
+    return tr;
+  });
+
+  fill("quotas", "quotas-empty", (state.quotas || []).filter((q) => q.limit > 0), (q) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(td(q.scope));
+    tr.appendChild(bar(q.limit ? q.used / q.limit : 0));
+    tr.appendChild(td(q.used ?? 0, "num"));
+    tr.appendChild(td(q.limit || "—", "num"));
+    tr.appendChild(td(q.source || ""));
+    return tr;
+  });
+
+  fill("decisions", "decisions-empty", state.decisions, (d) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(td(d.profile));
+    tr.appendChild(td(d.served ? shortModel(d.served.model) : (d.outcome || "—")));
+    tr.appendChild(td(d.served ? d.served.score.toFixed(2) : "", "num"));
+    tr.appendChild(td(d.served ? d.served.index : "", "num"));
+    tr.appendChild(td(d.planned + "→" + d.eligible));
+    const failed = (d.attempts || [])
+      .filter((a) => !d.served || a.index !== d.served.index)
+      .map((a) => shortModel(a.model) + " (" + (a.status || a.kind || "?") + ")")
+      .join(", ");
+    tr.appendChild(td(failed));
+    return tr;
+  });
+}
+
+async function tick() {
+  try {
+    const res = await fetch("state", { headers: { "Accept": "application/json" } });
+    if (res.ok) render(await res.json());
+    else $("status").textContent = "HTTP " + res.status;
+  } catch (err) {
+    $("status").textContent = "sin conexión";
+  }
+}
+
+tick();
+// Polling, not websockets: for a local single-user tool, a websocket hub is a
+// second streaming path inside the binary just to paint a table.
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

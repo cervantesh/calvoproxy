@@ -282,6 +282,84 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
+### Compression (off by default)
+
+Agent histories are dominated by tool results — one `cat` of a large file travels
+again on every later turn. Two deterministic engines can shrink that:
+
+```bash
+PROXY_COMPRESS_DRYRUN=true PROXY_COMPRESS_PROFILES=coding calvoproxy
+```
+
+`toolcap` clips oversized `role: tool` results keeping both ends with a marker in
+between, and never touches one that is valid JSON. `dedup` replaces repeated
+copies of the same block inside one request with a reference, always leaving the
+last copy whole.
+
+This is the only feature that alters your request, so it is **off unless you name
+a profile**, `PROXY_COMPRESS_DRYRUN=true` measures without applying, and every
+turn reports what it saved in the `cmp=` field of `X-Calvoproxy-Route`. Start
+with the dry run and read the numbers before trusting it.
+
+### Dashboard (`/dashboard`)
+
+Open `http://127.0.0.1:8080/dashboard` for a live read-only view: circuits and
+their reliability scores, quota windows with how much is left, and the last 25
+routing decisions — which model served, at which attempt, and what failed before
+it. Refreshes every 2 seconds.
+
+Behind the same `PROXY_ADMIN_TOKEN` gate as `/health`, since it shows the same
+internals. Embedded in the binary: no Node, no build step, works offline.
+
+### Wiring a client (`calvoproxy setup`)
+
+```bash
+calvoproxy setup --list                   # what's installed on this machine
+calvoproxy setup claude-code              # show what would change — writes nothing
+calvoproxy setup claude-code --apply      # write it, with a backup
+calvoproxy setup claude-code --revert     # undo, byte for byte
+```
+
+Supported: `hermes`, `claude-code`, `codex`.
+
+Editing another program's config is the one destructive thing this tool does, so
+**`--check` is the default and never touches disk**, every write is preceded by a
+byte-for-byte backup, and formats that carry comments are patched as a
+marker-delimited block rather than round-tripped through a parser. `hermes` is
+read-only by design — its YAML is read with a line-wise heuristic, and a
+heuristic that reads should not write, so it prints the block for you to paste.
+
+None of these tools reload their configuration while running: restart them after
+applying, or nothing changes.
+
+### Try a chain without wiring anything (`calvoproxy chat`)
+
+A REPL that talks to the proxy exactly as an agent does — profile route, full
+history, SSE — and prints the routing decision in words after each turn:
+
+```bash
+calvoproxy chat --profile coding
+```
+
+```
+[coding] > refactor this handler
+
+…the model's answer streams here…
+
+· coding · nemotron-3-super-120b-a12b · score 0.71 · intento 2/3 · 1 excluido por breaker
+  antes falló: gpt-oss-20b (429)
+  3.4s
+```
+
+`/profile <name>` switches chains mid-session, `/reset` clears the history,
+`/trace` toggles the full-decision opt-in, `/quit` (or Ctrl-D) leaves. An
+upstream error prints and the REPL keeps going — a 503 from an exhausted chain
+is information, not a reason to close.
+
+Useful when you want to know *which* model a profile really reaches under
+current breaker/score state, without touching your client's config. Flags:
+`--url` (defaults to the configured local proxy) and `--no-stream`.
+
 ### On-demand operation
 
 Set `PROXY_IDLE_TIMEOUT` (e.g. `20m`) and the proxy exits itself once no proxy
@@ -473,6 +551,11 @@ serving. (Compose maps only `8080`; publish `9090` yourself if you need gRPC.)
 ### HTTP endpoints
 
 - `GET /health` — service status, active policy hashes, configured profiles.
+- `GET /decisions/{id}` — why a given request was routed the way it was: the
+  models excluded and why, the attempts that failed and with what upstream
+  status, the score the chain was ordered by. Admin-gated, because it carries
+  upstream error text. The id comes back on every response as
+  `X-Calvoproxy-Decision-Id`; the summary is in `X-Calvoproxy-Route`.
 - `GET /version` — running build + whether a newer release is available.
 - `POST /v1/chat/completions` — OpenAI-compatible chat completions.
 - Per-profile routes: `/v1/{simple,coding,reasoning,agent,creative,vision}/chat/completions`.

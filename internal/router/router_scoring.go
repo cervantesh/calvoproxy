@@ -228,13 +228,33 @@ func (s *RouterService) scoreForAttempt(attempt modelAttempt, env scoreEnv) floa
 // policy-defined order (a fresh chain is tried exactly as configured). Returns
 // the input unchanged when scoring is disabled or there's nothing to reorder.
 func (s *RouterService) rankAttemptsByScore(attempts []modelAttempt) []modelAttempt {
+	return s.rankAttemptsByScoreTraced(nil, attempts)
+}
+
+// rankAttemptsByScoreTraced is rankAttemptsByScore plus the trace annotation.
+// The scores are captured here rather than recomputed by the caller: this is the
+// one place they already exist, and a second pass would double the locking on
+// the hot path.
+func (s *RouterService) rankAttemptsByScoreTraced(trace *routeTrace, attempts []modelAttempt) []modelAttempt {
 	if !scoringEnabled() || len(attempts) < 2 {
 		return attempts
 	}
 	env := s.scoreEnv()
 	score := make([]float64, len(attempts))
 	for i, a := range attempts {
-		score[i] = s.scoreForAttempt(a, env)
+		// Soft quota degradation lives HERE and nowhere else: multiplying the
+		// rank key sinks a model whose window is nearly spent without touching
+		// the persisted score. The score measures reliability, not budget, and
+		// contaminating it would poison its two-clock decay — a model would look
+		// broken because it was popular.
+		score[i] = s.scoreForAttempt(a, env) * s.quota.headroom(a)
+	}
+	if trace != nil {
+		models := make([]string, len(attempts))
+		for i, a := range attempts {
+			models[i] = a.Model
+		}
+		trace.recordScores(models, score)
 	}
 	idx := make([]int, len(attempts))
 	for i := range idx {

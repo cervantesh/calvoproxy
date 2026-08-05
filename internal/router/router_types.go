@@ -70,6 +70,7 @@ type ProxyHealth struct {
 	PolicyVocabHash    string            `json:"policy_vocabulary_hash"`
 	ModelPolicy        ModelPolicyHealth `json:"model_policy"`
 	Circuits           []BreakerSnapshot `json:"circuits"`
+	Quotas             []QuotaSnapshot   `json:"quotas,omitempty"`
 	Timestamp          time.Time         `json:"timestamp"`
 }
 
@@ -122,8 +123,19 @@ type RouterService struct {
 	// final write. See router_scoring_store.go.
 	scoresDirty   atomic.Bool
 	persistScores atomic.Bool
+	// quota is the predictive counterpart to the breaker: it knows how much of
+	// each window is left and degrades before it runs out. Keyed by bare model
+	// plus an account scope — never by breakerKey, which carries the profile.
+	// Lock order is breakerMu -> quota.mu; the ledger never calls back here.
+	quota         *quotaLedger
+	persistQuotas atomic.Bool
 	admission     *admissionControl
 	capabilities  *capabilityIndex
+	// traces is the bounded, in-memory decision ring behind /decisions/{id}.
+	// Built lazily so a service assembled as a struct literal (as the tests do)
+	// gets one without every construction site knowing about it.
+	traceRingOnce sync.Once
+	traces        *traceRing
 	counters      routerCounters
 	cancelRefresh context.CancelFunc
 	// AmbientKeyPresent, when set by the binary, reports whether an ambient

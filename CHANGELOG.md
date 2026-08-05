@@ -11,6 +11,217 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-05
+
+Six features that came out of reviewing OmniRoute and asking what was worth
+taking. The through-line is **explaining and predicting** rather than only
+reacting: the response now says why a model answered, the proxy knows how much
+of its budget is left before it runs out, and there is finally somewhere to look
+at all of it.
+
+Everything here is additive. Nothing changes an existing default, and the two
+features that could alter behaviour — compression and hard quota exclusion —
+ship **off**.
+
+### Added
+- **Request compression, off by default.** Agent workloads resend the whole
+  history every turn, and what inflates it most is tool results: one `cat` of a
+  large file travels again on every subsequent turn, forever.
+
+  Two engines, both pure Go and deterministic. **`toolcap`** clips oversized
+  `role: tool` results keeping **both ends** with an explicit marker between —
+  both, because a tool result can carry its point at the start (a file) or at the
+  end (a command error), and keeping one end picks wrong half the time. It never
+  touches a result that parses as valid JSON: truncating JSON yields invalid
+  JSON, and a corrupt result is worse than a long one. **`dedup`** replaces
+  repeated copies of an identical block *within the same request* with a
+  reference, always leaving the **last** occurrence whole — that is the copy the
+  model is looking at.
+
+  This is the only place the proxy alters what the user asked for, so it is the
+  only one that can degrade an answer silently, and everything about it is
+  subordinate to that: **off unless `PROXY_COMPRESS_PROFILES` names a profile**,
+  a `PROXY_COMPRESS_DRYRUN` mode that measures the saving without applying it, a
+  panic guard that forwards the original body, and the saving reported in the
+  routing trace `cmp=` field so a turn can be audited afterwards.
+
+  Two engines that did NOT survive the design are worth recording. Cross-turn
+  session dedup: the upstream is stateless, so not resending context does not
+  compress it — it makes the model stop seeing it. That is amnesia. Semantic
+  prose pruning: "semantic, deterministic, no ML" is a practical contradiction,
+  since preserving code byte-for-byte while pruning text means delimiting code in
+  arbitrary Markdown, and one unclosed fence turns pruning into corruption.
+
+- **A local dashboard at `/dashboard` — one place to see what the proxy is doing.**
+  The proxy already computed everything interesting: scores, circuits, quota
+  budgets, routing decisions. It just exposed them in three places you had to
+  read separately — `/health`, `/metrics`, and `/decisions/{id}`, that last one
+  only if you already knew the id. There was nowhere to answer "what is happening
+  right now?".
+
+  Circuits with their state and score, quota windows with how much is left, and
+  the last 25 routing decisions with which model served, at which attempt, and
+  what failed before it. Refreshes every 2 seconds.
+
+  It is a **view and nothing more**: it computes no aggregate of its own, so
+  anything it shows already exists as a router snapshot — the same discipline
+  `/metrics` follows. Embedded with `go:embed`, plain HTML and JS, **no Node, no
+  build step, no framework**, and a `default-src 'self'` policy so that if a
+  future edit reaches for a CDN it fails loudly in the browser instead of quietly
+  working on the developer's machine and breaking on an offline install.
+
+  Behind the same `PROXY_ADMIN_TOKEN` gate as `/health`, because it shows exactly
+  what that gate protects. Polling rather than websockets: for a local
+  single-user tool, a websocket hub is a second streaming path inside the binary
+  just to paint a table.
+
+- **Quota budgets: the proxy now degrades *before* the window runs out.**
+  Free-tier limits were discovered by hitting them — a 429 arrived, the circuit
+  opened, and the request was already spent. The breaker is reactive by design
+  and stays that way; what was missing is the predictive half.
+
+  A new ledger counts requests per **bare model** and per **account**, and lowers
+  a model's rank as its window fills. Two scopes, not one, because the free
+  tier's dominant limit is per account. And the bare model, deliberately **not**
+  `breakerKey`: that key is `profile:model`, which is right for reliability — the
+  same slug under `coding` and `bulk` sees different load — and fatal for quota,
+  where two partial counters of the same OpenRouter pocket would each see a
+  fraction of the traffic and never detect exhaustion.
+
+  Degradation is **soft by default**: `rankAttemptsByScore` orders by
+  `score × headroom`, which sinks a nearly-spent model without touching the
+  persisted score. The score measures reliability, not budget, and contaminating
+  it would poison its two-clock decay — a model would come back looking broken
+  because it had been popular. Hard exclusion is opt-in via
+  `PROXY_QUOTA_HARD_SKIP`, because it widens the "all models cooling down"
+  surface on the strength of limits that may only have been learned.
+
+  Limits come from `PROXY_QUOTA_LIMITS_JSON`, from upstream `X-RateLimit-*`
+  headers, or from a 429's `Retry-After` — and **none of them invents a
+  ceiling**. A 429 says "not now", not "how many fit", so it sets the reset time
+  and leaves the limit unknown. With no limit known there is simply no gate: the
+  ledger counts and nothing degrades. Pretending to know would be worse than not
+  knowing.
+
+  State lives in its own `quotas.json`, not inside `scores.json`: a budget's
+  expiry is its reset time, which has nothing to do with the score store's
+  max-age rule, and a window that rolled while the process was down comes back at
+  zero rather than being discarded — the upstream's day does not restart because
+  the proxy did.
+
+  The routing trace gained `q=`, kept separate from `brk=`. "Broken right now"
+  and "out of allowance until midnight" call for different actions, and folding
+  them together is exactly the ambiguity the trace exists to remove.
+
+- **`calvoproxy setup <tool>` — wires a coding client to the proxy, and can undo it.**
+  `doctor` knew how to *check* Hermes, but only check: when it failed it printed
+  the block and left you to paste it, and it knew about nothing else. The same
+  shape — find the install, know the right block, prove it took effect — applies
+  to Claude Code and Codex, the other two clients this proxy serves daily.
+
+  ```bash
+  calvoproxy setup --list            # what's installed here
+  calvoproxy setup claude-code       # show what would change (writes nothing)
+  calvoproxy setup claude-code --apply
+  calvoproxy setup claude-code --revert
+  ```
+
+  Writing into another program's configuration is the only destructive act in
+  this feature, so three rules are absolute. **`--check` is the default and never
+  touches disk** — only `--apply` writes. **Every write is preceded by a
+  byte-for-byte backup** that `--revert` restores. And **no parser round-trips on
+  formats that carry comments**: the Codex TOML is patched as a marker-delimited
+  block with everything outside it copied verbatim, because there is no vendored
+  TOML parser and a round-trip through one would silently eat the user's
+  comments. Only Claude Code's JSON — which has none — is decoded and re-encoded,
+  and even then every other key and env var is merged, never replaced.
+
+  Hermes stays read-only on purpose, and the interface says so rather than
+  hiding it: its YAML is inspected with a line-wise heuristic, and a heuristic
+  that reads must not write. `--apply` prints the block for you to paste.
+
+- **`calvoproxy chat` — a REPL for trying a chain without wiring anything.**
+  Testing a profile meant either standing up Hermes or hand-writing `curl`, and
+  `curl` leaves you decoding `v1;p=coding;s=0.83;a=2;prev=…` by eye. The new
+  subcommand talks to the proxy exactly as an agent does — profile route, full
+  history, SSE — and prints the routing decision in words after every turn:
+
+  ```
+  · coding · nemotron-3-super-120b-a12b · score 0.71 · intento 2/3 · 1 excluido por breaker
+    antes falló: gpt-oss-20b (429)
+  ```
+
+  `/profile <n>` switches chains mid-session, `/reset` clears the history,
+  `/trace` toggles the full-decision opt-in, `/quit` (or Ctrl-D) leaves. An
+  upstream error is printed and the REPL keeps going: a 503 from an exhausted
+  chain is information, and closing on it would hide the next turn — exactly
+  when you want to see whether the chain recovered.
+
+  It is a client: it does not import the router and reimplements no part of the
+  chain, so everything it shows came over the wire from a running proxy. That
+  also makes it the first real consumer of the routing trace — if the trace
+  cannot render as "served by X, skipped Y", the trace is wrong, and it is far
+  cheaper to learn that here than after Hermes starts parsing it.
+
+- **The response now says *why* this model answered, not only which one.**
+  `X-Calvoproxy-Model` has told callers which model served since early on,
+  because a chain that degrades silently caused a real incident — a design
+  review answered by the third model and believed to be the first. It still
+  could not answer the next question anyone asks: *why that one?* Which models
+  were skipped for an open circuit, which failed first and with what code, what
+  score the chain was ordered by. That lived only in a log line the caller never
+  sees.
+
+  A new `X-Calvoproxy-Route` carries it in one compact, versioned field, capped
+  at 512 bytes:
+
+  ```
+  v1;p=coding;s=0.83;a=2;n=4/4/3;prev=gpt-oss-20b:429,gemma-4-31b:500;brk=1;cmp=off
+  ```
+
+  It reads: profile `coding`, served with score 0.83 on the second attempt, of
+  four planned models three were eligible, one excluded by the breaker, and two
+  failed first — one rate-limited, one with a server error. `cmp=` is always
+  present so "not compressed" never looks like a missing field.
+
+  The four exits that never reach a model — pinned model lacking a capability,
+  no capable model anywhere, everything cooling down, chain exhausted — emit the
+  same header with `o=<outcome>`. An HTTP 503 cannot distinguish "everything is
+  in cooldown" from "nothing here can do vision"; now it does not have to.
+
+  `prev=` reports the **upstream's** status, not the proxy's remapped one: the
+  retry classifier turns a 500 into a 502, and a trace that reported 502 would
+  mislead precisely the person trying to find out what OpenRouter said.
+
+  Only status codes and a closed set of reason words travel in the header —
+  never upstream error text. Streaming included: the header commits before the
+  first byte, so a streamed answer explains itself too. gRPC inherits it for
+  free. `PROXY_ROUTE_TRACE=off` removes the whole thing, and off means no trace
+  is allocated at all, not a blanked header.
+
+- **`GET /decisions/{id}` for the detail the header has no room for.** Every
+  response now carries `X-Calvoproxy-Decision-Id`, and the last 200 decisions
+  (`PROXY_TRACE_RING`) are kept in memory for lookup: the upstream error text
+  behind each failed attempt, and the stream outcome, which is only known after
+  the headers are already on the wire.
+
+  Admin-gated, like `/health`, because that error text is the one part of a
+  trace that comes from outside. A client that wants structure rather than the
+  compact form can ask for it per request with `X-Calvoproxy-Trace: full` and
+  gets the same JSON *without* the upstream text — that channel has no gate in
+  front of it. The ring is never written to disk: these records sit next to
+  conversation content, and `/metrics` remains the durable series.
+
+### Fixed
+- **A header the upstream echoed could appear twice.** `streamProxyResponse`
+  copies upstream headers with `Add`, and it runs *after* the proxy sets its
+  own, so an upstream emitting `X-Calvoproxy-Route` would leave the client with
+  two values — the second one upstream-controlled text presented as this proxy's
+  routing decision. The trace headers are now excluded from that copy.
+
+  `X-Calvoproxy-Model`, `-Profile` and `-Attempt` have the same exposure and are
+  not covered by this change.
+
 ## [0.10.1] — 2026-08-04
 
 ### Fixed
@@ -483,6 +694,7 @@ change to the running proxy.
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
 [Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
 [0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
 [0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0
 [0.9.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.2
