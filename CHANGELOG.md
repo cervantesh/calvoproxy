@@ -12,6 +12,29 @@ out — see v0.7.1.
 ## [Unreleased]
 
 ### Added
+- **`calvoproxy chat` — a REPL for trying a chain without wiring anything.**
+  Testing a profile meant either standing up Hermes or hand-writing `curl`, and
+  `curl` leaves you decoding `v1;p=coding;s=0.83;a=2;prev=…` by eye. The new
+  subcommand talks to the proxy exactly as an agent does — profile route, full
+  history, SSE — and prints the routing decision in words after every turn:
+
+  ```
+  · coding · nemotron-3-super-120b-a12b · score 0.71 · intento 2/3 · 1 excluido por breaker
+    antes falló: gpt-oss-20b (429)
+  ```
+
+  `/profile <n>` switches chains mid-session, `/reset` clears the history,
+  `/trace` toggles the full-decision opt-in, `/quit` (or Ctrl-D) leaves. An
+  upstream error is printed and the REPL keeps going: a 503 from an exhausted
+  chain is information, and closing on it would hide the next turn — exactly
+  when you want to see whether the chain recovered.
+
+  It is a client: it does not import the router and reimplements no part of the
+  chain, so everything it shows came over the wire from a running proxy. That
+  also makes it the first real consumer of the routing trace — if the trace
+  cannot render as "served by X, skipped Y", the trace is wrong, and it is far
+  cheaper to learn that here than after Hermes starts parsing it.
+
 - **The response now says *why* this model answered, not only which one.**
   `X-Calvoproxy-Model` has told callers which model served since early on,
   because a chain that degrades silently caused a real incident — a design
