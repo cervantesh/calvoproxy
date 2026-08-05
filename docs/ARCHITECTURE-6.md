@@ -1,238 +1,242 @@
-# CalvoProxy — Arquitectura de alto nivel para las 6 capacidades
+# CalvoProxy — High-level architecture for the six capabilities
 
-Síntesis de un panel de 3 arquitectos independientes (2 rondas: diseño ciego + arbitraje
-cruzado), con las afirmaciones factuales verificadas contra el código.
+Synthesis of a panel of three independent architects (two rounds: blind design, then
+cross-arbitration), with every factual claim verified against the code.
 
-Nomenclatura: **P1** header de decisión · **P2** cuotas · **P3** compresión ·
-**P4** `setup-<tool>` · **P5** dashboard · **P6** `chat`.
+Naming: **P1** decision header · **P2** quotas · **P3** compression · **P4** `setup-<tool>` ·
+**P5** dashboard · **P6** `chat`.
 
 ---
 
-## 0. La forma del sistema en una frase
+## 0. The shape of the system in one sentence
 
-Una **única estructura de traza por request**, poseída por la goroutine del request y completa
-antes del primer byte de respuesta, es la fontanería de la que cuelgan P1, P5, P6 y la
-*medición* de P2 y P3. La **cuota (P2) no vive ahí**: es estado durable compartido entre
-requests, hermano del scoring, con su propio fichero y su propia clave. P4 es tooling y no
-toca el router.
+A **single per-request trace structure**, owned by the request's goroutine and complete before
+the first byte of the response, is the plumbing that P1, P5, P6 and the *measurement* of P2 and
+P3 all hang from. **Quota (P2) does not live there**: it is durable state shared across
+requests, a sibling of scoring, with its own file and its own key. P4 is tooling and does not
+touch the router.
 
 ```
-dispatchChain                     ← crea la traza, la mete en el ctx
-  ├─ applyCapabilityFilter        ← anota exclusiones (capability)
-  ├─ filterAvailableAttempts      ← anota exclusiones (breaker) + consulta quotaLedger
-  ├─ rankAttemptsByScore          ← anota orden + factor de headroom de cuota (P2 soft)
-  ├─ [P3] compresión, UNA vez     ← anota compressionStats
+dispatchChain                     ← creates the trace, puts it in the ctx
+  ├─ applyCapabilityFilter        ← annotates exclusions (capability)
+  ├─ filterAvailableAttempts      ← annotates exclusions (breaker) + consults quotaLedger
+  ├─ rankAttemptsByScore          ← annotates order + quota headroom factor (P2 soft)
+  ├─ [P3] compression, ONCE       ← annotates compressionStats
   └─ executeFallbacks
-       └─ Execute (bucle)         ← anota cada attemptError
+       └─ Execute (loop)          ← annotates each attemptError
             └─ ExecuteAttempt
                  └─ executeAttempt
-                      ├─ 429 → parseRetryAfter → recordFailure   ← P2 ingiere consumo
-                      └─ setServedModelHeaders                   ← P1 materializa aquí
+                      ├─ 429 → parseRetryAfter → recordFailure   ← P2 ingests consumption
+                      └─ setServedModelHeaders                   ← P1 materialises here
 ```
 
 ---
 
-## 1. Decisiones cerradas
+## 1. Settled decisions
 
-### D1 — La traza viaja en el `context.Context`. Verificado.
+### D1 — The trace travels in the `context.Context`. Verified.
 
-`setServedModelHeaders` se invoca en `router_upstream.go:209` (streaming) y `:259`
-(no-streaming), ambas **dentro de** `executeAttempt` (que abarca `:16`–`:263`).
-`AttemptExecutor.ExecuteAttempt` (`router_types.go:157`) **no recibe `FallbackExecution`**.
-Por tanto un campo en ese struct no alcanza el punto donde la traza se materializa, ni el
-`Retry-After` del 429 (`:138`), ni la latencia de primer token (`:204`), ni el desenlace del
-stream (`:213-229`). El `ctx` sí llega a todos.
+`setServedModelHeaders` is called at `router_upstream.go:209` (streaming) and `:259`
+(non-streaming), both **inside** `executeAttempt` (which spans `:16`–`:263`).
+`AttemptExecutor.ExecuteAttempt` (`router_types.go:157`) **does not receive
+`FallbackExecution`**. So a field on that struct cannot reach the point where the trace is
+materialised, nor the 429's `Retry-After` (`:138`), nor the first-token latency (`:204`), nor
+the stream outcome (`:213-229`). The `ctx` reaches all of them.
 
-Queda desmentida la razón original para preferir el `ctx` ("añadir un campo rompe las firmas"):
-**es falsa** — el struct va por valor, las firmas mencionan el tipo y no sus campos, y los
-nueve literales del repo (`router_fallback_test.go:42,73,103`;
-`router_chain_failure_test.go:108,135,159,174,189`; `router.go:347`) son con claves. Pero la
-conclusión sobrevive por un motivo mejor: **alcance**, no compatibilidad.
+The original reason for preferring the `ctx` ("adding a field breaks the signatures") is
+**false**: the struct is passed by value, signatures name the type and not its fields, and the
+nine literals in the repo (`router_fallback_test.go:42,73,103`;
+`router_chain_failure_test.go:108,135,159,174,189`; `router.go:347`) all use keys. But the
+conclusion survives for a better reason: **reach**, not compatibility.
 
-**Decisión:** puntero en el `ctx` con clave tipada, y *nada* de duplicarlo también como campo
-de `FallbackExecution` — dos fuentes del mismo puntero es un olor, no legibilidad. Un accesor
-`traceFrom(ctx)` que devuelve `nil` fuera de banda, con todos los `record*` como no-op sobre
-`nil` (el patrón que ya usa `s.capabilities != nil`, `router.go:618`).
+**Decision:** a pointer in the `ctx` under a typed key, and *no* duplicating it as a field of
+`FallbackExecution` as well — two sources for the same pointer is a smell, not readability. An
+accessor `traceFrom(ctx)` returning `nil` out of band, with every `record*` a no-op on `nil`
+(the pattern `s.capabilities != nil` already uses, `router.go:618`).
 
-**Invariantes a escribir en comentario y proteger con `-race`:** un solo escritor (la goroutine
-del request); `streamCopy` (`router_stream.go:97`) y `awaitFirstStreamEvent` (`:236`) no la
-tocan; al ring de P5 se copia una versión compactada al cerrar, nunca se publica el puntero.
+**Invariants to write in a comment and protect with `-race`:** a single writer (the request's
+goroutine); `streamCopy` (`router_stream.go:97`) and `awaitFirstStreamEvent` (`:236`) do not
+touch it; a compacted copy goes to P5's ring on close, and the live pointer is never published.
 
-### D2 — Header corto por defecto, JSON completo bajo opt-in, `/decisions/{id}` como tercera vía.
+### D2 — Short header by default, full JSON on opt-in, `/decisions/{id}` as a third channel.
 
-La forma corta versionada (`v1;p=coding;s=0.83;a=2;prev=…;caps=tools;cmp=-3.1k`, tope duro
-512 B) es el contrato estable. El JSON completo solo si el cliente manda
-`X-Calvoproxy-Trace: full`. Y `GET /decisions/{id}` sobre el ring, con el mismo gate `admin`
-que `/health`.
+The versioned short form (`v1;p=coding;s=0.83;a=2;prev=…;caps=tools;cmp=-3.1k`, hard cap
+512 B) is the stable contract. Full JSON only if the client sends `X-Calvoproxy-Trace: full`.
+And `GET /decisions/{id}` over the ring, behind the same `admin` gate as `/health`.
 
-El motivo real no es el tamaño (en un binario loopback de un salto, 1–2 KiB no rompe nada, y
-gRPC los hereda gratis porque `cmd/grpc.go:100` copia `recorder.Header()`): es que la traza
-lleva `LastFailureReason` de otros modelos, que es cuerpo de error upstream truncado
-(`truncateReason`, `router_breaker.go:559`). Emitir eso por defecto en toda respuesta es
-filtración, no verbosidad. Sanitizar siempre.
+The real reason is not size (in a single-hop loopback binary, 1–2 KiB breaks nothing, and gRPC
+inherits it for free because `cmd/grpc.go:100` copies `recorder.Header()`): it is that the
+trace carries other models' `LastFailureReason`, which is truncated upstream error body
+(`truncateReason`, `router_breaker.go:559`). Emitting that by default on every response is
+leakage, not verbosity. Always sanitise.
 
-`cmp=` debe estar **siempre presente**, incluso como `cmp=off`, para que "no se comprimió" sea
-distinguible de "el campo no existe".
+`cmp=` must be **always present**, even as `cmp=off`, so that "did not compress" stays
+distinguishable from "the field does not exist".
 
-### D3 — `quotas.json` separado. No extender `scores.json`.
+### D3 — A separate `quotas.json`. Do not extend `scores.json`.
 
-`LoadScores` descarta el fichero entero si la versión no coincide
-(`router_scoring_store.go:232`) o si supera `maxAge` (`:237`), y `restoreScores` filtra por
-`knownBreakerKeys()` (`:133`). Meter cuotas dentro exige **tres excepciones a esas tres
-reglas** en el mismo loader, más un cuarto problema: `snapshotScores` toma `breakerMu`
-(`:94`), lo que acoplaría el flush de cuotas al lock del breaker. Y el bump de versión tira
-los scores de todo el parque, con v1 y v2 coexistiendo durante el rollout.
+`LoadScores` discards the whole file if the version does not match
+(`router_scoring_store.go:232`) or if it exceeds `maxAge` (`:237`), and `restoreScores` filters
+by `knownBreakerKeys()` (`:133`). Putting quotas in there requires **three exceptions to those
+three rules** in the same loader, plus a fourth problem: `snapshotScores` takes `breakerMu`
+(`:94`), which would couple the quota flush to the breaker's lock. And the version bump
+discards every score in the fleet, with v1 and v2 coexisting during rollout.
 
-**Lo que sí se comparte:** extraer el helper de escritura atómica temp+rename de
-`writeScoreFile` (`:175`, 0600/0700) y el patrón dirty-flag + flusher de 30 s a un
-`statestore` común.
+**What is shared:** extracting the atomic temp+rename helper from `writeScoreFile` (`:175`,
+0600/0700) and the dirty-flag + 30 s flusher pattern into a common `statestore`.
 
-**Ciclo de vida propio:** la caducidad de una cuota es su `ResetAt`, no `defaultScoreMaxAge`.
-Al cargar: si `ResetAt` ya pasó, ventana a cero; si no, se restaura `Used`.
+**Its own lifecycle:** a quota's expiry is its `ResetAt`, not `defaultScoreMaxAge`. On load: if
+`ResetAt` has passed, the window goes to zero; if not, `Used` is restored.
 
-### D4 — Cuota indexada por `model:<slug>` + un ámbito `account`. Unánime tras arbitraje.
+### D4 — Quota keyed by `model:<slug>` plus an `account` scope. Unanimous after arbitration.
 
-`breakerKey` es `profile + ":" + model` (`router_breaker.go:189`), y eso es **correcto para
-fiabilidad** — el mismo slug en `coding` y en `agent` trae distinto perfil, distinto
-`decision.Timeout` (`router.go:344`) y distinto cuerpo, así que merece circuitos y scores
-independientes.
+`breakerKey` is `profile + ":" + model` (`router_breaker.go:189`), and that is **right for
+reliability** — the same slug under `coding` and `agent` brings a different profile, a different
+`decision.Timeout` (`router.go:344`) and a different body, so it deserves independent circuits
+and scores.
 
-Es **fatal para cuota**: el cupo de OpenRouter es por cuenta+modelo. Con el mismo slug en
-varios perfiles de `model-policy.json` (que es exactamente el caso hoy), `coding:x` y
-`agent:x` llevarían contadores parciales del mismo bolsillo y el gate no se dispararía nunca a
-tiempo. El ámbito `account` es obligatorio desde el día uno — es el límite dominante del free
-tier y añadirlo después invalida el fichero persistido.
+It is **fatal for quota**: OpenRouter's allowance is per account and per model. With the same
+slug across several profiles in `model-policy.json` (which is exactly the case today),
+`coding:x` and `agent:x` would carry partial counters of the same pocket and the gate would
+never fire in time. The `account` scope is mandatory from day one — it is the free tier's
+dominant limit, and adding it later invalidates the persisted file.
 
-### D5 — `quotaLedger` con estado propio; se reutilizan los *choke points*, no el estado.
+### D5 — `quotaLedger` with its own state; reuse the *choke points*, not the state.
 
-Escribir `state.OpenUntil = windowReset` para heredar el filtrado del breaker está desmentido
-por tres sitios del código:
+Writing `state.OpenUntil = windowReset` to inherit the breaker's filtering is contradicted by
+three places in the code:
 
-1. `recordSuccess` (`router_breaker.go:180`) y `resolveProbe` (`:160`) ponen
-   `OpenUntil = time.Time{}` incondicionalmente. Un request **en vuelo** que termine en 200
-   borraría en silencio la exclusión por cuota recién puesta.
-2. `recordFailure` resetea `ConsecutiveFailures` y `OpenUntil` cuando la ventana expiró
-   (`:111-114`): una ventana diaria secuestraría la máquina half-open 24 h.
-3. `Health()` clasifica todo `OpenUntil` futuro como `"open"` y degrada `Status` (`:302` y ss.):
-   una cuota agotada se reportaría como circuito roto — justo el diagnóstico confuso que P1
-   existe para eliminar.
+1. `recordSuccess` (`router_breaker.go:180`) and `resolveProbe` (`:160`) set
+   `OpenUntil = time.Time{}` unconditionally. A request **in flight** that ends in a 200 would
+   silently erase the quota exclusion just placed.
+2. `recordFailure` resets `ConsecutiveFailures` and `OpenUntil` once the window expires
+   (`:111-114`): a daily window would hold the half-open machinery hostage for 24 h.
+3. `Health()` classifies any future `OpenUntil` as `"open"` and degrades `Status` (`:302` ff.):
+   an exhausted quota would be reported as a broken circuit — precisely the confusing diagnosis
+   P1 exists to eliminate.
 
-**Diseño:** ledger con su propio mutex, consultado desde `isModelAvailableLocked` (`:37`) y
-`retryAfterForAttempts` (`:223`) *además* del breaker — así se hereda igualmente el
-`Retry-After` del 503 (`router.go:332`), tomando el mínimo de ambos.
-**Orden de locks obligatorio: `breakerMu → quotaMu`**, porque `isModelAvailableLocked` se llama
-desde `Health()` con `breakerMu` ya tomado (`:340`); el ledger no puede llamar a nada que tome
+**Design:** a ledger with its own mutex, consulted from `isModelAvailableLocked` (`:37`) and
+`retryAfterForAttempts` (`:223`) *in addition to* the breaker — that way the 503's `Retry-After`
+(`router.go:332`) is inherited just the same, taking the minimum of both.
+**Mandatory lock order: `breakerMu → quotaMu`**, because `isModelAvailableLocked` is called from
+`Health()` with `breakerMu` already held (`:340`); the ledger must not call anything that takes
 `breakerMu`.
 
-**Degradación blanda por defecto:** factor de headroom ∈ [0,1] aplicado en
-`rankAttemptsByScore` (`router_scoring.go:230`) **sin tocar el score persistido** — el score
-mide fiabilidad, no presupuesto, y contaminarlo envenena su decay de dos relojes.
-Exclusión dura solo bajo `PROXY_QUOTA_HARD_SKIP`.
+**Soft degradation by default:** a headroom factor ∈ [0,1] applied in `rankAttemptsByScore`
+(`router_scoring.go:230`) **without touching the persisted score** — the score measures
+reliability, not budget, and contaminating it poisons its two-clock decay. Hard exclusion only
+under `PROXY_QUOTA_HARD_SKIP`.
 
-**El breaker sigue siendo el backstop reactivo.** Matiz factual: el 429 es neutral solo en el
-breaker de *host* (`:509`), y el propio comentario dice que lo es *porque el breaker de modelo
-sí lo cuenta* — `executeAttempt:135-139` penaliza duro y llama a `recordFailure` con
-`parseRetryAfter`. La cuota es predictiva; el breaker, reactivo. No fusionar.
+**The breaker remains the reactive backstop.** Factual note: the 429 is neutral only in the
+*host* breaker (`:509`), and that comment says it is neutral there *because the model breaker
+does count it* — `executeAttempt:135-139` penalises hard and calls `recordFailure` with
+`parseRetryAfter`. Quota is predictive; the breaker is reactive. Do not merge them.
 
-### D6 — Dos motores de compresión. Fuera el dedup de sesión y la poda de prosa.
+### D6 — Two compression engines. Session dedup and prose pruning are out.
 
-- **Tool-result truncate** — cola de N bytes con cabecera `[truncado: X bytes]`, respetando
-  código y JSON byte a byte. Es el que más rinde en cargas de agente.
-- **Dedup intra-request** — copias literales del mismo bloque *dentro del historial que ya se
-  envía* se sustituyen por una referencia al bloque que sí viaja. Determinista por hash,
-  autocontenido, sin estado ni persistencia.
+- **Tool-result truncate** — keep N bytes from each end with a `[truncated: X bytes]` marker,
+  respecting code and JSON byte for byte. It is the highest-yield engine on agent workloads.
+- **Intra-request dedup** — literal copies of the same block *within the history already being
+  sent* are replaced by a reference to the copy that does travel. Deterministic by hash,
+  self-contained, no state and no persistence.
 
-**Dedup de sesión cross-turn: descartado.** Contra un upstream stateless, no reenviar el
-contexto no lo comprime — hace que el modelo deje de verlo. Eso es amnesia. Un LRU con hash de
-prefijo tampoco lo salva: el problema no es recordar el prefijo, es que hay que reenviarlo
-igual.
+**Cross-turn session dedup: discarded.** Against a stateless upstream, not resending the
+context does not compress it — it makes the model stop seeing it. That is amnesia. An LRU with
+a prefix hash does not save it either: the problem is not remembering the prefix, it is that it
+has to be sent anyway.
 
-**Poda semántica de prosa: descartada en v1.** "Semántico + determinista + sin ML" es una
-contradicción práctica: preservar código "byte a byte" mientras se poda texto exige delimitar
-código en Markdown arbitrario, y un fence mal cerrado por el modelo convierte la poda en
-corrupción. Sobrevive solo su versión no semántica (colapsar blancos y bloques idénticos), que
-ya está cubierta por el dedup.
+**Semantic prose pruning: discarded for v1.** "Semantic + deterministic + no ML" is a practical
+contradiction: preserving code "byte for byte" while pruning text requires delimiting code in
+arbitrary Markdown, and one unclosed fence turns pruning into corruption. Only its non-semantic
+form survives (collapsing whitespace and identical blocks), which dedup already covers.
 
-**Enganche:** una sola pasada en `dispatchChain` antes de `executeFallbacks` — nunca dentro
-del bucle, que ya re-serializa por intento (`router_fallback.go:108`).
-**Obligatorio:** devolver un mapa nuevo, porque `execution.RequestBody["model"] = attempt.Model`
-(`router_fallback.go:107`) muta el mapa compartido. Opt-in por perfil en `model-policy.json`,
-modo `dry-run` (calcula el ahorro, no aplica) y kill-switch por env. Si un motor falla o el
-ahorro queda por debajo del umbral, se reenvía el cuerpo original intacto.
+**Hook:** a single pass in `dispatchChain` before `executeFallbacks` — never inside the loop,
+which already re-serialises per attempt (`router_fallback.go:108`).
+**Mandatory:** return a new map, because `execution.RequestBody["model"] = attempt.Model`
+(`router_fallback.go:107`) mutates the shared map. Opt-in per profile in `model-policy.json`, a
+`dry-run` mode (measures the saving, applies nothing) and an env kill-switch. If an engine
+fails or the saving falls below the threshold, the original body is forwarded intact.
 
-### D7 — Orden: **P1 → P6 → (P2 ∥ P4) → P5 → P3**. Unánime tras arbitraje.
+> **Superseded after release 0.11.0.** Both engines left the proxy for
+> [`cervo-compress`](https://github.com/cervantesh/cervo-compress); deciding what a conversation
+> may lose requires knowing that conversation, which a stateless gateway does not. What stayed
+> is a transport-level size guard. See [P3-compression.md](specs/P3-compression.md) §2.
 
-- **P1 primero y solo.** Es el único cambio que toca el hot path; se estabiliza bajo `-race` y
-  el gate de cobertura antes de apilar nada.
-- **P6 inmediatamente después.** ~150 líneas, y es el único consumidor que ejerce SSE +
-  cabeceras + fallback a mano. Si la traza no sirve para imprimir "servido por X, saltados Y
-  (breaker), Z (cuota)", está mal diseñada — y eso hay que descubrirlo antes de que Hermes la
-  parsee, no después.
-- **P2 ∥ P4.** No comparten una línea. P2 es el de mayor valor operativo; P4 es mecánico una
-  vez extraído el paquete.
-- **P5** con Health + Counters + ring; gana columnas conforme llegan P2 y P3.
-- **P3 el último.** Es el único que muta requests y el único con degradación silenciosa:
-  necesita la traza (auditar qué se comprimió) y el dashboard (ver el ahorro y la regresión)
-  ya operativos.
+### D7 — Order: **P1 → P6 → (P2 ∥ P4) → P5 → P3**. Unanimous after arbitration.
 
-### D8 — P4: la interfaz primero, tres integraciones, `Apply` escribe con backup.
+- **P1 first and alone.** It is the only change that touches the hot path; it stabilises under
+  `-race` and the coverage gate before anything is stacked on it.
+- **P6 immediately after.** ~150 lines, and the only consumer that exercises SSE + headers +
+  fallback by hand. If the trace cannot print "served by X, skipped Y (breaker), Z (quota)", it
+  is badly designed — and that is worth discovering before Hermes parses it, not after.
+- **P2 ∥ P4.** They share no line of code. P2 has the highest operational value; P4 is
+  mechanical once the package is extracted.
+- **P5** with Health + Counters + ring; it gains columns as P2 and P3 land.
+- **P3 last.** It is the only one that mutates requests and the only one with silent
+  degradation: it needs the trace (to audit what was compressed) and the dashboard (to see the
+  saving and the regression) already working.
 
-Interfaz `Integration` con `Detect / Current / Apply / Verify / Revert`, extraída de
-`cmd/doctor.go` junto con los helpers YAML line-wise (`yamlScalar:102`, `yamlBlock:147`,
-`yamlListEntries:221`), `checkResult:50` y `checkRoundTrip:359` — esta última es el "verificar
-que tomó efecto" y se reutiliza tal cual. `doctor` pasa a iterar el registro de integraciones.
+### D8 — P4: the interface first, three integrations, `Apply` writes with a backup.
 
-Corte inicial: **Hermes + Claude Code + Codex**. Cursor/Cline/Aider después, como adapters de
-la misma interfaz — el valor está en validar el contrato, no en cubrir catálogo.
+An `Integration` interface with `Detect / Current / Apply / Verify / Revert`, extracted from
+`cmd/doctor.go` along with the line-wise YAML helpers (`yamlScalar:102`, `yamlBlock:147`,
+`yamlListEntries:221`), `checkResult:50` and `checkRoundTrip:359` — that last one is the "verify
+it took effect" and is reused as is. `doctor` starts iterating the integration registry.
 
-Matiz sobre quién escribe: `doctor` hoy no escribe nada (no hay una sola llamada a
-`os.WriteFile`/`os.Create`/`os.OpenFile` en el fichero), y su inspección YAML es una heurística
-line-wise. **Una heurística que lee no debe escribir.** Así que `Apply` escribe de verdad, con
-backup con timestamp y `--revert`, donde hay parser stdlib fiable (JSON de Claude Code, TOML de
-Codex); para Hermes/YAML se queda en imprimir el bloque y verificar el round-trip. Regla dura
-en todos los casos: bloque delimitado por marcadores, **nunca round-trip de parser** — destruye
-los comentarios del usuario.
+Initial cut: **Hermes + Claude Code + Codex**. Cursor/Cline/Aider later, as adapters of the same
+interface — the value is validating the contract, not covering the catalogue.
 
-### D5b — Dashboard y chat, en una línea cada uno
+A note on who writes: `doctor` writes nothing today (there is not a single
+`os.WriteFile`/`os.Create`/`os.OpenFile` call in the file), and its YAML inspection is a
+line-wise heuristic. **A heuristic that reads must not write.** So `Apply` really writes, with a
+timestamped backup and `--revert`, where there is a reliable stdlib parser (Claude Code's JSON,
+Codex's TOML); for Hermes/YAML it stays at printing the block and verifying the round trip. Hard
+rule in every case: a marker-delimited block, and **never a parser round trip** — it destroys
+the user's comments.
 
-**P5:** `embed.FS` + HTML/JS vanilla bajo el gate `admin` existente (`cmd/main.go:119`),
-polling 2 s, sin WebSockets. No calcula nada: todo agregado que muestre debe existir antes como
-snapshot del router. Sin series históricas — para eso ya está `/metrics`.
+### D5b — Dashboard and chat, one line each
 
-**P6:** `cmd/chat.go`, REPL stdlib contra el propio `/v1/{perfil}/chat/completions`, sin
-framework TUI. Es un cliente: no toca `internal/router`.
+**P5:** `embed.FS` + plain HTML/JS behind the existing `admin` gate (`cmd/main.go:119`), 2 s
+polling, no WebSockets. It computes nothing: every aggregate it shows must exist first as a
+router snapshot. No historical series — `/metrics` already does that.
 
----
-
-## 2. Lo que decide el humano, no la arquitectura
-
-**(a) De dónde salen los límites de P2 — el más importante.** Si OpenRouter no emite
-`X-RateLimit-*` de forma fiable en el free tier, quedan config manual (que nadie mantiene) o
-aprendizaje desde el 429 — que aprende justo el evento que P2 existe para evitar, y que además
-puede aprender un techo falso: un 429 puede venir del límite por minuto y no del diario, y
-`parseRetryAfter` no los distingue. El diseño soporta las tres fuentes, pero **cuál es la
-primaria determina si P2 previene de verdad o solo etiqueta mejor lo que ya pasa.** Esto se
-resuelve con una tarde midiendo contra la cuenta real, no con una decisión de diseño.
-
-**(b) Soft vs hard por defecto en la exclusión por cuota.** Excluir al 100 % de ventana amplía
-la superficie de "all models cooling down" (más 503 con `Retry-After`) frente a dejar el modelo
-al final del ranking y comerse el 429 real. ¿Un 503 predictivo honesto, o quemar un intento en
-un 429 probable? Propuesta compatible con los tres: soft por defecto, hard tras N
-confirmaciones o vía env.
-
-**(c) La forma del contrato de P1 hacia Hermes.** ¿La forma corta es el único contrato estable
-y el detalle vive solo tras `admin`, o Hermes debe poder pedir el JSON completo en el path
-caliente de cada completion? Es decisión de API hacia el consumidor, no de fontanería interna.
+**P6:** `cmd/chat.go`, a stdlib REPL against the proxy's own
+`/v1/{profile}/chat/completions`, no TUI framework. It is a client: it does not touch
+`internal/router`.
 
 ---
 
-## 3. Riesgos irreversibles
+## 2. What the human decides, not the architecture
 
-| Riesgo | Mitigación |
+**(a) Where P2's limits come from — the most important one.** If OpenRouter does not emit
+`X-RateLimit-*` reliably on the free tier, what is left is manual config (which nobody
+maintains) or learning from the 429 — which learns precisely the event P2 exists to avoid, and
+which can also learn a false ceiling: a 429 may come from the per-minute limit rather than the
+daily one, and `parseRetryAfter` does not distinguish them. The design supports all three
+sources, but **which one is primary determines whether P2 genuinely prevents or merely labels
+what already happens.** That is settled by an afternoon of measurement against the real account,
+not by a design decision.
+
+**(b) Soft vs hard as the quota exclusion default.** Excluding at 100 % of a window widens the
+"all models cooling down" surface (more 503s with `Retry-After`) versus leaving the model last
+in the ranking and taking the real 429. An honest predictive 503, or burning an attempt on a
+likely 429? A proposal compatible with all three architects: soft by default, hard after N
+confirmations or via env.
+
+**(c) The shape of P1's contract toward Hermes.** Is the short form the only stable contract,
+with the detail living behind `admin` only, or should Hermes be able to request the full JSON on
+the hot path of every completion? That is an API decision toward the consumer, not internal
+plumbing.
+
+---
+
+## 3. Irreversible risks
+
+| Risk | Mitigation |
 |---|---|
-| El esquema de P1 es API pública en cuanto Hermes lo parsee | Versión en el primer commit (`v1;…`), campos solo-añadir, forma corta estable / `full` evolutivo |
-| P3 puede degradar respuestas **en silencio** | Opt-in por perfil, `dry-run`, umbral mínimo, `cmp=` siempre presente, cuerpo original intacto ante cualquier error |
-| El ámbito de la cuota (D4) queda grabado en el fichero persistido | `model` + `account` desde el día uno |
-| P4 puede destruir el `settings.json` o el `config.toml` del usuario | Backup con timestamp + `--revert`, marcadores, nunca round-trip de parser |
-| Persistir el ring a disco (tentador para P5 tras reinicio) | **Prohibido**: son cuerpos de conversación. La serie durable es `/metrics` |
-| El ledger sin locks se rompería con un fan-out especulativo entre modelos | El invariante de un solo escritor va documentado y cubierto por `-race` |
+| P1's schema becomes a public API the moment Hermes parses it | Version in the first commit (`v1;…`), add-only fields, stable short form / evolving `full` |
+| P3 can degrade answers **silently** | Opt-in per profile, `dry-run`, minimum threshold, `cmp=` always present, original body intact on any error |
+| The quota scope (D4) is baked into the persisted file | `model` + `account` from day one |
+| P4 can destroy the user's `settings.json` or `config.toml` | Timestamped backup + `--revert`, markers, never a parser round trip |
+| Persisting the ring to disk (tempting for P5 across restarts) | **Forbidden**: they are conversation bodies. The durable series is `/metrics` |
+| The lock-free ledger would break under speculative fan-out across models | The single-writer invariant is documented and covered by `-race` |

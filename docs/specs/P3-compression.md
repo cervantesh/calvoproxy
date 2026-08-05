@@ -1,68 +1,64 @@
-# P3 — Guardia de tamaño de resultados de herramienta
+# P3 — Tool-result size guard
 
-Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
+Reference architecture: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
 
-> **Esta spec cambió de alcance después de implementarse.** La versión original
-> describía dos motores de compresión dentro del proxy. Estaban en la capa
-> equivocada y se movieron a `github.com/cervantesh/cervo-compress`. Lo que queda
-> aquí es lo único que sí es competencia de un proxy. El razonamiento completo
-> está en §2, porque el error es más instructivo que el resultado.
+> **This spec changed scope after being implemented.** The original version described two
+> compression engines inside the proxy. They were in the wrong layer and moved to
+> `github.com/cervantesh/cervo-compress`. What remains here is the only part that really is a
+> proxy's business. The full reasoning is in §2, because the mistake is more instructive than
+> the result.
 
-## 1. Qué hace
+## 1. What it does
 
-Recorta un resultado de herramienta que supere `PROXY_TOOL_RESULT_LIMIT`,
-conservando **los dos extremos** con un marcador explícito en medio. **Apagado
-por defecto**: sin esa variable el proxy reenvía exactamente lo que recibió.
+Clips a tool result that exceeds `PROXY_TOOL_RESULT_LIMIT`, keeping **both ends** with an
+explicit marker between them. **Off by default**: without that variable the proxy forwards
+exactly what it received.
 
-Es de la misma familia que `PROXY_MAX_RESPONSE_BYTES`: una declaración de qué
-está dispuesto a transportar este proxy, no un juicio sobre lo que el modelo
-necesita.
+Same family as `PROXY_MAX_RESPONSE_BYTES`: a statement about what this proxy is willing to
+carry, not a judgement about what the model needs.
 
-## 2. Por qué los motores se fueron
+## 2. Why the engines left
 
-Decidir qué puede tirarse de una conversación exige **conocer esa conversación**:
-qué resultado de herramienta sigue importando, qué está haciendo el usuario, si
-un bloque puede recuperarse cuando el modelo lo pida. El proxy ve una foto
-stateless y no sabe nada de eso. Hermes y los agentes sí — son dueños de la
-conversación.
+Deciding what a conversation may lose requires **knowing that conversation**: which tool result
+still matters, what the user is doing, whether a block can be fetched back when the model asks
+for it. The proxy sees a stateless snapshot and knows none of that. Hermes and the coding
+agents do — they own the conversation.
 
-Un detalle de OmniRoute lo confirma: su motor CCR, el único que **quita**
-contenido de verdad, solo inyecta su protocolo de recuperación si el llamante
-expone la herramienta `omniroute_ccr_retrieve`. Es decir, ni siquiera ellos
-quitan contexto sin un contrato con el cliente.
+A detail of OmniRoute confirms it: CCR, its only engine that genuinely **removes** content,
+injects its retrieval protocol only when the caller exposes the `omniroute_ccr_retrieve` tool.
+Not even they take context away without a contract with the client.
 
-`dedup` se fue entero. `toolcap` se quedó, reencuadrado: ya no es "comprimir",
-es "no transportar medio megabyte en un mensaje".
+`dedup` left entirely. `toolcap` stayed, reframed: it is no longer "compress", it is "do not
+carry half a megabyte in one message".
 
-## 3. Reglas
+## 3. Rules
 
-- **Solo mensajes `role: "tool"`.** Un mensaje de usuario es lo que se pidió.
-- **Nunca contenido que sea JSON válido.** Recortarlo produce JSON inválido, y
-  un resultado corrupto es peor que uno largo.
-- **Nunca contenido estructurado** (arrays de bloques: imágenes, `tool_result`
-  del dialecto Anthropic). No hay forma genérica segura de recortarlo.
-- **Suelo de 512 bytes.** Por debajo, el marcador sería casi todo lo que
-  sobrevive.
-- **Si el marcador cuesta más que el recorte**, no se toca.
-- **Ante cualquier pánico**, se reenvía el cuerpo original y se registra un
-  aviso. Un fallo aquí degrada a "sin recortar", nunca a un 500.
+- **Only `role: "tool"` messages.** A user message is what was asked.
+- **Never content that is valid JSON.** Truncating it yields invalid JSON, and a corrupt result
+  is worse than a long one.
+- **Never structured content** (block arrays: images, Anthropic-dialect `tool_result`). There
+  is no safe generic way to clip it.
+- **512-byte floor.** Below that, the marker would be most of what survives.
+- **If the marker costs more than the cut saves**, nothing is touched.
+- **On any panic**, the original body is forwarded and a warning logged. A failure here
+  degrades to "not clipped", never to a 500.
 
-## 4. Invariantes verificables
+## 4. Verifiable invariants
 
-| # | Invariante | Cómo se prueba |
+| # | Invariant | How it is tested |
 |---|---|---|
-| 1 | Apagado por defecto: el cuerpo sale idéntico | comparación byte a byte |
-| 2 | Nunca muta el mapa de entrada | copia guardada y comparada |
-| 3 | No toca JSON válido | resultado JSON largo |
-| 4 | Conserva principio y final, y marca el recorte | contenido largo no-JSON |
-| 5 | No toca mensajes que no sean `role: tool` | mensaje de usuario largo |
-| 6 | Un límite absurdo se ajusta al suelo | `PROXY_TOOL_RESULT_LIMIT=1` |
-| 7 | Formas raras no revientan | mensajes nulos, tipos mezclados |
-| 8 | El recorte llega a la traza como `cmp=` | header tras recortar |
-| 9 | Funciona por el camino real del router, y apagado no altera nada | dos tests de integración |
+| 1 | Off by default: the body comes out identical | byte-for-byte comparison |
+| 2 | Never mutates the input map | copy kept and compared |
+| 3 | Does not touch valid JSON | long JSON result |
+| 4 | Keeps head and tail, and marks the cut | long non-JSON content |
+| 5 | Does not touch messages other than `role: tool` | long user message |
+| 6 | An absurd limit is clamped to the floor | `PROXY_TOOL_RESULT_LIMIT=1` |
+| 7 | Odd shapes do not blow up | nil messages, mixed types |
+| 8 | The clip reaches the trace as `cmp=` | header after clipping |
+| 9 | Works through the router's real path, and off changes nothing | two integration tests |
 
-## 5. Fuera de alcance
+## 5. Out of scope
 
-Todo lo que sea gestión de contexto. Vive en
-[`cervo-compress`](https://github.com/cervantesh/cervo-compress), como librería,
-para que la use quien es dueño de la conversación.
+Anything that is context management. It lives in
+[`cervo-compress`](https://github.com/cervantesh/cervo-compress), as a library, so that
+whoever owns the conversation can use it.

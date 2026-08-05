@@ -140,29 +140,29 @@ func TestChat_RenderTrace(t *testing.T) {
 		wantAbsent []string
 	}{
 		{
-			name:       "sin cabecera no inventa nada",
+			name:       "no header invents nothing",
 			route:      "",
-			wantAbsent: []string{"score", "intento", "·"},
+			wantAbsent: []string{"score", "attempt", "·"},
 		},
 		{
-			name:    "primer intento no menciona el intento",
+			name:    "first attempt is not mentioned",
 			route:   "v1;p=coding;s=0.83;n=4/4/3;cmp=off",
 			model:   "nvidia/nemotron-3-super-120b-a12b:free",
 			wantHas: []string{"coding", "nemotron-3-super-120b-a12b", "0.83"},
-			// AttemptIndex 1 is the normal case: saying "intento 1" every turn
+			// AttemptIndex 1 is the normal case: saying "attempt 1" every turn
 			// trains the reader to ignore the one field that signals degradation.
-			wantAbsent: []string{"intento"},
+			wantAbsent: []string{"attempt"},
 		},
 		{
-			name:    "fallback y exclusiones se explican",
+			name:    "fallback and exclusions are explained",
 			route:   "v1;p=coding;s=0.71;a=2;n=4/4/3;prev=gpt-oss-20b:429;brk=1;cmp=off",
 			model:   "google/gemma-4-31b-it:free",
-			wantHas: []string{"intento 2", "gpt-oss-20b", "429", "breaker"},
+			wantHas: []string{"attempt 2", "gpt-oss-20b", "429", "breaker"},
 		},
 		{
-			name:    "recorte se avisa",
+			name:    "truncation is flagged",
 			route:   "v1;p=bulk;s=0.5;n=6/6/3;cmp=off;trunc=1",
-			wantHas: []string{"recortada"},
+			wantHas: []string{"truncated"},
 		},
 	}
 	for _, tc := range tests {

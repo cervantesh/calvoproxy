@@ -1,71 +1,71 @@
 # P6 — `calvoproxy chat`
 
-Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md). Consume la traza
-de [P1](P1-decision-trace.md).
+Reference architecture: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md). Consumes the trace from
+[P1](P1-decision-trace.md).
 
-## 1. Problema
+## 1. Problem
 
-Probar una cadena hoy exige montar Hermes o escribir `curl` con el cuerpo a mano, y `curl` no
-descodifica la traza: te deja leyendo `v1;p=coding;s=0.83;a=2;prev=...` a ojo. Hace falta un
-cliente propio, de diagnóstico, que hable con el proxy como lo haría un agente y **enseñe la
-decisión en cristiano después de cada turno**.
+Trying a chain today means either standing up Hermes or hand-writing `curl` with the body, and
+`curl` does not decode the trace: it leaves you reading `v1;p=coding;s=0.83;a=2;prev=...` by
+eye. What is needed is a diagnostic client of our own that talks to the proxy the way an agent
+would and **shows the decision in plain words after every turn**.
 
-Es además el dogfooding de P1: si la traza no sirve para imprimir "servido por X, saltados Y
-(breaker) y Z (cuota)", está mal diseñada — y conviene descubrirlo antes de que Hermes la
-parsee.
+It is also P1's dogfooding: if the trace cannot render as "served by X, skipped Y (breaker) and
+Z (quota)", it is badly designed — and that is worth discovering before Hermes parses it.
 
-## 2. Alcance
+## 2. Scope
 
-Es un **cliente**. No importa `internal/router` ni reimplementa nada de la cadena: habla HTTP
-con el proxy que ya está corriendo. Sin framework de TUI: `bufio` sobre stdin y códigos ANSI.
-Una TUI real serían miles de líneas vendorizadas para una herramienta que compite con `curl`.
+It is a **client**. It does not import `internal/router` and reimplements no part of the chain:
+it speaks HTTP to the proxy that is already running. No TUI framework: `bufio` over stdin and
+ANSI codes. A real TUI would be thousands of vendored lines for a tool that competes with
+`curl`.
 
 ```
 calvoproxy chat [--profile coding] [--url http://127.0.0.1:8080] [--no-stream]
 ```
 
-`--url` por defecto sale de `proxyBaseURL()` ([cmd/doctor.go:274](../../cmd/doctor.go)), que ya
-respeta el puerto configurado.
+`--url` defaults to `proxyBaseURL()` ([cmd/doctor.go:274](../../cmd/doctor.go)), which already
+honours the configured port.
 
-## 3. Comportamiento
+## 3. Behaviour
 
-- Bucle: lee una línea de stdin, la añade al historial como `user`, envía **todo** el
-  historial (el upstream es stateless), imprime los deltas según llegan y añade la respuesta
-  como `assistant`.
-- Streaming por defecto (`stream:true`), que es como lo usan los agentes. `--no-stream` para
-  el caso no-streaming.
-- Tras cada turno imprime la traza descodificada en una línea.
-- Comandos de barra: `/profile <nombre>` cambia de perfil, `/reset` vacía el historial,
-  `/trace` alterna el detalle completo (manda `X-Calvoproxy-Trace: full`), `/quit` sale.
-  EOF (Ctrl-D) equivale a `/quit`.
-- Un error HTTP se imprime con su estatus y su cuerpo, y el REPL **sigue vivo**: un 503 de
-  cadena agotada es información, no motivo de cierre.
+- Loop: read a line from stdin, append it to the history as `user`, send **the whole** history
+  (the upstream is stateless), print the deltas as they arrive, and append the reply as
+  `assistant`.
+- Streaming by default (`stream:true`), which is how agents use it. `--no-stream` for the
+  non-streaming case.
+- After each turn it prints the decoded trace on one line.
+- Slash commands: `/profile <name>` switches profile, `/reset` clears the history, `/trace`
+  toggles the full detail (sends `X-Calvoproxy-Trace: full`), `/quit` exits. EOF (Ctrl-D) is
+  equivalent to `/quit`.
+- An HTTP error is printed with its status and body, and the REPL **stays alive**: a 503 from
+  an exhausted chain is information, not a reason to close.
 
-### 3.1 Render de la traza
+### 3.1 Trace rendering
 
-`v1;p=coding;s=0.83;a=2;n=4/4/3;prev=gpt-oss-20b:429;brk=1;cmp=off` se imprime como:
+`v1;p=coding;s=0.83;a=2;n=4/4/3;prev=gpt-oss-20b:429;brk=1;cmp=off` prints as:
 
 ```
-· coding · nemotron-3-super-120b-a12b · score 0.83 · intento 2/3 · 1 excluido por breaker
-  antes falló: gpt-oss-20b (429)
+· coding · nemotron-3-super-120b-a12b · score 0.83 · attempt 2/3 · 1 excluded by breaker
+  previously failed: gpt-oss-20b (429)
 ```
 
-Reglas: si el intento es 1 no se menciona (es el caso normal); `brk=` solo si es > 0; la línea
-de `antes falló` solo si hay `prev=`; `trunc=1` añade `(traza recortada)`.
+Rules: attempt 1 is not mentioned (it is the normal case); `brk=` only when > 0; the
+`previously failed` line only when there is a `prev=`; `trunc=1` adds `(trace truncated)`.
 
-## 4. Invariantes verificables
+## 4. Verifiable invariants
 
-| # | Invariante | Cómo se prueba |
+| # | Invariant | How it is tested |
 |---|---|---|
-| 1 | Envía a la ruta del perfil elegido, con el historial completo y `stream` según la opción | servidor de prueba que captura ruta y cuerpo |
-| 2 | Imprime los deltas de una respuesta SSE en orden y sin los envoltorios `data:` | servidor que emite SSE conocido |
-| 3 | La traza se descodifica a texto legible; sin cabecera no se inventa nada | render puro sobre cabeceras de ejemplo, incluida la vacía |
-| 4 | Un error HTTP se muestra y el REPL sobrevive al turno | servidor que devuelve 503, seguido de un turno correcto |
-| 5 | La respuesta se añade al historial, así que el segundo turno manda tres mensajes | dos turnos contra el mismo servidor |
-| 6 | `/profile`, `/reset` y `/quit` hacen lo suyo; `/quit` y EOF terminan con código 0 | guion de entrada con los comandos |
-| 7 | `--no-stream` usa la ruta no-streaming y extrae `choices[0].message.content` | servidor que responde JSON no-SSE |
+| 1 | Posts to the chosen profile's route, with the full history and `stream` matching the mode | test server capturing path and body |
+| 2 | Prints SSE deltas in order and without the `data:` envelope | server emitting a known SSE stream |
+| 3 | The trace decodes to readable text; with no header it invents nothing | pure render over sample headers, empty one included |
+| 4 | An HTTP error is shown and the REPL survives the turn | server returning 503, followed by a good turn |
+| 5 | The reply joins the history, so turn two sends three messages | two turns against the same server |
+| 6 | `/profile`, `/reset` and `/quit` do their job; `/quit` and EOF exit with code 0 | scripted input with the commands |
+| 7 | `--no-stream` uses the non-streaming path and extracts `choices[0].message.content` | server responding with non-SSE JSON |
 
-## 5. Fuera de alcance
+## 5. Out of scope
 
-Historial persistente entre ejecuciones, edición de línea con historial (flechas), y colores
-configurables. Es una herramienta de diagnóstico, no un cliente de chat.
+History persisted between runs, line editing with history (arrow keys), and configurable
+colours. It is a diagnostic tool, not a chat client.

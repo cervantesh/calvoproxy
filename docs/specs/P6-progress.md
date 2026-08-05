@@ -1,14 +1,15 @@
-# P6 — progreso
+# P6 — progress
 
-- **Invariantes 1–7 (+ EOF y `/trace`): en verde.** Nueve tests en
-  `cmd/chat_test.go`; las tres puertas pasan.
-- **La spec resultó corta en un punto**: no decía qué pasa con el historial cuando
-  un turno falla. Si el upstream devuelve error o el transporte cae, el mensaje
-  del usuario se **retira** del historial: dejarlo dentro haría que el siguiente
-  turno enviase un prompt que ningún modelo llegó a ver, y el REPL mentiría sobre
-  lo que mandó. Implementado así; queda registrado aquí porque no estaba escrito.
-- **Segundo detalle no especificado**: el buffer de `bufio.Scanner`. El defecto de
-  64 KiB trunca en silencio un fichero pegado, que es justo lo que un operador va
-  a probar. Subido a 8 MiB en la entrada y 4 MiB en el parseo SSE.
-- Pendiente para quien siga: `renderTrace` es la única pieza que conoce el formato
-  del header. Si el esquema de P1 sube a `v2`, este es el sitio que hay que tocar.
+- **Invariants 1–7 (plus EOF and `/trace`): green.** Nine tests in
+  `cmd/chat_test.go`; all three gates pass.
+- **The spec was short on one point**: it did not say what happens to the history
+  when a turn fails. If the upstream returns an error or the transport dies, the
+  user's message is **withdrawn** from the history — leaving it in would make the
+  next turn send a prompt no model ever saw, and the REPL would be lying about
+  what it sent. Implemented that way; recorded here because it was not written
+  down.
+- **A second unspecified detail**: the `bufio.Scanner` buffer. The 64 KiB default
+  silently truncates a pasted file, which is exactly what an operator will try.
+  Raised to 8 MiB on input and 4 MiB for SSE parsing.
+- For whoever comes next: `renderTrace` is the only piece that knows the header
+  format. If P1's schema goes to `v2`, this is the place to touch.

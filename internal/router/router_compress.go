@@ -31,7 +31,7 @@ const (
 	// toolCutMarker is deliberately explicit. A model shown a clipped result
 	// must be able to tell that it was clipped, or it will reason about the gap
 	// as though it were the whole answer.
-	toolCutMarker = "\n… [truncado: %d bytes omitidos por CalvoProxy] …\n"
+	toolCutMarker = "\n… [truncated: %d bytes omitted by CalvoProxy] …\n"
 	// minToolResultLimit is the floor. Below it the marker is most of what
 	// survives, so the guard would destroy content to save nothing.
 	minToolResultLimit = 512
