@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cervantesh/calvoproxy/internal/dashboard"
 	"github.com/cervantesh/calvoproxy/internal/router"
 	"github.com/cervantesh/calvoproxy/internal/telemetry"
 	httpx "github.com/cervantesh/cervo-httpkit"
@@ -140,6 +141,22 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeJSON(w, decision)
 	}))
 
+	// The dashboard sits behind the SAME gate as /health because it shows exactly
+	// what that gate protects: model chains, upstream error text and the router's
+	// internal state. Since the channel is admin, decisions are served WITH their
+	// reason — the gate authorises, not the path.
+	mux.Handle("/dashboard", admin(dashboard.Handler()))
+	mux.HandleFunc("/dashboard/state", admin(func(w http.ResponseWriter, r *http.Request) {
+		health := routerService.Health()
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, map[string]any{
+			"health":    health,
+			"counters":  routerService.Counters(),
+			"quotas":    health.Quotas,
+			"decisions": routerService.RecentDecisions(dashboardDecisions),
+		})
+	}))
+
 	mux.HandleFunc("/health/model-policy", admin(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, routerService.ModelPolicyHealth())
@@ -203,6 +220,11 @@ func presentedToken(r *http.Request) string {
 // admin gates a handler behind PROXY_ADMIN_TOKEN. When the env var is unset the
 // endpoint is open (unchanged default); when set, callers must present it as a
 // Bearer token or X-Admin-Token header. The comparison is constant-time.
+// dashboardDecisions is how many recent routing decisions the dashboard shows.
+// Bounded on purpose: the ring holds up to PROXY_TRACE_RING entries, and
+// shipping all of them on every 2s poll would make the view its own load.
+const dashboardDecisions = 25
+
 func admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := os.Getenv("PROXY_ADMIN_TOKEN")

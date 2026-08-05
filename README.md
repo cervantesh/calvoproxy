@@ -282,6 +282,16 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
+### Dashboard (`/dashboard`)
+
+Open `http://127.0.0.1:8080/dashboard` for a live read-only view: circuits and
+their reliability scores, quota windows with how much is left, and the last 25
+routing decisions — which model served, at which attempt, and what failed before
+it. Refreshes every 2 seconds.
+
+Behind the same `PROXY_ADMIN_TOKEN` gate as `/health`, since it shows the same
+internals. Embedded in the binary: no Node, no build step, works offline.
+
 ### Wiring a client (`calvoproxy setup`)
 
 ```bash

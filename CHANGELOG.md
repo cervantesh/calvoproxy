@@ -12,6 +12,29 @@ out — see v0.7.1.
 ## [Unreleased]
 
 ### Added
+- **A local dashboard at `/dashboard` — one place to see what the proxy is doing.**
+  The proxy already computed everything interesting: scores, circuits, quota
+  budgets, routing decisions. It just exposed them in three places you had to
+  read separately — `/health`, `/metrics`, and `/decisions/{id}`, that last one
+  only if you already knew the id. There was nowhere to answer "what is happening
+  right now?".
+
+  Circuits with their state and score, quota windows with how much is left, and
+  the last 25 routing decisions with which model served, at which attempt, and
+  what failed before it. Refreshes every 2 seconds.
+
+  It is a **view and nothing more**: it computes no aggregate of its own, so
+  anything it shows already exists as a router snapshot — the same discipline
+  `/metrics` follows. Embedded with `go:embed`, plain HTML and JS, **no Node, no
+  build step, no framework**, and a `default-src 'self'` policy so that if a
+  future edit reaches for a CDN it fails loudly in the browser instead of quietly
+  working on the developer's machine and breaking on an offline install.
+
+  Behind the same `PROXY_ADMIN_TOKEN` gate as `/health`, because it shows exactly
+  what that gate protects. Polling rather than websockets: for a local
+  single-user tool, a websocket hub is a second streaming path inside the binary
+  just to paint a table.
+
 - **Quota budgets: the proxy now degrades *before* the window runs out.**
   Free-tier limits were discovered by hitting them — a 429 arrived, the circuit
   opened, and the request was already spent. The breaker is reactive by design
