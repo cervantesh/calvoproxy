@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net/http"
 	"strings"
 )
 
@@ -23,7 +24,21 @@ import (
 type routeTrace struct {
 	ID      string
 	Profile string
+	// Outcome is empty while the request is still in flight and outcomeServed
+	// once a model answered. The other values name a request that never reached
+	// a model at all — precisely the ones where the caller most needs a reason,
+	// since an HTTP status alone cannot tell "everything is cooling down" from
+	// "nothing here can do vision".
+	Outcome string
 }
+
+const (
+	outcomeServed      = "served"
+	outcomeCapsPinned  = "caps_pinned"
+	outcomeCapsNone    = "caps_none"
+	outcomeAllCooling  = "all_cooling"
+	outcomeChainFailed = "chain_failed"
+)
 
 type traceCtxKey struct{}
 
@@ -91,7 +106,24 @@ func (t *routeTrace) header() string {
 		// field does not exist" once P3 lands.
 		"cmp=" + traceNoCompress,
 	}
+	// Only on the unserved paths: on a served request the outcome is implicit in
+	// the presence of X-Calvoproxy-Model, and spending header bytes to repeat it
+	// costs the fields that carry real information.
+	if t.Outcome != "" && t.Outcome != outcomeServed {
+		fields = append(fields, "o="+traceSanitize(t.Outcome))
+	}
 	return strings.Join(fields, traceFieldSep)
+}
+
+// failTrace stamps the outcome and commits the trace headers. Must be called
+// BEFORE writeJSONError, which writes the response head.
+func failTrace(ctx context.Context, w http.ResponseWriter, outcome string) {
+	trace := traceFrom(ctx)
+	if trace == nil {
+		return
+	}
+	trace.Outcome = outcome
+	setRouteTraceHeaders(w.Header(), trace)
 }
 
 // traceSanitize keeps header values to a byte set that cannot break framing or

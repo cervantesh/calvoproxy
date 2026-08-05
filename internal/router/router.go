@@ -283,6 +283,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if len(required) > 0 && requestedModel != "" && !strings.EqualFold(strings.TrimSpace(requestedModel), "auto") {
 		if !s.capabilities.satisfies(requestedModel, required) {
 			s.counters.capabilityRefused.Add(1)
+			failTrace(ctx, w, outcomeCapsPinned)
 			writeJSONError(w, http.StatusUnprocessableEntity, "requested model "+requestedModel+" does not support "+strings.Join(required, "+"))
 			return
 		}
@@ -300,6 +301,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		attemptsToTry = s.applyCapabilityFilter(attemptsToTry, category, opPath, required)
 		if len(attemptsToTry) == 0 {
 			s.counters.capabilityRefused.Add(1)
+			failTrace(ctx, w, outcomeCapsNone)
 			writeJSONError(w, http.StatusServiceUnavailable, "No available model supports "+strings.Join(required, "+")+" for this request.")
 			return
 		}
@@ -340,6 +342,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 		}
+		failTrace(ctx, w, outcomeAllCooling)
 		writeJSONError(w, http.StatusServiceUnavailable, "All models are temporarily rate-limited or unhealthy. Cooling down before retry.")
 		return
 	}
@@ -367,6 +370,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	statusCode, message := fallbackErrorResponse(err)
 	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed",
 		slog.String("profile", category), slog.String("reason", string(reason)))
+	failTrace(ctx, w, outcomeChainFailed)
 	writeJSONError(w, statusCode, message)
 }
 

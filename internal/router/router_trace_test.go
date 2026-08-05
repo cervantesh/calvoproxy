@@ -2,9 +2,12 @@ package router
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Invariant 1 (docs/specs/P1-decision-trace.md §8): the route-decision header
@@ -147,4 +150,99 @@ func TestTrace_NilReceiverIsNoOp(t *testing.T) {
 	if len(h) != 0 {
 		t.Errorf("nil trace must write no headers, got %v", h)
 	}
+}
+
+// Invariant 5 (spec §8): the four exits that never serve a model still emit a
+// partial trace carrying o=<outcome>. These are exactly the requests where the
+// caller most needs to know why — an error with no explanation is the state P1
+// exists to remove.
+func TestTrace_PartialTraceOnEveryUnservedExit(t *testing.T) {
+	visionBody := `{"messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]}`
+
+	cases := []struct {
+		name    string
+		outcome string
+		status  int
+		setup   func(t *testing.T, svc *RouterService)
+		body    string
+	}{
+		{
+			name:    "pinned model lacks the capability",
+			outcome: "caps_pinned",
+			status:  http.StatusUnprocessableEntity,
+			setup: func(_ *testing.T, svc *RouterService) {
+				svc.capabilities = newCapabilityIndex(map[string][]string{"model-a": {"tools"}})
+			},
+			body: `{"model":"model-a","messages":[{"role":"user","content":[` +
+				`{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]}`,
+		},
+		{
+			name:    "no capable model anywhere",
+			outcome: "caps_none",
+			status:  http.StatusServiceUnavailable,
+			setup: func(_ *testing.T, svc *RouterService) {
+				svc.capabilities = newCapabilityIndex(map[string][]string{"model-a": {}})
+			},
+			body: visionBody,
+		},
+		{
+			name:    "every model cooling down",
+			outcome: "all_cooling",
+			status:  http.StatusServiceUnavailable,
+			setup: func(_ *testing.T, svc *RouterService) {
+				key := svc.breakerKey(modelAttempt{Profile: "simple", Model: "model-a"})
+				svc.modelBreakers[key] = &modelBreakerState{OpenUntil: time.Now().Add(time.Minute)}
+			},
+			body: `{"messages":[]}`,
+		},
+		{
+			name:    "chain exhausted upstream",
+			outcome: "chain_failed",
+			status:  http.StatusBadGateway,
+			setup:   func(_ *testing.T, _ *RouterService) {},
+			body:    `{"messages":[]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := failingTransport{}
+			svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+				DefaultProfile: "simple",
+				Profiles:       map[string][]string{"simple": {"model-a"}},
+				Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+			})
+			tc.setup(t, svc)
+
+			rec := httptest.NewRecorder()
+			svc.RouteRequestWithProvider(rec, trustedRequest(
+				http.MethodPost, "/v1/chat/completions", tc.body), "k", "")
+
+			if rec.Code != tc.status {
+				t.Fatalf("expected %d, got %d: %s", tc.status, rec.Code, rec.Body.String())
+			}
+			route := rec.Header().Get("X-Calvoproxy-Route")
+			if route == "" {
+				t.Fatalf("no trace on an unserved exit: the caller gets an error with no reason")
+			}
+			if !strings.Contains(route, "o="+tc.outcome) {
+				t.Errorf("expected o=%s in %q", tc.outcome, route)
+			}
+			if strings.Contains(route, "s=") {
+				t.Errorf("no model was served, so no score may be reported: %q", route)
+			}
+		})
+	}
+}
+
+// failingTransport answers every attempt with a 502 so the chain exhausts.
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":"upstream down"}`)),
+	}, nil
 }
