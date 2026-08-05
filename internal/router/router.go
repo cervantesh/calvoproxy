@@ -289,6 +289,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		}
 	}
 	attemptsToTry := s.planModelAttempts(decision, category, requestedModel)
+	planned := len(attemptsToTry)
 	if opPath != "" {
 		for i := range attemptsToTry {
 			attemptsToTry[i].Path = opPath
@@ -306,13 +307,16 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 			return
 		}
 	}
+	afterCaps := len(attemptsToTry)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	// Reorder the breaker-eligible chain by reliability score (most reliable
 	// first) before truncating to MaxAttempts, so flaky models sink to the back.
-	availableModels = s.rankAttemptsByScore(availableModels)
+	availableModels = s.rankAttemptsByScoreTraced(traceFrom(ctx), availableModels)
 	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
 		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
 	}
+
+	traceFrom(ctx).recordChain(planned, afterCaps, len(availableModels), required)
 
 	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
 		slog.String("category", category),

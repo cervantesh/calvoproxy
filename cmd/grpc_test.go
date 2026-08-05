@@ -86,3 +86,36 @@ func TestProxyTransportGRPCServerRequiresAPIKey(t *testing.T) {
 		t.Fatalf("expected unauthorized, got %d", got)
 	}
 }
+
+// Invariant 6 (docs/specs/P1-decision-trace.md §8): gRPC inherits the route
+// trace with no new work in the router. The transport already copies the
+// recorder's headers, so the only thing that can break this is the header
+// ceasing to be single-valued — values[0] is what the client would then get.
+func TestProxyTransportGRPCServerCarriesRouteTrace(t *testing.T) {
+	server := &proxyTransportGRPCServer{
+		routerService: &routerServiceAdapter{
+			routeRequestWithProvider: func(w http.ResponseWriter, _ *http.Request, _ string, _ string) {
+				w.Header().Set("X-Calvoproxy-Route", "v1;p=coding;cmp=off")
+				w.Header().Set("X-Calvoproxy-Decision-Id", "0123456789abcdef")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			},
+			health: func() interface{} { return map[string]any{"ready": true} },
+		},
+	}
+
+	resp, err := server.ChatCompletion(context.Background(), &proxyv1.ChatCompletionRequest{
+		Path:          "/v1/chat/completions",
+		Authorization: "Bearer test-token",
+		BodyJson:      `{"messages":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion error: %v", err)
+	}
+	if got := resp.GetHeaders()["X-Calvoproxy-Route"]; got != "v1;p=coding;cmp=off" {
+		t.Errorf("route trace lost over gRPC, got %q", got)
+	}
+	if got := resp.GetHeaders()["X-Calvoproxy-Decision-Id"]; got != "0123456789abcdef" {
+		t.Errorf("decision id lost over gRPC, got %q", got)
+	}
+}

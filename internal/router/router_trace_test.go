@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -244,5 +245,120 @@ func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 		StatusCode: http.StatusBadGateway,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(`{"error":"upstream down"}`)),
+	}, nil
+}
+
+// The header must carry the decision, not just the profile: which attempt
+// served, the score it was ranked by, how the chain narrowed, and which models
+// failed first with what code. Without these the trace answers "who" but not
+// "why", which is the whole point of P1.
+func TestTrace_HeaderCarriesTheDecision(t *testing.T) {
+	upstream := &sequenceTransport{statuses: []int{http.StatusInternalServerError, http.StatusOK}}
+	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"model-a", "model-b"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second model should have served, got %d: %s", rec.Code, rec.Body.String())
+	}
+	route := rec.Header().Get("X-Calvoproxy-Route")
+	for _, want := range []string{
+		"a=2",              // served by a fallback: the degraded signal
+		"n=2/2/2",          // planned / after caps / eligible
+		"prev=model-a:500", // the UPSTREAM status, not the remapped 502
+		"s=",               // the score the chain was ranked by
+	} {
+		if !strings.Contains(route, want) {
+			t.Errorf("route header missing %q, got %q", want, route)
+		}
+	}
+}
+
+// Invariant 4 (spec §3.2): the header never exceeds 512 bytes. Over the cap it
+// is trimmed deterministically — prev= entries from the end first — and says so
+// with trunc=1, so a consumer never mistakes a trimmed trace for a short chain.
+func TestTrace_HeaderStaysUnder512Bytes(t *testing.T) {
+	// A long chain of long slugs, every one of them failing: the worst case the
+	// renderer can be handed.
+	long := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		long = append(long, "someorg/a-deliberately-long-free-model-slug-number-"+
+			string(rune('a'+i))+"-120b-a12b:free")
+	}
+	svc := newTestService(t, &http.Client{Transport: failingTransport{}}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": long},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+
+	route := rec.Header().Get("X-Calvoproxy-Route")
+	if n := len(route); n > 512 {
+		t.Fatalf("route header is %d bytes, over the 512 cap: %q", n, route)
+	}
+	if !strings.Contains(route, "trunc=1") {
+		t.Errorf("a trimmed header must say so with trunc=1, got %q", route)
+	}
+	// The fields that never get dropped.
+	for _, want := range []string{"v1", "p=simple", "cmp=", "o="} {
+		if !strings.Contains(route, want) {
+			t.Errorf("trimming dropped a protected field %q: %q", want, route)
+		}
+	}
+}
+
+// Invariant 8 (spec §4.1): the trace is lock-free because exactly one goroutine
+// writes it. That is an invariant, not a hope — this is the test that fails if
+// anyone ever annotates from streamCopy or awaitFirstStreamEvent. Meaningful
+// only under -race, which the build gate runs.
+func TestTrace_NoRaceUnderConcurrentStreams(t *testing.T) {
+	// A stateless transport on purpose: the shared streamTransport helper counts
+	// calls without a lock, so reusing it here would report ITS race instead of
+	// exercising the trace's single-writer invariant.
+	svc := newTestService(t, &http.Client{Transport: concurrentStreamTransport{}}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"model-a", "model-b"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			svc.RouteRequestWithProvider(rec, trustedRequest(
+				http.MethodPost, "/v1/chat/completions", `{"messages":[],"stream":true}`), "k", "")
+			if rec.Header().Get("X-Calvoproxy-Route") == "" {
+				t.Error("concurrent request lost its trace")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+const streamEventsFixture = `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+	`data: [DONE]` + "\n\n"
+
+// concurrentStreamTransport holds no mutable state, so many goroutines may share
+// one instance.
+type concurrentStreamTransport struct{}
+
+func (concurrentStreamTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "text/event-stream")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     h,
+		Body:       io.NopCloser(strings.NewReader(streamEventsFixture)),
 	}, nil
 }

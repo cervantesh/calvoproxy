@@ -8,25 +8,49 @@ Un renglón por incremento. Invariantes numerados según
 | 1 | Header antes del primer byte, también SSE | ✅ | Rojo primero. Usa `headerSnapshotRecorder` |
 | 2 | `PROXY_ROUTE_TRACE=off` no cambia nada observable | ✅ | Rojo primero. Off ⇒ no se asigna traza |
 | 3 | Traza `nil` es no-op | ✅ | **Sin rojo previo**: la seguridad ante `nil` ya estaba en el diseño del incremento 1. Test de caracterización |
-| 4 | Header ≤ 512 bytes con recorte determinista | ⏳ | Necesita `prev=` y `trunc=1` |
-| 5 | Las cuatro salidas sin servido emiten traza parcial | ⏳ | Necesita `Outcome` y `o=` |
-| 6 | gRPC hereda la cabecera | ⏳ | |
+| 4 | Header ≤ 512 bytes con recorte determinista | ✅ | Rojo primero |
+| 5 | Las cuatro salidas sin servido emiten traza parcial | ✅ | Rojo primero, un subtest por camino |
+| 6 | gRPC hereda la cabecera | ✅ | Rojo primero, en `cmd/grpc_test.go` |
 | 7 | Cabecera de valor único | ✅ | Rojo primero |
-| 8 | Sin carreras bajo `-race` con streaming concurrente | ⏳ | |
+| 8 | Sin carreras bajo `-race` con streaming concurrente | ✅ | Rojo primero — ver abajo |
+
+Puertas: `go build -mod=vendor` · `go test -race ./...` · `coverage-gate.sh` — las tres en
+verde.
 
 ## Donde la spec estaba equivocada
 
-- **§8, invariante 7.** El borrador decía que ante una cabecera duplicada
-  "ganaría la del upstream" porque `cmd/grpc.go` toma `values[0]`. Falso: la nuestra se
-  escribe antes, así que va primero. El fallo real es la duplicación en sí, con texto del
-  upstream en el segundo valor. Corregido en la spec con la evidencia del test.
+- **§8, invariante 7.** El borrador decía que ante una cabecera duplicada "ganaría la del
+  upstream" porque `cmd/grpc.go` toma `values[0]`. Falso: la nuestra se escribe antes, así que
+  va primero. El fallo real es la duplicación en sí, con texto del upstream en el segundo
+  valor.
+- **§4, punto de anotación de fallos.** El borrador lo situaba en el bucle de fallback. Es el
+  sitio equivocado: `cervoretry.ClassifyHTTPStatus` remapea antes de que el error llegue ahí
+  (500 → 502), así que la traza habría reportado un código que el upstream nunca envió. La
+  anotación se movió a `executeAttempt`, el único punto que ve `resp.StatusCode` crudo.
+
+## Lo que encontró el invariante 8
+
+La primera ejecución dio tres `DATA RACE`, pero **no en el código de la traza**: el helper
+compartido `streamTransport` ([router_critical_path_test.go:32](../../internal/router/router_critical_path_test.go))
+incrementa `calls` y escribe `lastURL` sin lock. Ningún test lo compartía entre goroutines
+hasta ahora. El test de P1 usa un transport sin estado; el helper sigue con la carrera latente
+y merece su propio arreglo — fuera del alcance de P1.
+
+## Pendiente para cerrar P1
+
+- Ring de trazas + `GET /decisions/{id}` + opt-in `X-Calvoproxy-Trace: full` (spec §5 y §6).
+  Especificados y **no implementados**: ningún invariante los exigía, así que no hubo rojo que
+  los forzara. Necesitan sus propios invariantes antes de escribirlos.
+- Load test comparativo para confirmar que no hay regresión en el hot path.
+- CHANGELOG y PR a `dev`.
 
 ## Pendiente de decisión humana
 
 - Formato del header: quedará congelado como API en cuanto Hermes lo parsee. Sigue sin
-  aprobación explícita; se avanza sobre el borrador.
+  aprobación explícita; se avanzó sobre el borrador.
 
 ## Fuera de alcance detectado por el camino
 
 - `X-Calvoproxy-Model`, `-Profile` y `-Attempt` sufren la misma duplicación que arreglamos
-  para las cabeceras nuevas. Merece su propio cambio y su propio test.
+  para las cabeceras nuevas.
+- La carrera del helper `streamTransport`.

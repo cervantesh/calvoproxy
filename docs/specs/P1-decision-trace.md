@@ -114,7 +114,7 @@ invariante 4 lo cubre con el peor caso construible.
 | tras `filterAvailableAttempts` (:303) | `traceExclusion{Why:"breaker", Until}` por excluido |
 | `rankAttemptsByScore` ([router_scoring.go:230](../../internal/router/router_scoring.go)) | el score de cada modelo, ya calculado ahí — sin segunda pasada |
 | tras el truncado a `MaxAttempts` (:307) | `Eligible` |
-| bucle de `DefaultFallbackExecutor.Execute` ([router_fallback.go:128](../../internal/router/router_fallback.go)) | un `traceAttempt` por fallo, desde el `attemptError` que ya tiene en la mano |
+| `executeAttempt`, cada camino de fallo ([router_upstream.go](../../internal/router/router_upstream.go)) | un `traceAttempt` por fallo, con el estatus **crudo** del upstream |
 | `executeAttempt`, éxito no-stream ([router_upstream.go:252](../../internal/router/router_upstream.go)) | `Served` |
 | `executeAttempt`, éxito stream (:209) | `Served`, antes de `setServedModelHeaders` |
 | `setServedModelHeaders` ([router_http.go:76](../../internal/router/router_http.go)) | materializa `X-Calvoproxy-Route` y `X-Calvoproxy-Decision-Id` |
@@ -207,6 +207,14 @@ la misma cabecera produce dos valores. Hay que añadir `x-calvoproxy-route` y
 > Esto ya afecta hoy a `X-Calvoproxy-Model`, `-Profile` y `-Attempt`, que tienen exactamente
 > el mismo problema. Queda **fuera del alcance de P1**: el `skipKeys` de esta spec cubre solo
 > las dos cabeceras nuevas, y las tres antiguas merecen su propio cambio y su propio test.
+
+> **Corrección (fase B).** El borrador situaba la anotación de fallos en el bucle de
+> `DefaultFallbackExecutor.Execute`. Es el sitio equivocado: cuando el error llega al bucle,
+> `classifyHTTPError` ya lo ha pasado por `cervoretry.ClassifyHTTPStatus`, que **remapea** —
+> un 500 del upstream llega al bucle como 502. Una traza que reporte `model-a:502` cuando
+> OpenRouter dijo 500 despista justo a quien intenta averiguar qué pasó de verdad.
+> `executeAttempt` es el único punto que ve `resp.StatusCode` sin remapear, así que la
+> anotación vive ahí. El bucle no anota nada.
 
 ## 9. Fuera de alcance
 

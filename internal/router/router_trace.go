@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +32,79 @@ type routeTrace struct {
 	// since an HTTP status alone cannot tell "everything is cooling down" from
 	// "nothing here can do vision".
 	Outcome string
+
+	CapsRequired []string
+	// How the chain narrowed, stage by stage: planned by policy, left after the
+	// capability filter, left after the breaker and the MaxAttempts truncation.
+	Planned, AfterCaps, Eligible int
+	// ExcludedByBreaker counts models the breaker gated out. A chain that keeps
+	// shrinking is the difference between "this model is slow" and "half the
+	// chain is in cooldown".
+	ExcludedByBreaker int
+
+	Attempts []traceAttempt
+	Served   *traceAttempt
+
+	// scores is written once, when the chain is ranked, and read when an attempt
+	// is recorded. Never exported: it is a rendering detail.
+	scores map[string]float64
+}
+
+// traceAttempt is one model's turn in the chain. Reason is upstream error text
+// and therefore NEVER leaves through the header or the client-facing JSON; see
+// spec §6.
+type traceAttempt struct {
+	Model  string
+	Index  int
+	Score  float64
+	Status int
+	Kind   string
+	Reason string
+}
+
+func (t *routeTrace) recordChain(planned, afterCaps, eligible int, required []string) {
+	if t == nil {
+		return
+	}
+	t.Planned, t.AfterCaps, t.Eligible = planned, afterCaps, eligible
+	t.CapsRequired = required
+	t.ExcludedByBreaker = afterCaps - eligible
+	if t.ExcludedByBreaker < 0 {
+		t.ExcludedByBreaker = 0
+	}
+}
+
+// recordScores stores the scores the chain was ordered by, captured where
+// rankAttemptsByScore already computed them — no second pass over the chain.
+func (t *routeTrace) recordScores(models []string, scores []float64) {
+	if t == nil || len(models) != len(scores) {
+		return
+	}
+	t.scores = make(map[string]float64, len(models))
+	for i, m := range models {
+		t.scores[m] = scores[i]
+	}
+}
+
+func (t *routeTrace) recordAttemptFailure(model string, index, status int, kind, reason string) {
+	if t == nil {
+		return
+	}
+	t.Attempts = append(t.Attempts, traceAttempt{
+		Model: model, Index: index, Status: status,
+		Kind: kind, Reason: truncateReason(reason), Score: t.scores[model],
+	})
+}
+
+func (t *routeTrace) recordServed(model string, index int) {
+	if t == nil {
+		return
+	}
+	t.Outcome = outcomeServed
+	t.Served = &traceAttempt{
+		Model: model, Index: index, Status: http.StatusOK,
+		Kind: "ok", Score: t.scores[model],
+	}
 }
 
 const (
@@ -99,7 +174,9 @@ func (t *routeTrace) header() string {
 	if t == nil {
 		return ""
 	}
-	fields := []string{
+	// Protected fields, in order. Trimming never touches these: a trace that
+	// cannot say which profile it is or whether it compressed is not a trace.
+	protected := []string{
 		traceVersion,
 		"p=" + traceSanitize(t.Profile),
 		// Always emitted, so "not compressed" stays distinguishable from "this
@@ -110,9 +187,93 @@ func (t *routeTrace) header() string {
 	// the presence of X-Calvoproxy-Model, and spending header bytes to repeat it
 	// costs the fields that carry real information.
 	if t.Outcome != "" && t.Outcome != outcomeServed {
-		fields = append(fields, "o="+traceSanitize(t.Outcome))
+		protected = append(protected, "o="+traceSanitize(t.Outcome))
 	}
-	return strings.Join(fields, traceFieldSep)
+	if t.Served != nil {
+		protected = append(protected, "s="+strconv.FormatFloat(t.Served.Score, 'f', 2, 64))
+		if t.Served.Index > 1 {
+			// The degraded signal: this answer came from a fallback.
+			protected = append(protected, "a="+strconv.Itoa(t.Served.Index))
+		}
+	}
+	if len(t.CapsRequired) > 0 {
+		protected = append(protected, "caps="+traceSanitize(strings.Join(t.CapsRequired, "+")))
+	}
+
+	// Droppable, in reverse order of value.
+	shape := fmt.Sprintf("n=%d/%d/%d", t.Planned, t.AfterCaps, t.Eligible)
+	brk := ""
+	if t.ExcludedByBreaker > 0 {
+		brk = "brk=" + strconv.Itoa(t.ExcludedByBreaker)
+	}
+	prev := make([]string, 0, len(t.Attempts))
+	for _, a := range t.Attempts {
+		prev = append(prev, traceShortModel(a.Model)+":"+attemptCode(a))
+	}
+
+	return renderTraceHeader(protected, shape, brk, prev)
+}
+
+// renderTraceHeader assembles the header and, if it is over the cap, trims it
+// deterministically: prev= entries from the end, then prev= entirely, then the
+// chain shape. Anything trimmed is declared with trunc=1, so a consumer never
+// reads a trimmed trace as a short chain.
+func renderTraceHeader(protected []string, shape, brk string, prev []string) string {
+	build := func(prev []string, withShape bool) (string, bool) {
+		fields := append([]string{}, protected...)
+		if withShape {
+			if shape != "" {
+				fields = append(fields, shape)
+			}
+			if brk != "" {
+				fields = append(fields, brk)
+			}
+		}
+		if len(prev) > 0 {
+			fields = append(fields, "prev="+strings.Join(prev, ","))
+		}
+		return strings.Join(fields, traceFieldSep), true
+	}
+
+	if out, _ := build(prev, true); len(out) <= traceMaxHeader {
+		return out
+	}
+	const truncated = traceFieldSep + "trunc=1"
+	for n := len(prev) - 1; n >= 0; n-- {
+		if out, _ := build(prev[:n], true); len(out)+len(truncated) <= traceMaxHeader {
+			return out + truncated
+		}
+	}
+	if out, _ := build(nil, false); len(out)+len(truncated) <= traceMaxHeader {
+		return out + truncated
+	}
+	// Only the protected fields left. If those alone blow the cap it is a bug,
+	// and the test for invariant 4 is what catches it.
+	out, _ := build(nil, false)
+	return out + truncated
+}
+
+// attemptCode renders an attempt's outcome for prev=: the HTTP status when
+// there is one, otherwise a closed enumeration. Never upstream text.
+func attemptCode(a traceAttempt) string {
+	if a.Status > 0 {
+		return strconv.Itoa(a.Status)
+	}
+	if a.Kind != "" {
+		return traceSanitize(a.Kind)
+	}
+	return "err"
+}
+
+// traceShortModel drops the org prefix and the :free suffix. The full id
+// already travels in X-Calvoproxy-Model and in the JSON forms; repeating it per
+// failed attempt is what pushes the header over its budget.
+func traceShortModel(model string) string {
+	if i := strings.LastIndex(model, "/"); i >= 0 && i+1 < len(model) {
+		model = model[i+1:]
+	}
+	model = strings.TrimSuffix(model, ":free")
+	return traceSanitize(model)
 }
 
 // failTrace stamps the outcome and commits the trace headers. Must be called
@@ -140,4 +301,26 @@ func traceSanitize(value string) string {
 			return '_'
 		}
 	}, value)
+}
+
+// recordTraceFailure annotates one failed attempt. Called from executeAttempt
+// rather than from the fallback loop: only executeAttempt sees the upstream's
+// raw status, since by the time the loop gets the error cervoretry has already
+// remapped it.
+func recordTraceFailure(ctx context.Context, attempt modelAttempt, status int, kind, reason string) {
+	traceFrom(ctx).recordAttemptFailure(attempt.Model, attempt.AttemptIndex, status, kind, reason)
+}
+
+// traceKindFor names the shape of a failure for prev=, from a closed set.
+func traceKindFor(attErr *attemptError) string {
+	switch {
+	case attErr == nil:
+		return "err"
+	case attErr.SkipModel:
+		return "skip"
+	case attErr.Timeout:
+		return "timeout"
+	default:
+		return "http"
+	}
 }
