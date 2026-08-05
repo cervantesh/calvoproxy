@@ -282,6 +282,34 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
+### Try a chain without wiring anything (`calvoproxy chat`)
+
+A REPL that talks to the proxy exactly as an agent does — profile route, full
+history, SSE — and prints the routing decision in words after each turn:
+
+```bash
+calvoproxy chat --profile coding
+```
+
+```
+[coding] > refactor this handler
+
+…the model's answer streams here…
+
+· coding · nemotron-3-super-120b-a12b · score 0.71 · intento 2/3 · 1 excluido por breaker
+  antes falló: gpt-oss-20b (429)
+  3.4s
+```
+
+`/profile <name>` switches chains mid-session, `/reset` clears the history,
+`/trace` toggles the full-decision opt-in, `/quit` (or Ctrl-D) leaves. An
+upstream error prints and the REPL keeps going — a 503 from an exhausted chain
+is information, not a reason to close.
+
+Useful when you want to know *which* model a profile really reaches under
+current breaker/score state, without touching your client's config. Flags:
+`--url` (defaults to the configured local proxy) and `--no-stream`.
+
 ### On-demand operation
 
 Set `PROXY_IDLE_TIMEOUT` (e.g. `20m`) and the proxy exits itself once no proxy
