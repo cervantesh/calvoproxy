@@ -11,6 +11,18 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-05
+
+Six features that came out of reviewing OmniRoute and asking what was worth
+taking. The through-line is **explaining and predicting** rather than only
+reacting: the response now says why a model answered, the proxy knows how much
+of its budget is left before it runs out, and there is finally somewhere to look
+at all of it.
+
+Everything here is additive. Nothing changes an existing default, and the two
+features that could alter behaviour — compression and hard quota exclusion —
+ship **off**.
+
 ### Added
 - **Request compression, off by default.** Agent workloads resend the whole
   history every turn, and what inflates it most is tool results: one `cat` of a
@@ -682,6 +694,7 @@ change to the running proxy.
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
 [Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
 [0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
 [0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0
 [0.9.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.9.2
