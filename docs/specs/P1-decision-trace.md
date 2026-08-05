@@ -184,6 +184,14 @@ byte a byte el actual (invariante 2).
 | 6 | gRPC hereda el header sin trabajo nuevo en el router | request gRPC; se afirma `X-Calvoproxy-Route` en el mapa `Headers` de la respuesta |
 | 7 | Valor único: la cabecera no se duplica al copiar las del upstream | upstream que emite `X-Calvoproxy-Route`; se afirma un solo valor tras `streamProxyResponse` |
 | 8 | Sin carrera bajo `-race` con streaming concurrente | N requests en paralelo, `go test -race` |
+| 9 | `X-Calvoproxy-Trace: full` devuelve el JSON completo **sin** `Reason`; sin el opt-in no se emite nada | un request con la cabecera y otro sin ella |
+| 10 | `/decisions/{id}` devuelve la traza **con** `Reason`; id desconocido ⇒ no encontrado | lookup tras un request real, y con un id inventado |
+| 11 | El ring está acotado y descarta las trazas más viejas | `PROXY_TRACE_RING` pequeño, más requests que capacidad |
+
+La cabecera de respuesta que transporta el JSON del opt-in es
+`X-Calvoproxy-Trace-Json`. Es una cabecera aparte de `X-Calvoproxy-Route` a propósito: la
+forma corta es el contrato estable y no debe cambiar de tamaño ni de forma porque un cliente
+pida el detalle.
 
 El invariante 7 no estaba en el goal: lo añade esta spec porque `streamProxyResponse` hace
 `copyHeaders` con `dst.Add` ([router_http.go:58](../../internal/router/router_http.go))

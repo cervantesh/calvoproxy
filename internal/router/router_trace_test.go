@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -361,4 +362,111 @@ func (concurrentStreamTransport) RoundTrip(*http.Request) (*http.Response, error
 		Header:     h,
 		Body:       io.NopCloser(strings.NewReader(streamEventsFixture)),
 	}, nil
+}
+
+// Invariant 9 (spec §6 and §8): the full JSON travels only when the client asks
+// for it, and never carries Reason — that is upstream error text, and this
+// channel has no admin gate in front of it.
+func TestTrace_FullOptInOmitsUpstreamText(t *testing.T) {
+	newSvc := func(t *testing.T) *RouterService {
+		return newTestService(t, &http.Client{Transport: failingTransport{}}, policyConfig{
+			DefaultProfile: "simple",
+			Profiles:       map[string][]string{"simple": {"model-a"}},
+			Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+		})
+	}
+
+	plain := httptest.NewRecorder()
+	newSvc(t).RouteRequestWithProvider(plain, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+	if got := plain.Header().Get("X-Calvoproxy-Trace-Json"); got != "" {
+		t.Errorf("full JSON must not be emitted without the opt-in, got %q", got)
+	}
+
+	req := trustedRequest(http.MethodPost, "/v1/chat/completions", `{"messages":[]}`)
+	req.Header.Set("X-Calvoproxy-Trace", "full")
+	full := httptest.NewRecorder()
+	newSvc(t).RouteRequestWithProvider(full, req, "k", "")
+
+	raw := full.Header().Get("X-Calvoproxy-Trace-Json")
+	if raw == "" {
+		t.Fatal("opt-in requested but no full trace emitted")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("full trace is not valid JSON: %v (%q)", err, raw)
+	}
+	if strings.Contains(strings.ToLower(raw), "upstream down") {
+		t.Error("upstream error text leaked through the un-gated channel")
+	}
+	if strings.Contains(raw, `"reason"`) {
+		t.Errorf("reason must never appear outside /decisions/{id}: %q", raw)
+	}
+	if decoded["profile"] != "simple" {
+		t.Errorf("full trace lost the profile: %q", raw)
+	}
+}
+
+// Invariant 10 (spec §5): /decisions/{id} serves the same trace WITH the reason,
+// because that endpoint sits behind the admin gate. An unknown id is simply not
+// found — the ring is bounded and ids rotate out.
+func TestTrace_DecisionLookupCarriesReason(t *testing.T) {
+	svc := newTestService(t, &http.Client{Transport: failingTransport{}}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"model-a"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+
+	id := rec.Header().Get("X-Calvoproxy-Decision-Id")
+	if id == "" {
+		t.Fatal("no decision id to look up")
+	}
+	found, ok := svc.Decision(id)
+	if !ok {
+		t.Fatalf("decision %s not in the ring", id)
+	}
+	raw, err := json.Marshal(found)
+	if err != nil {
+		t.Fatalf("decision does not marshal: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(string(raw)), "upstream down") {
+		t.Errorf("the admin channel is the one place reason belongs, got %s", raw)
+	}
+	if _, ok := svc.Decision("ffffffffffffffff"); ok {
+		t.Error("an unknown id must not resolve")
+	}
+}
+
+// Invariant 11 (spec §5): the ring is bounded. It holds conversation-adjacent
+// metadata, so it is capped and never persisted.
+func TestTrace_RingDropsOldestBeyondCapacity(t *testing.T) {
+	t.Setenv("PROXY_TRACE_RING", "3")
+	svc := newTestService(t, &http.Client{Transport: failingTransport{}}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"model-a"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+
+	ids := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		rec := httptest.NewRecorder()
+		svc.RouteRequestWithProvider(rec, trustedRequest(
+			http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+		ids = append(ids, rec.Header().Get("X-Calvoproxy-Decision-Id"))
+	}
+
+	for _, id := range ids[:3] {
+		if _, ok := svc.Decision(id); ok {
+			t.Errorf("decision %s should have rotated out of a ring of 3", id)
+		}
+	}
+	for _, id := range ids[3:] {
+		if _, ok := svc.Decision(id); !ok {
+			t.Errorf("decision %s should still be in the ring", id)
+		}
+	}
 }

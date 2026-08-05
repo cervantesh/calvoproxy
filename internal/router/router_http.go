@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -90,7 +91,22 @@ func setServedModelHeaders(ctx context.Context, w http.ResponseWriter, attempt m
 	if attempt.AttemptIndex > 0 {
 		h.Set("X-Calvoproxy-Attempt", strconv.Itoa(attempt.AttemptIndex))
 	}
-	setRouteTraceHeaders(h, traceFrom(ctx))
+	setRouteTraceHeadersWithFull(ctx, h, traceFrom(ctx))
+}
+
+// setRouteTraceHeadersWithFull adds the opt-in JSON alongside the short form.
+// The short header stays byte-for-byte the same whether or not the client asked
+// for detail: it is the stable contract, and it must not change shape because
+// someone wanted more.
+func setRouteTraceHeadersWithFull(ctx context.Context, h http.Header, trace *routeTrace) {
+	setRouteTraceHeaders(h, trace)
+	if trace == nil || !traceFullRequested(ctx) {
+		return
+	}
+	// Never with the reason: this channel has no admin gate in front of it.
+	if raw, err := json.Marshal(trace.view(false)); err == nil {
+		h.Set(traceJSONHeader, string(raw))
+	}
 }
 
 func setRouteTraceHeaders(h http.Header, trace *routeTrace) {

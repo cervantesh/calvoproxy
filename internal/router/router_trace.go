@@ -284,7 +284,7 @@ func failTrace(ctx context.Context, w http.ResponseWriter, outcome string) {
 		return
 	}
 	trace.Outcome = outcome
-	setRouteTraceHeaders(w.Header(), trace)
+	setRouteTraceHeadersWithFull(ctx, w.Header(), trace)
 }
 
 // traceSanitize keeps header values to a byte set that cannot break framing or

@@ -13,6 +13,9 @@ Un renglón por incremento. Invariantes numerados según
 | 6 | gRPC hereda la cabecera | ✅ | Rojo primero, en `cmd/grpc_test.go` |
 | 7 | Cabecera de valor único | ✅ | Rojo primero |
 | 8 | Sin carreras bajo `-race` con streaming concurrente | ✅ | Rojo primero — ver abajo |
+| 9 | Opt-in `full` sin `Reason` | ✅ | Rojo primero |
+| 10 | `/decisions/{id}` con `Reason`, tras `admin` | ✅ | Rojo primero |
+| 11 | Ring acotado, descarta lo más viejo | ✅ | Rojo primero |
 
 Puertas: `go build -mod=vendor` · `go test -race ./...` · `coverage-gate.sh` — las tres en
 verde.
@@ -36,13 +39,15 @@ incrementa `calls` y escribe `lastURL` sin lock. Ningún test lo compartía entr
 hasta ahora. El test de P1 usa un transport sin estado; el helper sigue con la carrera latente
 y merece su propio arreglo — fuera del alcance de P1.
 
-## Pendiente para cerrar P1
+## Cierre
 
-- Ring de trazas + `GET /decisions/{id}` + opt-in `X-Calvoproxy-Trace: full` (spec §5 y §6).
-  Especificados y **no implementados**: ningún invariante los exigía, así que no hubo rojo que
-  los forzara. Necesitan sus propios invariantes antes de escribirlos.
-- Load test comparativo para confirmar que no hay regresión en el hot path.
-- CHANGELOG y PR a `dev`.
+Los once invariantes en verde, las tres puertas pasando, load test sin cambios, CHANGELOG y
+README actualizados.
+
+§5 y §6 (ring, `/decisions/{id}`, opt-in `full`) llegaron en un último incremento con sus
+propios invariantes 9–11. Se planteó recortarlos a P5 —donde el ring hace falta igualmente
+para el dashboard— pero recortar alcance sin que nadie lo decida es peor que hacer el trabajo,
+así que se implementaron.
 
 ## Pendiente de decisión humana
 

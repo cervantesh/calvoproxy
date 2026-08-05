@@ -121,6 +121,25 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 		writeJSON(w, routerService.Health())
 	}))
 
+	// /decisions/{id} is the ONE channel that carries the upstream reason text
+	// from a routing decision, which is why it sits behind the same admin gate as
+	// /health. The short X-Calvoproxy-Route header and the client opt-in both
+	// stop at status codes and a closed set of reason words.
+	mux.HandleFunc("/decisions/", admin(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/decisions/")
+		decision, ok := routerService.Decision(id)
+		if !ok {
+			// The ring is bounded, so an id that existed a thousand requests ago
+			// is simply gone. Not an error worth distinguishing.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": "no decision recorded for that id"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, decision)
+	}))
+
 	mux.HandleFunc("/health/model-policy", admin(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, routerService.ModelPolicyHealth())

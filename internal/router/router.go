@@ -124,6 +124,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	tracer := otel.Tracer("calvoproxy/router")
 	ctx, span := tracer.Start(ctx, "RouteRequest_Proxy")
 	defer span.End()
+	ctx = withTraceOptIn(ctx, r)
 
 	// Bound the request body before reading it into memory, so an oversized or
 	// malicious payload can't OOM the process. Configurable via
@@ -265,6 +266,9 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	// materialised inside executeAttempt (setServedModelHeaders), and
 	// AttemptExecutor.ExecuteAttempt does not receive the execution struct.
 	ctx = withTrace(ctx, newRouteTrace(category))
+	// One publish per request, on every exit: the ring is what /decisions/{id}
+	// reads, and an unserved request is exactly the one worth looking up.
+	defer s.finishTrace(ctx)
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
 	// loop). Streaming requests get NO total deadline here — they are bounded by
