@@ -134,7 +134,7 @@ func TestSetup_ApplyIsIdempotent(t *testing.T) {
 	if got := readFile(t, settings); got != afterFirst {
 		t.Errorf("second apply changed the file:\n%s", got)
 	}
-	if !strings.Contains(second.String(), "ya configurado") {
+	if !strings.Contains(second.String(), "already configured") {
 		t.Errorf("second apply should report it was already configured; got:\n%s", second)
 	}
 }
@@ -145,7 +145,7 @@ func TestSetup_ApplyIsIdempotent(t *testing.T) {
 func TestSetup_CodexPreservesCommentsAndContent(t *testing.T) {
 	home := setupSandbox(t)
 	config := filepath.Join(home, ".codex", "config.toml")
-	original := "# mi configuración\nmodel = \"gpt-5\"\n\n[history]\npersistence = \"save-all\"\n"
+	original := "# my configuration\nmodel = \"gpt-5\"\n\n[history]\npersistence = \"save-all\"\n"
 	writeFile(t, config, original)
 
 	out := &strings.Builder{}
@@ -154,7 +154,7 @@ func TestSetup_CodexPreservesCommentsAndContent(t *testing.T) {
 	}
 
 	got := readFile(t, config)
-	for _, want := range []string{"# mi configuración", `model = "gpt-5"`, "[history]", `persistence = "save-all"`} {
+	for _, want := range []string{"# my configuration", `model = "gpt-5"`, "[history]", `persistence = "save-all"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("apply lost %q from the user's TOML:\n%s", want, got)
 		}
@@ -236,7 +236,7 @@ func TestSetup_MissingToolReportsWithoutCreating(t *testing.T) {
 	if code == 0 {
 		t.Errorf("exit = 0, want non-zero when the tool is not found")
 	}
-	if !strings.Contains(strings.ToLower(out.String()), "no encontr") {
+	if !strings.Contains(strings.ToLower(out.String()), "not found") {
 		t.Errorf("should say the tool was not found; got:\n%s", out)
 	}
 }

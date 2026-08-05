@@ -69,8 +69,8 @@ func runChatWith(args []string, in io.Reader, out io.Writer) int {
 		out:    out,
 	}
 
-	fmt.Fprintf(out, "calvoproxy chat · %s · perfil %s\n", s.baseURL, s.profile)
-	fmt.Fprintln(out, "comandos: /profile <n> · /reset · /trace · /quit")
+	fmt.Fprintf(out, "calvoproxy chat · %s · profile %s\n", s.baseURL, s.profile)
+	fmt.Fprintln(out, "commands: /profile <n> · /reset · /trace · /quit")
 
 	scanner := bufio.NewScanner(in)
 	// Agent-sized turns exceed bufio's 64 KiB default line: a pasted file is a
@@ -106,19 +106,19 @@ func (s *chatSession) command(line string) bool {
 		return true
 	case "/reset":
 		s.history = nil
-		fmt.Fprintln(s.out, "historial vacío")
+		fmt.Fprintln(s.out, "history cleared")
 	case "/trace":
 		s.traceFull = !s.traceFull
-		fmt.Fprintf(s.out, "traza completa: %v\n", s.traceFull)
+		fmt.Fprintf(s.out, "full trace: %v\n", s.traceFull)
 	case "/profile":
 		if len(fields) < 2 {
-			fmt.Fprintln(s.out, "uso: /profile <nombre>")
+			fmt.Fprintln(s.out, "usage: /profile <name>")
 			break
 		}
 		s.profile = fields[1]
-		fmt.Fprintf(s.out, "perfil: %s\n", s.profile)
+		fmt.Fprintf(s.out, "profile: %s\n", s.profile)
 	default:
-		fmt.Fprintf(s.out, "comando desconocido: %s\n", fields[0])
+		fmt.Fprintf(s.out, "unknown command: %s\n", fields[0])
 	}
 	return false
 }
@@ -140,13 +140,13 @@ func (s *chatSession) turn(prompt string) {
 	payload := map[string]any{"messages": s.history, "stream": s.stream}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Fprintf(s.out, "\nno se pudo serializar la petición: %v\n", err)
+		fmt.Fprintf(s.out, "\ncould not serialise the request: %v\n", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, s.endpoint(), bytes.NewReader(body))
 	if err != nil {
-		fmt.Fprintf(s.out, "\npetición inválida: %v\n", err)
+		fmt.Fprintf(s.out, "\ninvalid request: %v\n", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -160,7 +160,7 @@ func (s *chatSession) turn(prompt string) {
 	started := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
-		fmt.Fprintf(s.out, "\nno se pudo hablar con el proxy: %v\n", err)
+		fmt.Fprintf(s.out, "\ncould not reach the proxy: %v\n", err)
 		// The turn never happened: drop the user message so the history does not
 		// accumulate prompts the model never saw.
 		s.history = s.history[:len(s.history)-1]
@@ -172,7 +172,7 @@ func (s *chatSession) turn(prompt string) {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		fmt.Fprintf(s.out, "\n%d %s\n", resp.StatusCode, strings.TrimSpace(string(errBody)))
 		if retry := resp.Header.Get("Retry-After"); retry != "" {
-			fmt.Fprintf(s.out, "reintenta en %ss\n", retry)
+			fmt.Fprintf(s.out, "retry in %ss\n", retry)
 		}
 		if t := renderTrace(resp.Header); t != "" {
 			fmt.Fprintln(s.out, t)
@@ -240,7 +240,7 @@ func (s *chatSession) printStream(body io.Reader) string {
 func (s *chatSession) printWhole(body io.Reader) string {
 	raw, err := io.ReadAll(io.LimitReader(body, 8*1024*1024))
 	if err != nil {
-		fmt.Fprintf(s.out, "respuesta truncada: %v\n", err)
+		fmt.Fprintf(s.out, "truncated response: %v\n", err)
 		return ""
 	}
 	var parsed struct {
@@ -294,26 +294,26 @@ func renderTrace(h http.Header) string {
 	// reader to ignore the one field that signals degradation.
 	if a := fields["a"]; a != "" && a != "1" {
 		if eligible := lastSegment(fields["n"]); eligible != "" {
-			segments = append(segments, "intento "+a+"/"+eligible)
+			segments = append(segments, "attempt "+a+"/"+eligible)
 		} else {
-			segments = append(segments, "intento "+a)
+			segments = append(segments, "attempt "+a)
 		}
 	}
 	if brk := fields["brk"]; brk != "" && brk != "0" {
-		word := "excluidos por breaker"
+		word := "excluded by breaker"
 		if brk == "1" {
-			word = "excluido por breaker"
+			word = "excluded by breaker"
 		}
 		segments = append(segments, brk+" "+word)
 	}
 	if q := fields["q"]; q != "" && q != "0" {
-		segments = append(segments, q+" sin cuota")
+		segments = append(segments, q+" out of quota")
 	}
 	if caps := fields["caps"]; caps != "" {
-		segments = append(segments, "requiere "+caps)
+		segments = append(segments, "needs "+caps)
 	}
 	if cmp := fields["cmp"]; cmp != "" && cmp != "off" {
-		segments = append(segments, "comprimido "+cmp)
+		segments = append(segments, "compressed "+cmp)
 	}
 	if o := fields["o"]; o != "" {
 		segments = append(segments, o)
@@ -322,10 +322,10 @@ func renderTrace(h http.Header) string {
 	var b strings.Builder
 	b.WriteString("· " + strings.Join(segments, " · "))
 	if prev := fields["prev"]; prev != "" {
-		b.WriteString("\n  antes falló: " + renderPrev(prev))
+		b.WriteString("\n  previously failed: " + renderPrev(prev))
 	}
 	if fields["trunc"] == "1" {
-		b.WriteString("\n  (traza recortada)")
+		b.WriteString("\n  (trace truncated)")
 	}
 	return b.String()
 }

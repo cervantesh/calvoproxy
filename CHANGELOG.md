@@ -11,6 +11,26 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-05
+
+### Changed
+- **Everything the binary says is now in English.** The repo had drifted into a
+  mix of English and Spanish that looked deliberate and was not.
+
+  Two of these are not documentation. The strings printed by `calvoproxy chat`
+  and `calvoproxy setup` are what an operator reads, and **the truncation marker
+  the tool-result guard injects into the request body ends up in the model's
+  context** — the language of that marker is part of the prompt, not a comment.
+
+  Also translated: the twelve specs under `docs/specs/`, the six-capability
+  architecture plan, and the test assertions that depended on the old strings.
+  `README.es.md` stays as it is; it is an intentional translation rather than
+  drift.
+
+  No behavioural change beyond the text itself. Nothing was renamed, no
+  configuration key changed, and every gate — vendored offline build, `-race`,
+  the coverage floors — passes unchanged.
+
 ## [0.12.0] — 2026-08-05
 
 A correction. v0.11.0 put context compression inside the proxy; it did not
@@ -725,6 +745,7 @@ change to the running proxy.
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
 [Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.13.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.13.0
 [0.12.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.12.0
 [0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
 [0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1

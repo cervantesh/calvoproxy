@@ -86,17 +86,17 @@ func TestToolGuard_LeavesValidJSONAlone(t *testing.T) {
 func TestToolGuard_KeepsBothEndsAndMarksTheCut(t *testing.T) {
 	t.Setenv("PROXY_TOOL_RESULT_LIMIT", "600")
 
-	content := "INICIO-IMPORTANTE" + strings.Repeat("relleno ", 500) + "FINAL-IMPORTANTE"
+	content := "IMPORTANT-HEAD" + strings.Repeat("filler ", 500) + "IMPORTANT-TAIL"
 	out, stat := compressRequest("coding", bodyWith(msg("tool", content)))
 
 	got := firstMessageContent(t, out)
-	if !strings.Contains(got, "INICIO-IMPORTANTE") {
+	if !strings.Contains(got, "IMPORTANT-HEAD") {
 		t.Error("the head was dropped")
 	}
-	if !strings.Contains(got, "FINAL-IMPORTANTE") {
+	if !strings.Contains(got, "IMPORTANT-TAIL") {
 		t.Error("the tail was dropped")
 	}
-	if !strings.Contains(got, "truncado") {
+	if !strings.Contains(got, "truncated") {
 		t.Errorf("the cut is not marked, so the model cannot tell: %s", got)
 	}
 	if stat.SavedBytes <= 0 {
@@ -109,7 +109,7 @@ func TestToolGuard_KeepsBothEndsAndMarksTheCut(t *testing.T) {
 func TestToolGuard_NeverTouchesUserMessages(t *testing.T) {
 	t.Setenv("PROXY_TOOL_RESULT_LIMIT", "600")
 
-	long := strings.Repeat("pregunta larga ", 1000)
+	long := strings.Repeat("a long question ", 1000)
 	out, _ := compressRequest("coding", bodyWith(msg("user", long)))
 
 	if got := firstMessageContent(t, out); got != long {
@@ -140,10 +140,10 @@ func TestToolGuard_SurvivesOddBodies(t *testing.T) {
 	cases := []map[string]any{
 		{},
 		{"messages": nil},
-		{"messages": "no es una lista"},
-		{"messages": []any{nil, 42, "texto", map[string]any{"role": 1}}},
+		{"messages": "not a list"},
+		{"messages": []any{nil, 42, "text", map[string]any{"role": 1}}},
 		{"messages": []any{map[string]any{"role": "tool"}}},
-		{"messages": []any{map[string]any{"role": "tool", "content": []any{"partes"}}}},
+		{"messages": []any{map[string]any{"role": "tool", "content": []any{"parts"}}}},
 	}
 	for i, body := range cases {
 		if _, _, err := safeCompress("coding", body); err != nil {
@@ -181,7 +181,7 @@ func TestToolGuard_AppliesThroughTheRouterAndShowsInTheHeader(t *testing.T) {
 		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
 	})
 
-	huge := strings.Repeat("resultado de herramienta muy largo ", 500)
+	huge := strings.Repeat("a very long tool result ", 500)
 	body := `{"messages":[{"role":"tool","content":"` + huge + `"},{"role":"user","content":"resume"}]}`
 
 	rec := newHeaderSnapshotRecorder()
@@ -193,7 +193,7 @@ func TestToolGuard_AppliesThroughTheRouterAndShowsInTheHeader(t *testing.T) {
 	if len(received) >= len(body) {
 		t.Errorf("upstream received %d bytes for a %d-byte request; nothing was clipped", len(received), len(body))
 	}
-	if !strings.Contains(received, "truncado") {
+	if !strings.Contains(received, "truncated") {
 		t.Error("the clipped tool result did not reach the upstream")
 	}
 	if route := rec.sentHeader("X-Calvoproxy-Route"); strings.Contains(route, "cmp=off") {
@@ -214,7 +214,7 @@ func TestToolGuard_RouterForwardsUntouchedWhenOff(t *testing.T) {
 		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
 	})
 
-	huge := strings.Repeat("sin recortar ", 500)
+	huge := strings.Repeat("unclipped ", 500)
 	rec := newHeaderSnapshotRecorder()
 	svc.RouteRequestWithProvider(rec, trustedRequest(http.MethodPost, "/v1/chat/completions",
 		`{"messages":[{"role":"tool","content":"`+huge+`"}]}`), "k", "")

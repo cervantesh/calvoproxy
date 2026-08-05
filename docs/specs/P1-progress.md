@@ -1,61 +1,59 @@
-# P1 — progreso
+# P1 — progress
 
-Un renglón por incremento. Invariantes numerados según
+One line per increment. Invariants numbered as in
 [P1-decision-trace.md §8](P1-decision-trace.md).
 
-| # | Invariante | Estado | Nota |
+| # | Invariant | Status | Note |
 |---|---|---|---|
-| 1 | Header antes del primer byte, también SSE | ✅ | Rojo primero. Usa `headerSnapshotRecorder` |
-| 2 | `PROXY_ROUTE_TRACE=off` no cambia nada observable | ✅ | Rojo primero. Off ⇒ no se asigna traza |
-| 3 | Traza `nil` es no-op | ✅ | **Sin rojo previo**: la seguridad ante `nil` ya estaba en el diseño del incremento 1. Test de caracterización |
-| 4 | Header ≤ 512 bytes con recorte determinista | ✅ | Rojo primero |
-| 5 | Las cuatro salidas sin servido emiten traza parcial | ✅ | Rojo primero, un subtest por camino |
-| 6 | gRPC hereda la cabecera | ✅ | Rojo primero, en `cmd/grpc_test.go` |
-| 7 | Cabecera de valor único | ✅ | Rojo primero |
-| 8 | Sin carreras bajo `-race` con streaming concurrente | ✅ | Rojo primero — ver abajo |
-| 9 | Opt-in `full` sin `Reason` | ✅ | Rojo primero |
-| 10 | `/decisions/{id}` con `Reason`, tras `admin` | ✅ | Rojo primero |
-| 11 | Ring acotado, descarta lo más viejo | ✅ | Rojo primero |
+| 1 | Header before the first byte, SSE included | ✅ | Red first. Uses `headerSnapshotRecorder` |
+| 2 | `PROXY_ROUTE_TRACE=off` changes nothing observable | ✅ | Red first. Off ⇒ no trace allocated |
+| 3 | A `nil` trace is a no-op | ✅ | **No prior red**: nil-safety was already part of increment 1's design. Characterisation test |
+| 4 | Header ≤ 512 bytes with deterministic trimming | ✅ | Red first |
+| 5 | All four unserved exits emit a partial trace | ✅ | Red first, one subtest per path |
+| 6 | gRPC inherits the header | ✅ | Red first, in `cmd/grpc_test.go` |
+| 7 | Single-valued header | ✅ | Red first |
+| 8 | No races under `-race` with concurrent streaming | ✅ | Red first — see below |
+| 9 | The `full` opt-in carries no `Reason` | ✅ | Red first |
+| 10 | `/decisions/{id}` carries `Reason`, behind `admin` | ✅ | Red first |
+| 11 | Bounded ring, evicts the oldest | ✅ | Red first |
 
-Puertas: `go build -mod=vendor` · `go test -race ./...` · `coverage-gate.sh` — las tres en
-verde.
+Gates: `go build -mod=vendor` · `go test -race ./...` · `coverage-gate.sh` — all three green.
 
-## Donde la spec estaba equivocada
+## Where the spec was wrong
 
-- **§8, invariante 7.** El borrador decía que ante una cabecera duplicada "ganaría la del
-  upstream" porque `cmd/grpc.go` toma `values[0]`. Falso: la nuestra se escribe antes, así que
-  va primero. El fallo real es la duplicación en sí, con texto del upstream en el segundo
-  valor.
-- **§4, punto de anotación de fallos.** El borrador lo situaba en el bucle de fallback. Es el
-  sitio equivocado: `cervoretry.ClassifyHTTPStatus` remapea antes de que el error llegue ahí
-  (500 → 502), así que la traza habría reportado un código que el upstream nunca envió. La
-  anotación se movió a `executeAttempt`, el único punto que ve `resp.StatusCode` crudo.
+- **§8, invariant 7.** The draft claimed that with a duplicated header "the upstream's would
+  win" because `cmd/grpc.go` takes `values[0]`. False: ours is written first, so ours comes
+  first. The real defect is the duplication itself, with upstream text in the second value.
+- **§4, the failure annotation point.** The draft put it in the fallback loop. Wrong place:
+  `cervoretry.ClassifyHTTPStatus` remaps before the error gets there (500 → 502), so the trace
+  would have reported a code the upstream never sent. The annotation moved to `executeAttempt`,
+  the only point that sees the raw `resp.StatusCode`.
 
-## Lo que encontró el invariante 8
+## What invariant 8 found
 
-La primera ejecución dio tres `DATA RACE`, pero **no en el código de la traza**: el helper
-compartido `streamTransport` ([router_critical_path_test.go:32](../../internal/router/router_critical_path_test.go))
-incrementa `calls` y escribe `lastURL` sin lock. Ningún test lo compartía entre goroutines
-hasta ahora. El test de P1 usa un transport sin estado; el helper sigue con la carrera latente
-y merece su propio arreglo — fuera del alcance de P1.
+The first run produced three `DATA RACE` reports — but **not in the trace code**: the shared
+`streamTransport` helper ([router_critical_path_test.go:32](../../internal/router/router_critical_path_test.go))
+increments `calls` and writes `lastURL` without a lock. No test had shared it across goroutines
+until now. The P1 test uses a stateless transport; the helper still carries the latent race and
+deserves its own fix — out of scope for P1.
 
-## Cierre
+## Closing
 
-Los once invariantes en verde, las tres puertas pasando, load test sin cambios, CHANGELOG y
-README actualizados.
+All eleven invariants green, all three gates passing, load test unchanged, CHANGELOG and README
+updated.
 
-§5 y §6 (ring, `/decisions/{id}`, opt-in `full`) llegaron en un último incremento con sus
-propios invariantes 9–11. Se planteó recortarlos a P5 —donde el ring hace falta igualmente
-para el dashboard— pero recortar alcance sin que nadie lo decida es peor que hacer el trabajo,
-así que se implementaron.
+§5 and §6 (ring, `/decisions/{id}`, the `full` opt-in) landed in a final increment with their
+own invariants 9–11. Deferring them to P5 — where the ring is needed for the dashboard anyway —
+was considered, but cutting scope without anyone deciding to is worse than doing the work, so
+they were implemented.
 
-## Pendiente de decisión humana
+## Awaiting a human decision
 
-- Formato del header: quedará congelado como API en cuanto Hermes lo parsee. Sigue sin
-  aprobación explícita; se avanzó sobre el borrador.
+- The header format freezes into an API the moment Hermes parses it. Still not explicitly
+  approved; work proceeded on the draft.
 
-## Fuera de alcance detectado por el camino
+## Out of scope, found along the way
 
-- `X-Calvoproxy-Model`, `-Profile` y `-Attempt` sufren la misma duplicación que arreglamos
-  para las cabeceras nuevas.
-- La carrera del helper `streamTransport`.
+- `X-Calvoproxy-Model`, `-Profile` and `-Attempt` have the same duplication exposure that was
+  fixed for the new headers.
+- The race in the `streamTransport` test helper.

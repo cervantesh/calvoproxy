@@ -30,7 +30,7 @@ import (
 //     no comments — is decoded and re-encoded, and even then every other key is
 //     preserved.
 
-var errApplyNotSupported = errors.New("esta integración es de solo lectura")
+var errApplyNotSupported = errors.New("this integration is read-only")
 
 type integrationState int
 
@@ -93,7 +93,7 @@ func runSetupWith(args []string, out io.Writer) int {
 	}
 
 	if *list {
-		fmt.Fprintln(out, "Integraciones disponibles:")
+		fmt.Fprintln(out, "Available integrations:")
 		for _, in := range integrations() {
 			fmt.Fprintf(out, "  %-12s %s\n", in.Name(), describeState(in))
 		}
@@ -101,7 +101,7 @@ func runSetupWith(args []string, out io.Writer) int {
 	}
 
 	if toolName == "" {
-		fmt.Fprintln(out, "uso: calvoproxy setup <hermes|claude-code|codex> [--apply] [--revert] [--url URL]")
+		fmt.Fprintln(out, "usage: calvoproxy setup <hermes|claude-code|codex> [--apply] [--revert] [--url URL]")
 		fmt.Fprintln(out, "     calvoproxy setup --list")
 		return 2
 	}
@@ -119,7 +119,7 @@ func runSetupWith(args []string, out io.Writer) int {
 		for _, in := range integrations() {
 			names = append(names, in.Name())
 		}
-		fmt.Fprintf(out, "herramienta desconocida: %s\nconocidas: %s\n", name, strings.Join(names, ", "))
+		fmt.Fprintf(out, "unknown tool: %s\nknown tools: %s\n", name, strings.Join(names, ", "))
 		return 2
 	}
 
@@ -134,8 +134,8 @@ func runSetupWith(args []string, out io.Writer) int {
 
 	path := target.ConfigPath()
 	if path == "" {
-		fmt.Fprintf(out, "[%s] no encontrado en este equipo.\n", target.Name())
-		fmt.Fprintln(out, "       Instálalo primero; no se crea configuración a ciegas para una herramienta ausente.")
+		fmt.Fprintf(out, "[%s] not found on this machine.\n", target.Name())
+		fmt.Fprintln(out, "       Install it first; no configuration is created blind for a tool that is not there.")
 		return 1
 	}
 
@@ -143,16 +143,16 @@ func runSetupWith(args []string, out io.Writer) int {
 
 	switch target.Current(path, base) {
 	case stateConfigured:
-		fmt.Fprintln(out, "       ya configurado para este proxy — nada que hacer.")
+		fmt.Fprintln(out, "       already configured for this proxy — nothing to do.")
 		return 0
 	case stateMissing:
-		fmt.Fprintln(out, "       sin configurar para el proxy.")
+		fmt.Fprintln(out, "       not configured for the proxy.")
 	default:
-		fmt.Fprintln(out, "       apunta a otro sitio; hay que actualizarlo.")
+		fmt.Fprintln(out, "       points somewhere else; it needs updating.")
 	}
 
 	if !*apply {
-		fmt.Fprintln(out, "\nBloque que se escribiría (usa --apply para hacerlo):")
+		fmt.Fprintln(out, "\nBlock that would be written (use --apply to write it):")
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, target.Render(base))
 		return 0
@@ -162,28 +162,28 @@ func runSetupWith(args []string, out io.Writer) int {
 	if errors.Is(err, errApplyNotSupported) {
 		// Hermes on purpose: its YAML is read with a line-wise heuristic, and a
 		// heuristic that reads must not write.
-		fmt.Fprintln(out, "\n       Esta integración no se escribe automáticamente: su YAML se")
-		fmt.Fprintln(out, "       inspecciona con una heurística, y una heurística que lee no debe")
-		fmt.Fprintln(out, "       escribir. Pega este bloque a mano y reinicia la pasarela:")
+		fmt.Fprintln(out, "\n       This integration is not written automatically: its YAML is")
+		fmt.Fprintln(out, "       inspected with a heuristic, and a heuristic that reads must not")
+		fmt.Fprintln(out, "       write. Paste this block by hand and restart the gateway:")
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, target.Render(base))
 		return 0
 	}
 	if err != nil {
-		fmt.Fprintf(out, "       no se pudo escribir: %v\n", err)
+		fmt.Fprintf(out, "       could not write: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(out, "       escrito. Backup: %s\n", backup)
-	fmt.Fprintf(out, "       revertir con: calvoproxy setup %s --revert\n", target.Name())
-	fmt.Fprintln(out, "       reinicia la herramienta: ninguna recarga su config en caliente.")
+	fmt.Fprintf(out, "       written. Backup: %s\n", backup)
+	fmt.Fprintf(out, "       revert with: calvoproxy setup %s --revert\n", target.Name())
+	fmt.Fprintln(out, "       restart the tool: none of them reload their config while running.")
 	return 0
 }
 
 func describeState(in Integration) string {
 	path := in.ConfigPath()
 	if path == "" {
-		return "(no encontrado)"
+		return "(not found)"
 	}
 	return path
 }
@@ -204,7 +204,7 @@ func backupDir() string {
 func backupFile(tool, path string) (string, error) {
 	dir := backupDir()
 	if dir == "" {
-		return "", errors.New("no se pudo determinar el directorio de configuración")
+		return "", errors.New("could not determine the configuration directory")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -236,24 +236,24 @@ func latestBackup(tool string) string {
 func revertIntegration(target Integration, out io.Writer) int {
 	backup := latestBackup(target.Name())
 	if backup == "" {
-		fmt.Fprintf(out, "[%s] no hay backup que restaurar.\n", target.Name())
+		fmt.Fprintf(out, "[%s] there is no backup to restore.\n", target.Name())
 		return 1
 	}
 	path := target.ConfigPath()
 	if path == "" {
-		fmt.Fprintf(out, "[%s] no encontrado; no hay dónde restaurar.\n", target.Name())
+		fmt.Fprintf(out, "[%s] not found; there is nowhere to restore to.\n", target.Name())
 		return 1
 	}
 	content, err := os.ReadFile(backup)
 	if err != nil {
-		fmt.Fprintf(out, "       no se pudo leer el backup: %v\n", err)
+		fmt.Fprintf(out, "       could not read the backup: %v\n", err)
 		return 1
 	}
 	if err := os.WriteFile(path, content, 0o644); err != nil {
-		fmt.Fprintf(out, "       no se pudo restaurar: %v\n", err)
+		fmt.Fprintf(out, "       could not restore: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(out, "[%s] restaurado desde %s\n", target.Name(), backup)
+	fmt.Fprintf(out, "[%s] restored from %s\n", target.Name(), backup)
 	return 0
 }
 
@@ -344,7 +344,7 @@ func (c claudeCodeIntegration) Apply(path, baseURL string) (string, error) {
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(content, &parsed); err != nil {
-		return "", fmt.Errorf("el settings.json actual no es JSON válido: %w", err)
+		return "", fmt.Errorf("the current settings.json is not valid JSON: %w", err)
 	}
 	backup, err := backupFile(c.Name(), path)
 	if err != nil {

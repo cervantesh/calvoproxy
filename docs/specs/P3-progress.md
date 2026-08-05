@@ -1,35 +1,35 @@
-# P3 — progreso
+# P3 — progress
 
-- **Invariantes 1–10 en verde**, más dos de integración por el camino real del
-  router. Tres puertas OK.
-- **El gate de cobertura cazó lo que la revisión no**: tras enganchar la
-  compresión en `dispatchChain`, esa función bajó de 92.9% a 92.1% porque los
-  tests unitarios probaban los motores pero nadie ejercitaba la rama nueva por el
-  camino real. Probar el motor y probar que está enchufado son dos afirmaciones
-  distintas; añadidos un test que comprime de extremo a extremo y su contrario
-  con la compresión apagada.
-- **Decisión no prevista en la spec**: `safeCompress` con `recover()`. Los cuerpos
-  vienen de clientes y acabarán conteniendo de todo; un fallo aquí debe degradar
-  a "sin comprimir", nunca a un 500.
-- **Sigue apagado por defecto.** Sin `PROXY_COMPRESS_PROFILES` no se toca nada, y
-  el camino por defecto tiene su propio test para que no regrese.
-- Pendiente antes de encenderlo en real: correr con `PROXY_COMPRESS_DRYRUN=true`
-  una temporada y comparar el ahorro medido con la calidad de las respuestas. El
-  diseño lo permite; el juicio es humano.
+- **Invariants 1–10 green**, plus two integration tests through the router's real
+  path. All three gates OK.
+- **The coverage gate caught what review did not**: after hooking compression into
+  `dispatchChain`, that function dropped from 92.9% to 92.1%, because the unit
+  tests exercised the engines but nothing exercised the new branch through the
+  real path. Proving an engine works and proving it is plugged in are two
+  different claims; added a test that compresses end to end and its opposite with
+  compression off.
+- **A decision the spec did not anticipate**: `safeCompress` with `recover()`.
+  Bodies come from clients and will eventually contain everything; a failure here
+  must degrade to "not compressed", never to a 500.
+- **Still off by default.** Without `PROXY_COMPRESS_PROFILES` nothing is touched,
+  and the default path has its own test so it cannot regress.
+- Before turning it on for real: run with `PROXY_COMPRESS_DRYRUN=true` for a while
+  and compare the measured saving against answer quality. The design allows it;
+  the judgement is human.
 
-## Corrección de alcance (posterior al release 0.11.0)
+## Scope correction (after the 0.11.0 release)
 
-- El usuario señaló que la compresión de contexto **no parece trabajo de un
-  proxy**, y tenía razón. Los cinco puntos restantes observan, deciden o
-  informan; este mutaba la petición, y encima con menos información que
-  cualquiera de los clientes.
-- **El panel ya lo había apuntado en la ronda 1** y no le hice suficiente caso:
-  uno de los tres dijo que de los seis puntos "el que menos vale tal como está en
-  el brief es P3". Reduje el alcance pero lo construí igual.
-- Los dos motores se movieron a `github.com/cervantesh/cervo-compress`, donde
-  Hermes puede importarlos. `dedup` salió del proxy entero; `toolcap` se quedó
-  reencuadrado como guardia de transporte, gobernado por
-  `PROXY_TOOL_RESULT_LIMIT` en vez de `PROXY_COMPRESS_*`.
-- La librería se llevó además el corpus adversarial (fences sin cerrar, JSON
-  anidado, bloques que difieren en un byte, contenido estructurado de Anthropic),
-  que era lo que menos pintaba en la suite de un gateway.
+- The user pointed out that context compression **does not look like a proxy's
+  job**, and was right. The other five points observe, decide or report; this one
+  mutated the request, and did so with less information than any of the clients
+  had.
+- **The panel had already flagged it in round 1** and I did not listen hard
+  enough: one of the three said that of the six points "the one worth least as
+  framed in the brief is P3". I cut the scope but built it anyway.
+- Both engines moved to `github.com/cervantesh/cervo-compress`, where Hermes can
+  import them. `dedup` left the proxy entirely; `toolcap` stayed, reframed as a
+  transport guard governed by `PROXY_TOOL_RESULT_LIMIT` instead of
+  `PROXY_COMPRESS_*`.
+- The library also took the adversarial corpus (unclosed fences, nested JSON,
+  blocks differing by one byte, Anthropic structured content), which was the part
+  that least belonged in a gateway's test suite.
