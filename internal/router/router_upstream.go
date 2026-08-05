@@ -27,6 +27,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	// skip to the next model instead of stampeding the recovering upstream. This
 	// is a soft skip (retryable, not breaker-eligible, no score penalty).
 	if !s.tryStartAttempt(attempt) {
+		recordTraceFailure(ctx, attempt, 0, "probe", "recovery probe already in flight")
 		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "recovery probe already in flight for " + attempt.Model}
 	}
 
@@ -79,6 +80,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			}
 		}
 		attErr := classifyTransportError(err)
+		recordTraceFailure(ctx, attempt, 0, "transport", attErr.Message)
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
@@ -132,6 +134,10 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 				slog.Int("status", resp.StatusCode),
 				slog.Bool("provider_relayed", isProviderRelayedError(string(respBytes))))
 		}
+		// The UPSTREAM status, not attErr.StatusCode: cervoretry.ClassifyHTTPStatus
+		// remaps (500 becomes 502), and a trace that reports the remapped code
+		// misleads exactly the operator trying to find out what OpenRouter said.
+		recordTraceFailure(ctx, attempt, resp.StatusCode, traceKindFor(attErr), attErr.Message)
 		s.penalizeScore(attempt, attErr.StatusCode)
 		if attErr.BreakerEligible {
 			// A 429/503 may carry Retry-After — respect it as a minimum cooldown.
@@ -206,7 +212,8 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			body = replayed
 		}
 
-		setServedModelHeaders(w, attempt)
+		traceFrom(ctx).recordServed(attempt.Model, attempt.AttemptIndex)
+		setServedModelHeaders(ctx, w, attempt)
 		streamProxyResponse(w, resp)
 		outcome := streamCopy(ctx, w, body, streamIdleTimeout(), streamMaxDuration())
 		s.recordStreamOutcome(outcome)
@@ -256,7 +263,8 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		respBytes = s.transformResponse(ctx, respBytes)
 	}
 
-	setServedModelHeaders(w, attempt)
+	traceFrom(ctx).recordServed(attempt.Model, attempt.AttemptIndex)
+	setServedModelHeaders(ctx, w, attempt)
 	writeProxyResponse(w, resp, respBytes)
 	return nil
 }

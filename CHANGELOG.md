@@ -11,6 +11,66 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Added
+- **The response now says *why* this model answered, not only which one.**
+  `X-Calvoproxy-Model` has told callers which model served since early on,
+  because a chain that degrades silently caused a real incident — a design
+  review answered by the third model and believed to be the first. It still
+  could not answer the next question anyone asks: *why that one?* Which models
+  were skipped for an open circuit, which failed first and with what code, what
+  score the chain was ordered by. That lived only in a log line the caller never
+  sees.
+
+  A new `X-Calvoproxy-Route` carries it in one compact, versioned field, capped
+  at 512 bytes:
+
+  ```
+  v1;p=coding;s=0.83;a=2;n=4/4/3;prev=gpt-oss-20b:429,gemma-4-31b:500;brk=1;cmp=off
+  ```
+
+  It reads: profile `coding`, served with score 0.83 on the second attempt, of
+  four planned models three were eligible, one excluded by the breaker, and two
+  failed first — one rate-limited, one with a server error. `cmp=` is always
+  present so "not compressed" never looks like a missing field.
+
+  The four exits that never reach a model — pinned model lacking a capability,
+  no capable model anywhere, everything cooling down, chain exhausted — emit the
+  same header with `o=<outcome>`. An HTTP 503 cannot distinguish "everything is
+  in cooldown" from "nothing here can do vision"; now it does not have to.
+
+  `prev=` reports the **upstream's** status, not the proxy's remapped one: the
+  retry classifier turns a 500 into a 502, and a trace that reported 502 would
+  mislead precisely the person trying to find out what OpenRouter said.
+
+  Only status codes and a closed set of reason words travel in the header —
+  never upstream error text. Streaming included: the header commits before the
+  first byte, so a streamed answer explains itself too. gRPC inherits it for
+  free. `PROXY_ROUTE_TRACE=off` removes the whole thing, and off means no trace
+  is allocated at all, not a blanked header.
+
+- **`GET /decisions/{id}` for the detail the header has no room for.** Every
+  response now carries `X-Calvoproxy-Decision-Id`, and the last 200 decisions
+  (`PROXY_TRACE_RING`) are kept in memory for lookup: the upstream error text
+  behind each failed attempt, and the stream outcome, which is only known after
+  the headers are already on the wire.
+
+  Admin-gated, like `/health`, because that error text is the one part of a
+  trace that comes from outside. A client that wants structure rather than the
+  compact form can ask for it per request with `X-Calvoproxy-Trace: full` and
+  gets the same JSON *without* the upstream text — that channel has no gate in
+  front of it. The ring is never written to disk: these records sit next to
+  conversation content, and `/metrics` remains the durable series.
+
+### Fixed
+- **A header the upstream echoed could appear twice.** `streamProxyResponse`
+  copies upstream headers with `Add`, and it runs *after* the proxy sets its
+  own, so an upstream emitting `X-Calvoproxy-Route` would leave the client with
+  two values — the second one upstream-controlled text presented as this proxy's
+  routing decision. The trace headers are now excluded from that copy.
+
+  `X-Calvoproxy-Model`, `-Profile` and `-Attempt` have the same exposure and are
+  not covered by this change.
+
 ## [0.10.1] — 2026-08-04
 
 ### Fixed

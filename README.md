@@ -473,6 +473,11 @@ serving. (Compose maps only `8080`; publish `9090` yourself if you need gRPC.)
 ### HTTP endpoints
 
 - `GET /health` — service status, active policy hashes, configured profiles.
+- `GET /decisions/{id}` — why a given request was routed the way it was: the
+  models excluded and why, the attempts that failed and with what upstream
+  status, the score the chain was ordered by. Admin-gated, because it carries
+  upstream error text. The id comes back on every response as
+  `X-Calvoproxy-Decision-Id`; the summary is in `X-Calvoproxy-Route`.
 - `GET /version` — running build + whether a newer release is available.
 - `POST /v1/chat/completions` — OpenAI-compatible chat completions.
 - Per-profile routes: `/v1/{simple,coding,reasoning,agent,creative,vision}/chat/completions`.

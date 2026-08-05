@@ -124,6 +124,11 @@ type RouterService struct {
 	persistScores atomic.Bool
 	admission     *admissionControl
 	capabilities  *capabilityIndex
+	// traces is the bounded, in-memory decision ring behind /decisions/{id}.
+	// Built lazily so a service assembled as a struct literal (as the tests do)
+	// gets one without every construction site knowing about it.
+	traceRingOnce sync.Once
+	traces        *traceRing
 	counters      routerCounters
 	cancelRefresh context.CancelFunc
 	// AmbientKeyPresent, when set by the binary, reports whether an ambient
