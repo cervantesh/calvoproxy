@@ -87,6 +87,7 @@ func NewRouterService() *RouterService {
 		modelBreakers:  make(map[string]*modelBreakerState),
 		admission:      newAdmissionControl(),
 		capabilities:   newCapabilityIndex(loadCapabilityOverrides()),
+		quota:          newQuotaLedger(quotaLimitsFromEnv()),
 	}
 	// Best-effort background auto-derive of model capabilities from OpenRouter;
 	// the manual overrides above already cover the chain models synchronously.
@@ -109,6 +110,11 @@ func (s *RouterService) Close() {
 	if s.persistScores.Load() {
 		if err := s.SaveScores(); err != nil {
 			slog.Warn("[CalvoProxy] could not persist model scores on shutdown", slog.String("error", err.Error()))
+		}
+	}
+	if s.persistQuotas.Load() {
+		if err := s.SaveQuotas(); err != nil {
+			slog.Warn("[CalvoProxy] could not persist quotas on shutdown", slog.String("error", err.Error()))
 		}
 	}
 }
@@ -312,6 +318,15 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		}
 	}
 	afterCaps := len(attemptsToTry)
+	// Count budget exclusions before the generic filter runs, so the trace can
+	// say "out of allowance" instead of mislabelling it as an open circuit.
+	quotaExcluded := 0
+	for _, a := range attemptsToTry {
+		if s.quota.exhausted(a) {
+			quotaExcluded++
+		}
+	}
+	traceFrom(ctx).recordQuotaExclusions(quotaExcluded)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	// Reorder the breaker-eligible chain by reliability score (most reliable
 	// first) before truncating to MaxAttempts, so flaky models sink to the back.

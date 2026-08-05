@@ -78,6 +78,7 @@ X-Calvoproxy-Route: v1;p=coding;s=0.83;a=2;n=4/4/3;caps=tools;prev=gpt-oss-20b:4
 | `caps=` | si se requirieron | `tools`, `vision` o `tools+vision` |
 | `prev=` | si hubo fallos | `modelo:código` por intento fallido, en orden |
 | `brk=` | si hubo exclusiones por breaker | número de modelos excluidos |
+| `q=` | si hubo exclusiones por cuota (P2) | número de modelos sin presupuesto |
 | `cmp=` | **siempre** | `off` hasta P3; después `-3.1k` o similar |
 | `o=` | si `Outcome != served` | el valor de `Outcome` |
 | `trunc=1` | si se recortó | ver §3.2 |
@@ -98,7 +99,7 @@ Si el valor supera 512 bytes se recorta de forma **determinista**, en este orden
 
 1. eliminar entradas de `prev=` desde el final, una a una;
 2. si sigue sin caber, eliminar `prev=` entero;
-3. si sigue sin caber, eliminar `brk=` y `n=`.
+3. si sigue sin caber, eliminar `brk=`/`q=` y `n=`.
 
 Tras cualquier recorte se añade `;trunc=1`. Los campos `v1`, `p=`, `cmp=` y `o=` no se
 eliminan nunca: si con solo esos se superasen 512 bytes sería un bug, y el test del

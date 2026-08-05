@@ -412,6 +412,9 @@ func main() {
 	scoreCtx, cancelScores := context.WithCancel(context.Background())
 	defer cancelScores()
 	routerService.StartScorePersistence(scoreCtx)
+	// Quotas persist on the same clock but in their own file: a budget's expiry
+	// is its reset time, which is nothing like the score store's max-age rule.
+	routerService.StartQuotaPersistence(scoreCtx)
 
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)

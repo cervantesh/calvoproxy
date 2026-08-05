@@ -242,7 +242,12 @@ func (s *RouterService) rankAttemptsByScoreTraced(trace *routeTrace, attempts []
 	env := s.scoreEnv()
 	score := make([]float64, len(attempts))
 	for i, a := range attempts {
-		score[i] = s.scoreForAttempt(a, env)
+		// Soft quota degradation lives HERE and nowhere else: multiplying the
+		// rank key sinks a model whose window is nearly spent without touching
+		// the persisted score. The score measures reliability, not budget, and
+		// contaminating it would poison its two-clock decay — a model would look
+		// broken because it was popular.
+		score[i] = s.scoreForAttempt(a, env) * s.quota.headroom(a)
 	}
 	if trace != nil {
 		models := make([]string, len(attempts))

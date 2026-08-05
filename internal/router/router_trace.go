@@ -41,6 +41,12 @@ type routeTrace struct {
 	// shrinking is the difference between "this model is slow" and "half the
 	// chain is in cooldown".
 	ExcludedByBreaker int
+	// ExcludedByQuota counts models gated out because their budget window is
+	// spent. Kept apart from ExcludedByBreaker on purpose: "broken right now" and
+	// "out of allowance until midnight" call for completely different actions,
+	// and folding them together is exactly the ambiguity this trace exists to
+	// remove.
+	ExcludedByQuota int
 
 	Attempts []traceAttempt
 	Served   *traceAttempt
@@ -68,7 +74,7 @@ func (t *routeTrace) recordChain(planned, afterCaps, eligible int, required []st
 	}
 	t.Planned, t.AfterCaps, t.Eligible = planned, afterCaps, eligible
 	t.CapsRequired = required
-	t.ExcludedByBreaker = afterCaps - eligible
+	t.ExcludedByBreaker = afterCaps - eligible - t.ExcludedByQuota
 	if t.ExcludedByBreaker < 0 {
 		t.ExcludedByBreaker = 0
 	}
@@ -76,6 +82,16 @@ func (t *routeTrace) recordChain(planned, afterCaps, eligible int, required []st
 
 // recordScores stores the scores the chain was ordered by, captured where
 // rankAttemptsByScore already computed them — no second pass over the chain.
+// recordQuotaExclusions must be called BEFORE recordChain, which derives the
+// breaker count by subtraction and needs to know how much of the drop was budget
+// rather than health.
+func (t *routeTrace) recordQuotaExclusions(n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.ExcludedByQuota = n
+}
+
 func (t *routeTrace) recordScores(models []string, scores []float64) {
 	if t == nil || len(models) != len(scores) {
 		return
@@ -205,6 +221,12 @@ func (t *routeTrace) header() string {
 	brk := ""
 	if t.ExcludedByBreaker > 0 {
 		brk = "brk=" + strconv.Itoa(t.ExcludedByBreaker)
+	}
+	if t.ExcludedByQuota > 0 {
+		if brk != "" {
+			brk += ";"
+		}
+		brk += "q=" + strconv.Itoa(t.ExcludedByQuota)
 	}
 	prev := make([]string, 0, len(t.Attempts))
 	for _, a := range t.Attempts {

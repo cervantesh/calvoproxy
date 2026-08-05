@@ -12,6 +12,44 @@ out — see v0.7.1.
 ## [Unreleased]
 
 ### Added
+- **Quota budgets: the proxy now degrades *before* the window runs out.**
+  Free-tier limits were discovered by hitting them — a 429 arrived, the circuit
+  opened, and the request was already spent. The breaker is reactive by design
+  and stays that way; what was missing is the predictive half.
+
+  A new ledger counts requests per **bare model** and per **account**, and lowers
+  a model's rank as its window fills. Two scopes, not one, because the free
+  tier's dominant limit is per account. And the bare model, deliberately **not**
+  `breakerKey`: that key is `profile:model`, which is right for reliability — the
+  same slug under `coding` and `bulk` sees different load — and fatal for quota,
+  where two partial counters of the same OpenRouter pocket would each see a
+  fraction of the traffic and never detect exhaustion.
+
+  Degradation is **soft by default**: `rankAttemptsByScore` orders by
+  `score × headroom`, which sinks a nearly-spent model without touching the
+  persisted score. The score measures reliability, not budget, and contaminating
+  it would poison its two-clock decay — a model would come back looking broken
+  because it had been popular. Hard exclusion is opt-in via
+  `PROXY_QUOTA_HARD_SKIP`, because it widens the "all models cooling down"
+  surface on the strength of limits that may only have been learned.
+
+  Limits come from `PROXY_QUOTA_LIMITS_JSON`, from upstream `X-RateLimit-*`
+  headers, or from a 429's `Retry-After` — and **none of them invents a
+  ceiling**. A 429 says "not now", not "how many fit", so it sets the reset time
+  and leaves the limit unknown. With no limit known there is simply no gate: the
+  ledger counts and nothing degrades. Pretending to know would be worse than not
+  knowing.
+
+  State lives in its own `quotas.json`, not inside `scores.json`: a budget's
+  expiry is its reset time, which has nothing to do with the score store's
+  max-age rule, and a window that rolled while the process was down comes back at
+  zero rather than being discarded — the upstream's day does not restart because
+  the proxy did.
+
+  The routing trace gained `q=`, kept separate from `brk=`. "Broken right now"
+  and "out of allowance until midnight" call for different actions, and folding
+  them together is exactly the ambiguity the trace exists to remove.
+
 - **`calvoproxy setup <tool>` — wires a coding client to the proxy, and can undo it.**
   `doctor` knew how to *check* Hermes, but only check: when it failed it printed
   the block and left you to paste it, and it knew about nothing else. The same
