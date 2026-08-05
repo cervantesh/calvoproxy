@@ -54,6 +54,41 @@ func (r *traceRing) get(id string) (*routeTrace, bool) {
 	return trace, ok
 }
 
+// recent returns the newest traces first, up to limit. Newest-first is the whole
+// point: a dashboard showing the OLDEST 20 of 200 decisions is worse than
+// useless, because it looks live while describing the past.
+//
+// The ring writes forward from r.next, so the newest entry is at next-1 and
+// walking backwards yields recency order directly, wrap included.
+func (r *traceRing) recent(limit int) []*routeTrace {
+	if r == nil || limit < 1 {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*routeTrace, 0, limit)
+	size := len(r.entries)
+	for i := 1; i <= size && len(out) < limit; i++ {
+		idx := (r.next - i + size) % size
+		if entry := r.entries[idx]; entry != nil {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// RecentDecisions is the admin-channel view of the ring, newest first. It
+// carries Reason because the only route that serves it is admin-gated — the same
+// rule as /decisions/{id}: the gate authorises, not the path.
+func (s *RouterService) RecentDecisions(limit int) []any {
+	traces := s.traceRingRef().recent(limit)
+	out := make([]any, 0, len(traces))
+	for _, t := range traces {
+		out = append(out, t.view(true))
+	}
+	return out
+}
+
 // traceRingCapacity is read once per service so a running proxy has a stable
 // buffer size.
 func traceRingCapacity() int { return envInt("PROXY_TRACE_RING", 200) }
