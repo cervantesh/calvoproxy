@@ -206,7 +206,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			body = replayed
 		}
 
-		setServedModelHeaders(w, attempt)
+		setServedModelHeaders(ctx, w, attempt)
 		streamProxyResponse(w, resp)
 		outcome := streamCopy(ctx, w, body, streamIdleTimeout(), streamMaxDuration())
 		s.recordStreamOutcome(outcome)
@@ -256,7 +256,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		respBytes = s.transformResponse(ctx, respBytes)
 	}
 
-	setServedModelHeaders(w, attempt)
+	setServedModelHeaders(ctx, w, attempt)
 	writeProxyResponse(w, resp, respBytes)
 	return nil
 }

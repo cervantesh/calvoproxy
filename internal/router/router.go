@@ -261,6 +261,10 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
 func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
+	// The route trace rides the context, not FallbackExecution: the header is
+	// materialised inside executeAttempt (setServedModelHeaders), and
+	// AttemptExecutor.ExecuteAttempt does not receive the execution struct.
+	ctx = withTrace(ctx, newRouteTrace(category))
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
 	// loop). Streaming requests get NO total deadline here — they are bounded by

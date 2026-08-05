@@ -41,7 +41,12 @@ func writeProxyResponse(w http.ResponseWriter, resp *http.Response, body []byte)
 }
 
 func streamProxyResponse(w http.ResponseWriter, resp *http.Response) {
-	copyHeaders(w.Header(), resp.Header)
+	// Skip our own trace headers: copyHeaders Adds, and it runs AFTER
+	// setServedModelHeaders, so an upstream echoing them would leave the client
+	// with two values — the second one attacker-controlled text presented as this
+	// proxy's routing decision. Verified: the observed pair was
+	// ["v1;p=simple;cmp=off", "v1;p=INJECTED"].
+	copyHeaders(w.Header(), resp.Header, traceHeader, traceIDHeader)
 	w.WriteHeader(resp.StatusCode)
 }
 
@@ -73,11 +78,27 @@ func copyHeaders(dst http.Header, src http.Header, skipKeys ...string) {
 // the third model in the chain, believed to be the first.
 //
 // Must be called BEFORE the response headers are written.
-func setServedModelHeaders(w http.ResponseWriter, attempt modelAttempt) {
+//
+// It also materialises the route trace (X-Calvoproxy-Route), which answers the
+// question the headers above cannot: not which model answered, but why that one.
+// Same ordering requirement, and the same single call site for both — see
+// docs/specs/P1-decision-trace.md.
+func setServedModelHeaders(ctx context.Context, w http.ResponseWriter, attempt modelAttempt) {
 	h := w.Header()
 	h.Set("X-Calvoproxy-Model", attempt.Model)
 	h.Set("X-Calvoproxy-Profile", attempt.Profile)
 	if attempt.AttemptIndex > 0 {
 		h.Set("X-Calvoproxy-Attempt", strconv.Itoa(attempt.AttemptIndex))
+	}
+	setRouteTraceHeaders(h, traceFrom(ctx))
+}
+
+func setRouteTraceHeaders(h http.Header, trace *routeTrace) {
+	if trace == nil {
+		return
+	}
+	h.Set(traceHeader, trace.header())
+	if trace.ID != "" {
+		h.Set(traceIDHeader, trace.ID)
 	}
 }

@@ -188,9 +188,25 @@ byte a byte el actual (invariante 2).
 El invariante 7 no estaba en el goal: lo añade esta spec porque `streamProxyResponse` hace
 `copyHeaders` con `dst.Add` ([router_http.go:58](../../internal/router/router_http.go))
 **después** de que `setServedModelHeaders` haya escrito las nuestras. Un upstream que emitiese
-la misma cabecera produciría dos valores, y `cmd/grpc.go:104` toma `values[0]` — es decir, el
-del upstream ganaría. Hay que añadir `x-calvoproxy-route` y `x-calvoproxy-decision-id` a los
-`skipKeys` de esa llamada.
+la misma cabecera produce dos valores. Hay que añadir `x-calvoproxy-route` y
+`x-calvoproxy-decision-id` a los `skipKeys` de esa llamada.
+
+> **Corrección (fase B).** El primer borrador de esta spec afirmaba que en ese escenario
+> "ganaría el del upstream", porque `cmd/grpc.go:104` toma `values[0]`. Es **falso**, y se
+> comprobó ejecutando el test: los valores observados son
+> `["v1;p=simple;cmp=off", "v1;p=INJECTED"]` — el nuestro va primero, porque
+> `setServedModelHeaders` se ejecuta antes que el `copyHeaders`. gRPC, por tanto, ya toma el
+> correcto.
+>
+> El fallo real es la **duplicación**: el cliente recibe dos valores de la misma cabecera, el
+> segundo con contenido que controla el upstream. Un cliente que lea todos los valores, o que
+> se quede con el último, o cuyo stack los una con comas, consume texto ajeno como si fuera
+> una decisión de routing del proxy. El invariante se mantiene sin cambios —un solo valor, y
+> que el del upstream no sobreviva— pero su justificación era equivocada.
+>
+> Esto ya afecta hoy a `X-Calvoproxy-Model`, `-Profile` y `-Attempt`, que tienen exactamente
+> el mismo problema. Queda **fuera del alcance de P1**: el `skipKeys` de esta spec cubre solo
+> las dos cabeceras nuevas, y las tres antiguas merecen su propio cambio y su propio test.
 
 ## 9. Fuera de alcance
 
