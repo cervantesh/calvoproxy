@@ -1,25 +1,27 @@
-# P2 — progreso
+# P2 — progress
 
-- **Invariantes 1–10 en verde**, más cuatro hermanos que salieron al implementar.
-  Las tres puertas pasan.
-- **La spec estaba equivocada en dos sitios**, corregidos en el propio documento
-  (§7b) antes que en el código:
-  1. "Sin límite conocido, headroom es 1" ignoraba que el presupuesto de *cuenta*
-     limita a un modelo sin techo propio. El test original fallaba con razón.
-  2. La traza contaba las exclusiones por cuota como del breaker, porque
-     `ExcludedByBreaker` era una resta derivada. Con el skip duro activo, un
-     presupuesto agotado se reportaba como circuito roto. Añadido `q=`.
-- **Decisión que queda pendiente de datos reales**: de dónde salen los límites.
-  El ledger soporta config, cabeceras y aprendizaje desde 429, pero cuál es la
-  fuente primaria depende de si OpenRouter emite `X-RateLimit-*` de forma fiable
-  en el free tier. Hasta medirlo, sin `PROXY_QUOTA_LIMITS_JSON` el gate no actúa:
-  cuenta, pero no degrada. Eso es deliberado — inventar un techo sería peor.
-- El defecto es **blando**: `PROXY_QUOTA_HARD_SKIP` sigue apagado.
-- **CI cazó un test flaky que en local pasaba siempre.**
-  `TestQuota_SoftDegradationLeavesScoreUntouched` comparaba dos lecturas de
-  `scoreForAttempt` con igualdad exacta, y esa función aplica decay temporal en
-  cada llamada: la diferencia observada fue de ~1.5e-10, puro reloj. Pasaba en el
-  portátil por ser más rápido que el runner. Ahora lee el score **almacenado**
-  bajo el lock, que es la medida honesta del invariante ("la cuota no escribe en
-  el score"). Lección: cualquier aserción de igualdad exacta sobre un valor con
-  decay es flaky por construcción.
+- **Invariants 1–10 green**, plus four siblings that emerged while implementing.
+  All three gates pass.
+- **The spec was wrong in two places**, corrected in the document itself (§7b)
+  before the code:
+  1. "With no known limit, headroom is 1" ignored that the *account* budget
+     constrains a model with no ceiling of its own. The original test failed for
+     good reason.
+  2. The trace counted quota exclusions as breaker exclusions, because
+     `ExcludedByBreaker` was a derived subtraction. With hard skip on, a spent
+     budget was reported as a broken circuit. Added `q=`.
+- **A decision still waiting on real data**: where the limits come from. The
+  ledger supports config, headers and learning from a 429, but which one is
+  primary depends on whether OpenRouter emits `X-RateLimit-*` reliably on the free
+  tier. Until that is measured, without `PROXY_QUOTA_LIMITS_JSON` the gate does
+  nothing: it counts but never degrades. That is deliberate — inventing a ceiling
+  would be worse.
+- The default is **soft**: `PROXY_QUOTA_HARD_SKIP` stays off.
+- **CI caught a flaky test that always passed locally.**
+  `TestQuota_SoftDegradationLeavesScoreUntouched` compared two reads of
+  `scoreForAttempt` for exact equality, and that function applies time-based decay
+  on every call: the observed difference was ~1.5e-10, pure clock. It passed on
+  the laptop because the laptop is faster than the runner. It now reads the
+  **stored** score under the lock, which is the honest measurement of the
+  invariant ("quota does not write to the score"). Lesson: any exact-equality
+  assertion on a decaying value is flaky by construction.

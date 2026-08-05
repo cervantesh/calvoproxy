@@ -1,121 +1,122 @@
-# P2 — Presupuesto de cuota por modelo y por cuenta
+# P2 — Per-model and per-account quota budget
 
-Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
+Reference architecture: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
 
-## 1. Problema
+## 1. Problem
 
-Los límites del free tier se descubren **chocando**: llega un 429, el breaker abre el circuito
-y el request ya se ha gastado. El breaker es reactivo por diseño y está bien que lo sea. Lo
-que falta es lo predictivo: saber cuánto queda de la ventana y degradar *antes* de agotarla.
+Free-tier limits are discovered by **hitting them**: a 429 arrives, the breaker opens the
+circuit, and the request is already spent. The breaker is reactive by design and should stay
+that way. What is missing is the predictive half: knowing how much of the window is left and
+degrading *before* it runs out.
 
-## 2. La clave no es `breakerKey`
+## 2. The key is not `breakerKey`
 
-`breakerKey` es `profile + ":" + model` ([router_breaker.go:189](../../internal/router/router_breaker.go)),
-y `allKnownAttempts` genera una entrada **por cada par** perfil-modelo. Para fiabilidad es
-correcto: el mismo modelo bajo `coding` y bajo `bulk` recibe cargas distintas y merece
-circuitos y scores independientes.
+`breakerKey` is `profile + ":" + model` ([router_breaker.go:189](../../internal/router/router_breaker.go)),
+and `allKnownAttempts` produces one entry **per profile-model pair**. That is right for
+reliability: the same model under `coding` and under `bulk` sees different load and deserves
+its own circuit and score.
 
-Para cuota es **fatal**. El cupo de OpenRouter es por cuenta y por modelo, no por perfil: con
-el mismo slug en varios perfiles —que es el caso hoy en `model-policy.json`— dos contadores
-parciales del mismo bolsillo jamás detectarían el agotamiento, cada uno viendo la mitad.
+For quota it is **fatal**. OpenRouter's allowance is per account and per model, not per
+profile: with the same slug in several profiles — which is the case today in
+`model-policy.json` — two partial counters of the same pocket would never detect exhaustion,
+each seeing half the traffic.
 
 ```go
 type quotaScope string // "model:<slug>" | "account"
 ```
 
-El ámbito `account` es obligatorio desde el día uno: es el límite dominante del free tier, y
-añadirlo después invalidaría el fichero ya persistido.
+The `account` scope is mandatory from day one: it is the free tier's dominant limit, and
+adding it later would invalidate the already-persisted file.
 
-## 3. Por qué un ledger separado y no el breaker
+## 3. Why a separate ledger and not the breaker
 
-Escribir `state.OpenUntil = windowReset` para heredar `filterAvailableAttempts` parece
-economía y es un bug:
+Writing `state.OpenUntil = windowReset` to inherit `filterAvailableAttempts` looks like
+economy and is a bug:
 
-1. `recordSuccess` ([:180](../../internal/router/router_breaker.go)) y `resolveProbe` ([:160](../../internal/router/router_breaker.go))
-   ponen `OpenUntil = time.Time{}` **incondicionalmente**. Un request en vuelo que termine en
-   200 borraría en silencio la exclusión por cuota recién puesta.
-2. `recordFailure` resetea `ConsecutiveFailures` cuando la ventana expiró: una ventana diaria
-   secuestraría la máquina half-open 24 h.
-3. `Health()` ([:302](../../internal/router/router_breaker.go)) clasifica todo `OpenUntil`
-   futuro como `"open"` y degrada `Status` a `unavailable`: una cuota agotada se reportaría
-   como avería.
+1. `recordSuccess` ([:180](../../internal/router/router_breaker.go)) and `resolveProbe` ([:160](../../internal/router/router_breaker.go))
+   set `OpenUntil = time.Time{}` **unconditionally**. A request in flight that ends in a 200
+   would silently erase the quota exclusion just placed.
+2. `recordFailure` resets `ConsecutiveFailures` once the window expires: a daily window would
+   hold the half-open machinery hostage for 24 h.
+3. `Health()` ([:302](../../internal/router/router_breaker.go)) classifies any future
+   `OpenUntil` as `"open"` and degrades `Status` to `unavailable`: a spent budget would be
+   reported as a fault.
 
-Ledger propio, con su mutex. **Orden de locks obligatorio: `breakerMu → quotaMu`**, porque
-`isModelAvailableLocked` se llama desde `Health()` con `breakerMu` ya tomado. El ledger no
-puede llamar a nada que tome `breakerMu`.
+Its own ledger, with its own mutex. **Mandatory lock order: `breakerMu → quotaMu`**, because
+`isModelAvailableLocked` is reached from `Health()` with `breakerMu` already held. The ledger
+must never call anything that takes `breakerMu`.
 
-## 4. De dónde salen los límites
+## 4. Where the limits come from
 
-Por prioridad, y **ninguna inventa un techo**:
+By priority, and **none of them invents a ceiling**:
 
-1. **Configuración explícita** en `PROXY_QUOTA_LIMITS_JSON`
-   (`{"model:openai/gpt-oss-20b:free":{"rpd":50},"account":{"rpd":1000}}`). No se toca
-   `model-policy.json`: su forma la fija el paquete vendorizado.
-2. **Cabeceras del upstream** `X-RateLimit-Limit` / `-Remaining` / `-Reset` cuando lleguen.
-3. **Aprendizaje desde un 429 con `Retry-After`**, que fija `ResetAt` pero **no** un `Limit`:
-   un 429 dice "ahora no", no dice cuántas caben.
+1. **Explicit configuration** in `PROXY_QUOTA_LIMITS_JSON`
+   (`{"model:openai/gpt-oss-20b:free":{"rpd":50},"account":{"rpd":1000}}`).
+   `model-policy.json` is not touched: its shape is owned by the vendored policy package.
+2. **Upstream headers** `X-RateLimit-Limit` / `-Remaining` / `-Reset` when they arrive.
+3. **Learning from a 429 with `Retry-After`**, which sets `ResetAt` but **not** a `Limit`: a
+   429 says "not now", it does not say how many fit.
 
-Sin límite conocido no hay gate: el ledger cuenta pero `headroom` es 1. Fingir un techo sería
-peor que no tenerlo.
+With no known limit there is no gate: the ledger counts but `headroom` is 1. Faking a ceiling
+would be worse than having none.
 
-## 5. Degradación
+## 5. Degradation
 
-- **Blanda, por defecto.** `rankAttemptsByScore` ordena por `score × headroom`, con
-  `headroom ∈ [0,1]` derivado del porcentaje de ventana consumido. **No toca el score
-  persistido**: el score mide fiabilidad, no presupuesto, y contaminarlo envenenaría su decay
-  de dos relojes.
-- **Dura, solo bajo `PROXY_QUOTA_HARD_SKIP=true`.** Al 100 % de una ventana el modelo se
-  excluye, con motivo `quota` en la traza de P1 y `Retry-After` igual al mínimo entre el
-  cooldown del breaker y el `ResetAt` de la ventana.
+- **Soft, by default.** `rankAttemptsByScore` orders by `score × headroom`, with
+  `headroom ∈ [0,1]` derived from the percentage of the window consumed. It **does not touch
+  the persisted score**: the score measures reliability, not budget, and contaminating it
+  would poison its two-clock decay.
+- **Hard, only under `PROXY_QUOTA_HARD_SKIP=true`.** At 100 % of a window the model is
+  excluded, with reason `quota` in P1's trace and `Retry-After` set to the minimum of the
+  breaker cooldown and the window's `ResetAt`.
 
-El defecto es blando porque la exclusión dura amplía la superficie de 503 "all cooling"
-apoyándose en límites que pueden ser aprendidos y por tanto inexactos.
+The default is soft because hard exclusion widens the "all cooling" 503 surface on the
+strength of limits that may have been learned, and therefore may be inaccurate.
 
-## 6. Persistencia
+## 6. Persistence
 
-Fichero **propio**, `quotas.json` junto a `scores.json`. No se mete en el store de scores: su
-caducidad es `ResetAt`, incompatible con `defaultScoreMaxAge`
-([router_scoring_store.go:30](../../internal/router/router_scoring_store.go)), que descarta el
-fichero entero a las 24 h; y `restoreScores` filtra por `knownBreakerKeys()`, claves que la
-cuota no usa. Se comparte el helper de escritura atómica temp+rename, no el fichero.
+Its **own** file, `quotas.json`, beside `scores.json`. It does not go into the score store:
+its expiry is `ResetAt`, incompatible with `defaultScoreMaxAge`
+([router_scoring_store.go:30](../../internal/router/router_scoring_store.go)), which discards
+the whole file after 24 h; and `restoreScores` filters by `knownBreakerKeys()`, keys quota does
+not use. The atomic temp+rename helper is shared, the file is not.
 
-Al cargar: si `ResetAt` ya pasó, la ventana vuelve a cero — **no se descarta**. Un contador
-diario tiene que sobrevivir al reinicio del proxy, porque la ventana del upstream no se
-reinicia porque nosotros lo hagamos.
+On load: if `ResetAt` has passed, the window returns to zero — it is **not discarded**. A daily
+counter has to survive a proxy restart, because the upstream's window does not reset just
+because ours did.
 
-## 7. Invariantes verificables
+## 7. Verifiable invariants
 
-| # | Invariante | Cómo se prueba |
+| # | Invariant | How it is tested |
 |---|---|---|
-| 1 | La cuota se indexa por modelo desnudo: el mismo slug en dos perfiles comparte contador | consumir bajo dos perfiles; el contador es la suma |
-| 2 | El ámbito `account` cuenta todo request, sea el modelo que sea | dos modelos distintos; `account` los suma |
-| 3 | Al pasar `ResetAt`, la ventana vuelve a cero en vez de descartarse | ventana vencida; `Used` es 0 y el límite se conserva |
-| 4 | La cuota persiste y se restaura; una ventana ya vencida carga a cero | guardar, recargar |
-| 5 | La degradación blanda reordena pero **no** altera el score persistido | score idéntico antes y después |
-| 6 | Sin límite conocido, `headroom` es 1 y no hay gate | modelo sin límite configurado |
-| 7 | La exclusión dura solo ocurre con `PROXY_QUOTA_HARD_SKIP` | mismo estado, las dos configuraciones |
-| 8 | Un 429 sigue abriendo el breaker: la cuota no lo sustituye | 429; se afirma `ConsecutiveFailures` |
-| 9 | `Health()` con `breakerMu` tomado consultando el ledger no bloquea | carga concurrente bajo `-race` |
-| 10 | Un 429 con `Retry-After` fija `ResetAt` pero no inventa `Limit` | tras aprender, `Limit` sigue a 0 |
+| 1 | Quota is keyed by bare model: the same slug in two profiles shares one counter | consume under two profiles; the counter is the sum |
+| 2 | The `account` scope counts every request, whatever the model | two different models; `account` sums them |
+| 3 | Past `ResetAt` the window returns to zero rather than being discarded | expired window; `Used` is 0 and the limit survives |
+| 4 | Quota persists and restores; a window that already rolled loads at zero | save, reload |
+| 5 | Soft degradation reorders but does **not** alter the persisted score | identical score before and after |
+| 6 | With no known limit, `headroom` is 1 and there is no gate | model with no configured limit |
+| 7 | Hard exclusion only happens under `PROXY_QUOTA_HARD_SKIP` | same state, both configurations |
+| 8 | A 429 still opens the breaker: quota does not replace it | 429; assert `ConsecutiveFailures` |
+| 9 | `Health()` holding `breakerMu` and consulting the ledger does not deadlock | concurrent load under `-race` |
+| 10 | A 429 with `Retry-After` sets `ResetAt` but invents no `Limit` | after learning, `Limit` is still 0 |
 
-## 7b. Correcciones a esta spec durante la implementación
+## 7b. Corrections to this spec during implementation
 
-1. **"Sin límite conocido, headroom es 1" era incompleto.** `headroom` es el mínimo sobre
-   *todas* las ventanas que aplican, y el presupuesto de **cuenta** limita legítimamente a un
-   modelo que no tiene techo propio. Aislar el caso del invariante 6 exige un ledger sin
-   ningún límite configurado, no solo sin límite de modelo. Añadido un invariante hermano que
-   fija lo contrario: con `account` configurado y el modelo sin techo, el headroom lo marca la
-   cuenta.
+1. **"With no known limit, headroom is 1" was incomplete.** `headroom` is the minimum across
+   *every* applicable window, and the **account** budget legitimately constrains a model with
+   no ceiling of its own. Isolating invariant 6's case requires a ledger with no configured
+   limits at all, not merely no model limit. A sibling invariant was added asserting the
+   opposite: with `account` configured and the model uncapped, headroom is set by the account.
 
-2. **La traza contaba las exclusiones por cuota como si fueran del breaker.**
-   `ExcludedByBreaker` se derivaba por resta (`afterCaps - eligible`), así que con el skip duro
-   activo un presupuesto agotado se reportaba como circuito abierto — justo la ambigüedad que
-   P1 existe para eliminar. Añadido `ExcludedByQuota` y un campo `q=` al header, y la resta del
-   breaker ahora lo descuenta. Esto **modifica el contrato de P1**, de forma aditiva: `q=` es
-   un campo nuevo y opcional, dentro de `v1`.
+2. **The trace counted quota exclusions as if they were the breaker's.**
+   `ExcludedByBreaker` was derived by subtraction (`afterCaps - eligible`), so with hard skip
+   on, a spent budget was reported as an open circuit — exactly the ambiguity P1 exists to
+   remove. Added `ExcludedByQuota` and a `q=` header field, and the breaker's subtraction now
+   discounts it. This **changes P1's contract**, additively: `q=` is a new optional field
+   within `v1`.
 
-## 8. Fuera de alcance
+## 8. Out of scope
 
-Coordinación entre varias réplicas (el ledger es local, como los scores) y cuotas por token
-en vez de por request: el free tier limita peticiones, y contar tokens exigiría fiarse del
-`usage` de cada respuesta, que no siempre viene.
+Coordination across replicas (the ledger is local, like the scores) and per-token rather than
+per-request quotas: the free tier limits requests, and counting tokens would mean trusting the
+`usage` field of every response, which does not always arrive.

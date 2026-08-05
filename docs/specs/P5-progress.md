@@ -1,13 +1,13 @@
-# P5 — progreso
+# P5 — progress
 
-- **Invariantes 1–6 en verde.** Ocho tests entre `cmd/dashboard_test.go` y
-  `internal/router/router_trace_recent_test.go`. Tres puertas OK.
-- **Lo único que hubo que añadir al router** fue `traceRing.recent(n)`: el ring
-  sabía buscar por id pero no listar. Se probó allí, no en la vista — la regla de
-  que el dashboard no calcula nada se sostiene sola si lo que necesita no existe
-  y hay que ir a añadirlo donde sí hay tests.
-- **Decisión no prevista en la spec**: la cabecera `Content-Security-Policy` con
-  `default-src 'self'`. No estaba pedida, pero convierte el invariante 5 ("nada
-  externo") en algo que también falla en el navegador y no solo en un test que
-  alguien podría borrar.
-- Pendiente: la columna de compresión aparecerá sola cuando P3 rellene `cmp=`.
+- **Invariants 1–6 green.** Eight tests across `cmd/dashboard_test.go` and
+  `internal/router/router_trace_recent_test.go`. All three gates OK.
+- **The only thing the router needed** was `traceRing.recent(n)`: the ring could
+  look up by id but not list. It was tested there, not in the view — the rule
+  that the dashboard computes nothing holds by itself once anything it needs has
+  to be added where the tests actually are.
+- **A decision the spec did not anticipate**: the `Content-Security-Policy`
+  header with `default-src 'self'`. Nobody asked for it, but it turns invariant 5
+  ("nothing external") into something that also fails in the browser, not only in
+  a test someone could delete.
+- Pending: the compression column will appear on its own once P3 fills in `cmp=`.

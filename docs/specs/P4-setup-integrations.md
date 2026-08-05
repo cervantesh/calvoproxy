@@ -1,62 +1,62 @@
-# P4 — `calvoproxy setup <herramienta>`
+# P4 — `calvoproxy setup <tool>`
 
-Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
+Reference architecture: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md).
 
-## 1. Problema
+## 1. Problem
 
-`doctor` sabe comprobar que Hermes está bien cableado, pero **solo comprueba**: cuando falla,
-imprime el bloque y te deja pegarlo a mano. Y solo sabe de Hermes. La misma lógica —detectar
-la instalación, saber cuál es el bloque correcto, verificar que tomó efecto— vale para Claude
-Code y Codex, que son los otros dos clientes que este proxy sirve a diario.
+`doctor` knows how to check that Hermes is wired correctly, but it **only checks**: when it
+fails, it prints the block and leaves you to paste it. And it knows about Hermes only. The
+same logic — find the install, know the right block, verify it took effect — applies to Claude
+Code and Codex, the other two clients this proxy serves daily.
 
-## 2. Contrato
+## 2. Contract
 
 ```go
 type Integration interface {
     Name() string
-    ConfigPath() string                       // "" si no se encuentra la herramienta
-    Render(baseURL string) string             // el bloque que debe existir
+    ConfigPath() string                       // "" when the tool is not found
+    Render(baseURL string) string             // the block that must be present
     Current(path, baseURL string) state       // missing | stale | configured
     Apply(path, baseURL string) (backup string, err error)
-    Verify(baseURL string) checkResult        // round-trip real contra el proxy
+    Verify(baseURL string) checkResult        // real round trip against the proxy
 }
 ```
 
-`Apply` devuelve la ruta del backup para que `--revert` sepa qué restaurar.
+`Apply` returns the backup path so `--revert` knows what to restore.
 
 ```
 calvoproxy setup <hermes|claude-code|codex> [--apply] [--revert] [--url URL]
 calvoproxy setup --list
 ```
 
-**`--check` es el modo por defecto y no escribe nada.** Escribir en el fichero de otro
-programa es la única operación destructiva de todo el plan, así que el defecto informa y solo
-`--apply` toca el disco.
+**`--check` is the default mode and writes nothing.** Writing into another program's file is
+the only destructive operation in the whole plan, so the default reports and only `--apply`
+touches disk.
 
-## 3. Reglas duras de escritura
+## 3. Hard rules for writing
 
-1. **Backup siempre antes de tocar**, en `<config-dir>/calvoproxy/backups/<tool>-<ts>.bak`.
-   `--revert` restaura el más reciente.
-2. **Nunca round-trip de un parser sobre formatos con comentarios.** El TOML de Codex se
-   parchea por bloque delimitado con marcadores; solo el JSON de Claude Code —que no tiene
-   comentarios— se lee, se modifica y se reescribe, y aun así preservando el resto de claves.
-3. **Idempotencia.** Aplicar dos veces no duplica nada y la segunda vez informa de que ya
-   estaba configurado.
-4. **Hermes se queda en solo-lectura.** Su YAML se inspecciona con una heurística line-wise
-   ([doctor.go:101](../../cmd/doctor.go)) y *una heurística que lee no debe escribir*:
-   `Apply` imprime el bloque y devuelve `errApplyNotSupported`. Es una decisión, no una
-   carencia — está en la interfaz para que se vea.
+1. **Always back up before touching**, in `<config-dir>/calvoproxy/backups/<tool>-<ts>.bak`.
+   `--revert` restores the most recent one.
+2. **Never round-trip a parser over formats that carry comments.** The Codex TOML is patched as
+   a marker-delimited block; only Claude Code's JSON — which has no comments — is read,
+   modified and rewritten, and even then every other key is preserved.
+3. **Idempotence.** Applying twice duplicates nothing, and the second time it reports that it
+   was already configured.
+4. **Hermes stays read-only.** Its YAML is inspected with a line-wise heuristic
+   ([doctor.go:101](../../cmd/doctor.go)) and *a heuristic that reads must not write*: `Apply`
+   prints the block and returns `errApplyNotSupported`. That is a decision, not a gap — it is
+   in the interface so it can be seen.
 
-## 4. Bloques por herramienta
+## 4. Blocks per tool
 
-**Claude Code** (`~/.claude/settings.json`) — habla el dialecto Anthropic contra
-`/v1/messages`, que el proxy ya sirve:
+**Claude Code** (`~/.claude/settings.json`) — speaks the Anthropic dialect against
+`/v1/messages`, which the proxy already serves:
 
 ```json
 {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "dummy"}}
 ```
 
-**Codex** (`~/.codex/config.toml`) — proveedor OpenAI-compatible:
+**Codex** (`~/.codex/config.toml`) — an OpenAI-compatible provider:
 
 ```toml
 # >>> calvoproxy >>>
@@ -68,25 +68,25 @@ wire_api = "chat"
 # <<< calvoproxy <<<
 ```
 
-**Hermes** (`config.yaml`) — el bloque que ya conoce `hermesConfigBlock`
-([doctor.go:75](../../cmd/doctor.go)), impreso para pegar.
+**Hermes** (`config.yaml`) — the block `hermesConfigBlock` already knows
+([doctor.go:75](../../cmd/doctor.go)), printed for pasting.
 
-## 5. Invariantes verificables
+## 5. Verifiable invariants
 
-| # | Invariante | Cómo se prueba |
+| # | Invariant | How it is tested |
 |---|---|---|
-| 1 | `--check` no escribe nunca, ni con el fichero presente ni ausente | mtime y contenido intactos |
-| 2 | `--apply` deja backup restaurable | el backup existe y es byte a byte el original |
-| 3 | `--apply` conserva las claves ajenas del JSON | settings con otras claves; se afirma que siguen ahí |
-| 4 | `--apply` es idempotente | dos pasadas; el resultado es idéntico y la segunda dice "ya configurado" |
-| 5 | El TOML conserva comentarios y contenido previo | config con comentarios; se afirma que sobreviven |
-| 6 | `--revert` restaura el original byte a byte | aplicar y revertir; comparación exacta |
-| 7 | Hermes nunca escribe, ni con `--apply` | fichero intacto y salida con el bloque |
-| 8 | Herramienta desconocida → error claro, código 2, sin pánico | `setup inexistente` |
-| 9 | Sin config detectada, informa y no crea el fichero a ciegas | HOME vacío |
+| 1 | `--check` never writes, neither with the file present nor absent | mtime and content untouched |
+| 2 | `--apply` leaves a restorable backup | the backup exists and is byte-for-byte the original |
+| 3 | `--apply` preserves unrelated JSON keys | settings with other keys; assert they are still there |
+| 4 | `--apply` is idempotent | two passes; identical result and the second says "already configured" |
+| 5 | The TOML keeps comments and prior content | config with comments; assert they survive |
+| 6 | `--revert` restores the original byte for byte | apply then revert; exact comparison |
+| 7 | Hermes never writes, not even with `--apply` | file untouched and the block in the output |
+| 8 | Unknown tool → clear error, exit 2, no panic | `setup nonexistent` |
+| 9 | With no config detected, it reports and does not create the file blind | empty HOME |
 
-## 6. Fuera de alcance
+## 6. Out of scope
 
-Cursor, Cline y Aider. La interfaz existe para que sean adapters, pero el valor de este corte
-es validar el contrato con tres formatos distintos (YAML solo-lectura, JSON, TOML), no cubrir
-catálogo.
+Cursor, Cline and Aider. The interface exists so they can be adapters, but the value of this
+cut is validating the contract against three different formats (read-only YAML, JSON, TOML),
+not covering the catalogue.

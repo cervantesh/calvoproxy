@@ -1,14 +1,14 @@
-# P4 — progreso
+# P4 — progress
 
-- **Invariantes 1–9 en verde**, diez tests en `cmd/setup_test.go`. Tres puertas OK.
-- **Bug real encontrado por el test, no por revisión**: `flag.Parse` de Go se
-  detiene en el primer argumento posicional, así que `setup codex --apply` parseaba
-  cero flags y se comportaba como `--check` — es decir, `--apply` no hacía nada en
-  silencio. Resuelto con `splitToolAndFlags`, que separa el nombre de la
-  herramienta de los flags en cualquier orden. Sin el invariante 5 esto se habría
-  entregado roto.
-- **La spec no decía dónde viven los backups en Windows.** `os.UserConfigDir()` es
-  `APPDATA` allí y `XDG_CONFIG_HOME` fuera; el test lo pregunta en vez de fijar una
-  plataforma.
-- Pendiente: Cursor, Cline y Aider como adapters de `Integration`. La interfaz ya
-  cubre los tres formatos (YAML solo-lectura, JSON, TOML) que eran el riesgo real.
+- **Invariants 1–9 green**, ten tests in `cmd/setup_test.go`. All three gates OK.
+- **A real bug found by a test, not by review**: Go's `flag.Parse` stops at the
+  first positional argument, so `setup codex --apply` parsed zero flags and
+  behaved as `--check` — meaning `--apply` silently did nothing. Fixed with
+  `splitToolAndFlags`, which separates the tool name from the flags in any order.
+  Without invariant 5 this would have shipped broken.
+- **The spec did not say where backups live on Windows.** `os.UserConfigDir()` is
+  `APPDATA` there and `XDG_CONFIG_HOME` elsewhere; the test asks it rather than
+  hardcoding one platform.
+- Pending: Cursor, Cline and Aider as `Integration` adapters. The interface
+  already covers the three formats (read-only YAML, JSON, TOML) that were the
+  real risk.

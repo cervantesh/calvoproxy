@@ -1,60 +1,60 @@
-# P5 — Dashboard local
+# P5 — Local dashboard
 
-Arquitectura de referencia: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md). Consume P1 (traza y
-ring), P2 (cuotas) y los contadores existentes.
+Reference architecture: [ARCHITECTURE-6.md](../ARCHITECTURE-6.md). Consumes P1 (trace and
+ring), P2 (quotas) and the existing counters.
 
-## 1. Problema
+## 1. Problem
 
-El proxy ya calcula todo lo interesante —scores, circuitos, cuotas, decisiones de routing— y
-lo expone en tres sitios que hay que leer a mano y por separado: `/health`, `/metrics` y
-`/decisions/{id}`, este último solo si ya conoces el id. No hay ningún sitio donde mirar
-"¿qué está pasando ahora?".
+The proxy already computes everything interesting — scores, circuits, quotas, routing
+decisions — and exposes it in three places you have to read separately and by hand:
+`/health`, `/metrics` and `/decisions/{id}`, the last one only if you already know the id.
+There is nowhere to answer "what is happening right now?".
 
-## 2. Alcance: es una vista, no un subsistema
+## 2. Scope: it is a view, not a subsystem
 
-**El dashboard no calcula nada.** Todo agregado que muestre debe existir antes como snapshot
-del router, igual que `/metrics`. Si algo hace falta y no existe, se añade al router y se
-prueba allí — no en la capa de presentación.
+**The dashboard computes nothing.** Every aggregate it shows must already exist as a router
+snapshot, the same way `/metrics` works. If something is needed and does not exist, it gets
+added to the router and tested there — not in the presentation layer.
 
-- `embed.FS` con HTML y JS a pelo. **Sin Node, sin build, sin framework**: el binario tiene que
-  seguir compilando offline con `-mod=vendor`.
-- **Polling cada 2 s, sin WebSockets.** Para una herramienta local de un solo usuario, un hub
-  de websockets es un segundo camino de streaming dentro del binario para pintar una tabla.
-- **Sin series históricas.** Para eso ya está `/metrics` con Prometheus. Esto es "estado ahora
-  + últimas N decisiones".
+- `embed.FS` with plain HTML and JS. **No Node, no build step, no framework**: the binary has
+  to keep compiling offline with `-mod=vendor`.
+- **Polling every 2 s, no WebSockets.** For a local single-user tool, a websocket hub is a
+  second streaming path inside the binary just to paint a table.
+- **No historical series.** `/metrics` with Prometheus already does that. This is "state now +
+  the last N decisions".
 
-## 3. Superficie
+## 3. Surface
 
-| Ruta | Gate | Qué devuelve |
+| Route | Gate | What it returns |
 |---|---|---|
-| `GET /dashboard` | `admin` | el HTML embebido |
-| `GET /dashboard/state` | `admin` | JSON: `Health()` + `Counters()` + cuotas + últimas N trazas |
+| `GET /dashboard` | `admin` | the embedded HTML |
+| `GET /dashboard/state` | `admin` | JSON: `Health()` + `Counters()` + quotas + the last N traces |
 
-Ambas bajo el mismo `admin` que `/health` ([cmd/main.go:119](../../cmd/main.go)), porque
-enseñan exactamente lo que ese gate protege: cadenas de modelos, texto de error del upstream y
-el estado interno del router.
+Both behind the same `admin` gate as `/health` ([cmd/main.go:119](../../cmd/main.go)), because
+they show exactly what that gate protects: model chains, upstream error text and the router's
+internal state.
 
-Como el canal es admin, las trazas se sirven **con** `Reason` — la misma regla que
-`/decisions/{id}` (P1 §6). Es el gate lo que autoriza, no la ruta.
+Since the channel is admin, traces are served **with** `Reason` — the same rule as
+`/decisions/{id}` (P1 §6). The gate authorises, not the path.
 
-## 4. Lo que hay que añadir al router
+## 4. What has to be added to the router
 
-Una sola cosa: `traceRing.recent(n)`, que hoy no existe — el ring solo sabe buscar por id. Es
-lectura bajo `RLock`, devuelve **las más recientes primero**, y respeta el límite pedido.
+One thing only: `traceRing.recent(n)`, which does not exist today — the ring can only look up
+by id. It reads under `RLock`, returns the **newest first**, and honours the requested limit.
 
-## 5. Invariantes verificables
+## 5. Verifiable invariants
 
-| # | Invariante | Cómo se prueba |
+| # | Invariant | How it is tested |
 |---|---|---|
-| 1 | Con `PROXY_ADMIN_TOKEN` puesto, ambas rutas exigen el token | petición sin token → 401 |
-| 2 | `recent(n)` devuelve las más recientes primero y respeta el límite | ring con más entradas que el límite |
-| 3 | `recent` sobre un ring vacío o nil devuelve vacío, no revienta | ring recién creado y nil |
-| 4 | `/dashboard/state` incluye salud, contadores, cuotas y decisiones | un request servido; se afirman las cuatro claves |
-| 5 | La página es autocontenida: ni un solo recurso externo | se afirma que el HTML no referencia `http://` ni `https://` |
-| 6 | El HTML se sirve con `text/html` y el estado con `application/json` | Content-Type de ambas |
+| 1 | With `PROXY_ADMIN_TOKEN` set, both routes require the token | request without a token → 401 |
+| 2 | `recent(n)` returns newest first and honours the limit | ring with more entries than the limit |
+| 3 | `recent` on an empty or nil ring returns empty, does not blow up | freshly created ring, and nil |
+| 4 | `/dashboard/state` includes health, counters, quotas and decisions | one served request; assert all four keys |
+| 5 | The page is self-contained: not one external resource | assert the HTML references neither `http://` nor `https://` |
+| 6 | The HTML is served as `text/html` and the state as `application/json` | Content-Type of both |
 
-## 6. Fuera de alcance
+## 6. Out of scope
 
-Autenticación propia (usa el gate que ya hay), edición de configuración desde la web (es una
-vista de solo lectura, y escribir configuración desde un navegador local abriría una
-superficie que este proyecto no necesita), y cualquier gráfica de series temporales.
+Its own authentication (it uses the existing gate), editing configuration from the web (it is a
+read-only view, and writing configuration from a local browser would open a surface this
+project does not need), and any time-series charting.
