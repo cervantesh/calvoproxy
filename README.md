@@ -282,24 +282,26 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
-### Compression (off by default)
+### Tool-result size guard (off by default)
 
-Agent histories are dominated by tool results — one `cat` of a large file travels
-again on every later turn. Two deterministic engines can shrink that:
+A single tool result of several hundred kilobytes is a transport problem before
+it is a context problem. Set a per-result budget and anything over it is clipped,
+**both ends kept**, with an explicit marker in between:
 
 ```bash
-PROXY_COMPRESS_DRYRUN=true PROXY_COMPRESS_PROFILES=coding calvoproxy
+PROXY_TOOL_RESULT_LIMIT=8192 calvoproxy
 ```
 
-`toolcap` clips oversized `role: tool` results keeping both ends with a marker in
-between, and never touches one that is valid JSON. `dedup` replaces repeated
-copies of the same block inside one request with a reference, always leaving the
-last copy whole.
+Only `role: tool` messages, never valid JSON (truncating it would produce invalid
+JSON), never structured content. Same family as `PROXY_MAX_RESPONSE_BYTES`: a
+statement about what this proxy will carry, not a judgement about what the model
+needs. Off unless you set it.
 
-This is the only feature that alters your request, so it is **off unless you name
-a profile**, `PROXY_COMPRESS_DRYRUN=true` measures without applying, and every
-turn reports what it saved in the `cmp=` field of `X-Calvoproxy-Route`. Start
-with the dry run and read the numbers before trusting it.
+**Context compression proper is not the proxy's job** and does not live here.
+Deciding what a conversation may lose needs to know that conversation — which
+tool result still matters, whether a block can be fetched back. The engines for
+that are a library, [`cervo-compress`](https://github.com/cervantesh/cervo-compress),
+so the client that owns the conversation can make the call.
 
 ### Dashboard (`/dashboard`)
 

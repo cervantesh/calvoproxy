@@ -11,6 +11,37 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-05
+
+A correction. v0.11.0 put context compression inside the proxy; it did not
+belong there, and this release takes it back out.
+
+### Changed
+- **Compression left the proxy; a size guard stayed.** v0.11.0 shipped two
+  compression engines inside the router. They were in the wrong layer.
+
+  Deciding what a conversation may lose requires knowing that conversation —
+  which tool result still matters, what the user is doing, whether a block can be
+  fetched back if the model asks. The proxy sees a stateless snapshot and knows
+  none of that; Hermes and the coding agents do, because they own the
+  conversation. OmniRoute's own design says the same thing without meaning to:
+  CCR, the one engine that genuinely *removes* content, only injects its
+  retrieval protocol when the caller exposes an `omniroute_ccr_retrieve` tool.
+  Even they will not take context away without a contract with the client.
+
+  The engines now live in `github.com/cervantesh/cervo-compress`, a library with
+  no opinion about *when* to compress, which the client can import. `dedup` is
+  gone from the proxy entirely.
+
+  What stayed is a **tool-result size guard**, reframed as what it always was: a
+  single result of several hundred kilobytes is a transport problem before it is
+  a context problem. Same family as `PROXY_MAX_RESPONSE_BYTES`. It is governed by
+  `PROXY_TOOL_RESULT_LIMIT` and remains **off by default**.
+
+  `PROXY_COMPRESS_PROFILES`, `PROXY_COMPRESS_DRYRUN` and
+  `PROXY_COMPRESS_TOOL_LIMIT` are gone. Nothing breaks by their absence: all
+  three were off by default, so no working configuration depended on them.
+
 ## [0.11.0] — 2026-08-05
 
 Six features that came out of reviewing OmniRoute and asking what was worth
@@ -694,6 +725,7 @@ change to the running proxy.
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
 [Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[0.12.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.12.0
 [0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
 [0.10.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.1
 [0.10.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.10.0

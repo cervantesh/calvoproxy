@@ -1,56 +1,54 @@
 package router
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 )
 
-// Request compression: the ONLY place in the proxy that alters what the user
-// asked for, and therefore the only one that can degrade an answer silently.
-// Every choice below is subordinate to that.
+// A transport guard, not context management.
 //
-// Off by default. Opt-in per profile. Dry-run available. Any error at all
-// forwards the original body untouched. Nobody should discover their proxy
-// compresses because an answer came out worse.
+// This file used to hold two compression engines. It no longer does, and the
+// reason is worth keeping: deciding what may be dropped from a conversation
+// requires knowing that conversation — which tool result still matters, what
+// the user is doing, whether a block can be fetched back if the model asks for
+// it. The proxy sees a stateless snapshot and knows none of that. Hermes and
+// the coding agents do; they own the conversation. Those engines now live in
+// github.com/cervantesh/cervo-compress, where the client that should be making
+// the call can import them.
 //
-// Two engines survived the design, and the two that did not are worth recording:
+// What DOES belong here is a size guard, in the same family as
+// PROXY_MAX_RESPONSE_BYTES: a single tool result of several hundred kilobytes
+// is a transport problem before it is a context problem. It gets clipped, both
+// ends kept, and the client is told. That is a statement about what this proxy
+// will carry — not a judgement about what the model needs.
 //
-//   - Cross-turn session dedup: DROPPED. The upstream is stateless, so not
-//     resending context does not compress it — it makes the model stop seeing
-//     it. That is amnesia, not compression.
-//   - Semantic prose pruning: DROPPED for v1. "Semantic, deterministic, no ML"
-//     is a practical contradiction: preserving code byte-for-byte while pruning
-//     text means delimiting code in arbitrary Markdown, and one unclosed fence
-//     turns pruning into corruption.
+// Off unless PROXY_TOOL_RESULT_LIMIT is set. The default is to forward exactly
+// what the caller sent.
 
 const (
-	defaultToolCapBytes = 4096
-	// toolCutMarker is deliberately explicit: a model that sees a clipped result
-	// must be able to tell it was clipped, or it will reason about the gap as if
-	// it were the whole answer.
+	// toolCutMarker is deliberately explicit. A model shown a clipped result
+	// must be able to tell that it was clipped, or it will reason about the gap
+	// as though it were the whole answer.
 	toolCutMarker = "\n… [truncado: %d bytes omitidos por CalvoProxy] …\n"
+	// minToolResultLimit is the floor. Below it the marker is most of what
+	// survives, so the guard would destroy content to save nothing.
+	minToolResultLimit = 512
 )
 
 type compressionStat struct {
 	OriginalBytes int
 	SavedBytes    int
 	Engines       []string
-	DryRun        bool
 }
 
-func (c compressionStat) applied() bool { return c.SavedBytes > 0 && !c.DryRun }
+func (c compressionStat) applied() bool { return c.SavedBytes > 0 }
 
 // header renders the cmp= field: "-3.1k" style, or "off" when nothing happened.
 func (c compressionStat) header() string {
 	if c.SavedBytes <= 0 {
 		return traceNoCompress
-	}
-	if c.DryRun {
-		return fmt.Sprintf("dry-%s", humanBytes(c.SavedBytes))
 	}
 	return "-" + humanBytes(c.SavedBytes)
 }
@@ -62,39 +60,31 @@ func humanBytes(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func compressEnabledFor(profile string) bool {
-	raw := strings.TrimSpace(envValue("PROXY_COMPRESS_PROFILES"))
+// toolResultLimit is the per-tool-result byte budget, or 0 when the guard is
+// off. Off is the default: the proxy forwards what it was given.
+func toolResultLimit() int {
+	raw := strings.TrimSpace(envValue("PROXY_TOOL_RESULT_LIMIT"))
 	if raw == "" {
-		return false // off by default, and silence means off
+		return 0
 	}
-	for _, p := range strings.Split(raw, ",") {
-		if strings.EqualFold(strings.TrimSpace(p), strings.TrimSpace(profile)) {
-			return true
-		}
+	n := envInt("PROXY_TOOL_RESULT_LIMIT", 0)
+	if n <= 0 {
+		return 0
 	}
-	return false
-}
-
-func compressDryRun() bool {
-	return strings.EqualFold(strings.TrimSpace(envValue("PROXY_COMPRESS_DRYRUN")), "true")
-}
-
-func toolCapBytes() int {
-	n := envInt("PROXY_COMPRESS_TOOL_LIMIT", defaultToolCapBytes)
-	if n < 256 {
-		n = 256 // below this the marker is most of what survives
+	if n < minToolResultLimit {
+		return minToolResultLimit
 	}
 	return n
 }
 
-// safeCompress wraps compressRequest so a panic on a malformed body can never
-// take down a request. Bodies come from clients and will eventually contain
-// everything; a compression bug must degrade to "no compression", never to a 500.
+// safeCompress wraps the guard so a malformed body can never take down a
+// request. Bodies come from clients and will eventually contain everything; a
+// bug here must degrade to "forwarded as-is", never to a 500.
 func safeCompress(profile string, body map[string]any) (out map[string]any, stat compressionStat, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			out, stat, err = body, compressionStat{}, fmt.Errorf("compression panicked: %v", r)
-			slog.Warn("[CalvoProxy] compression panicked; forwarding the original body",
+			out, stat, err = body, compressionStat{}, fmt.Errorf("tool-result guard panicked: %v", r)
+			slog.Warn("[CalvoProxy] tool-result guard panicked; forwarding the original body",
 				slog.Any("panic", r), slog.String("profile", profile))
 		}
 	}()
@@ -102,38 +92,25 @@ func safeCompress(profile string, body map[string]any) (out map[string]any, stat
 	return out, stat, nil
 }
 
-// compressRequest runs the enabled engines once. It returns a NEW map: the
+// compressRequest applies the transport guard. It returns a NEW map: the
 // caller's map is the same one the fallback loop writes ["model"] into on every
-// attempt, so mutating it here would corrupt the chain in ways that only surface
-// on a fallback.
-func compressRequest(profile string, body map[string]any) (map[string]any, compressionStat) {
-	stat := compressionStat{DryRun: compressDryRun()}
-	if body == nil || !compressEnabledFor(profile) {
+// attempt, so mutating it here would corrupt the chain in ways that only
+// surface on a fallback.
+func compressRequest(_ string, body map[string]any) (map[string]any, compressionStat) {
+	limit := toolResultLimit()
+	if body == nil || limit <= 0 {
 		return body, compressionStat{}
 	}
 
 	original, ok := body["messages"].([]any)
 	if !ok || len(original) == 0 {
-		return body, stat
+		return body, compressionStat{}
 	}
-	stat.OriginalBytes = approxSize(original)
 
 	messages := cloneMessages(original)
-	saved := 0
-	if n := applyToolCap(messages, toolCapBytes()); n > 0 {
-		saved += n
-		stat.Engines = append(stat.Engines, "toolcap")
-	}
-	if n := applyDedup(messages); n > 0 {
-		saved += n
-		stat.Engines = append(stat.Engines, "dedup")
-	}
-	stat.SavedBytes = saved
-
-	// Dry-run measures and walks away: it is how an operator learns what
-	// compression WOULD save before trusting it with real traffic.
-	if saved <= 0 || stat.DryRun {
-		return body, stat
+	saved := applyToolCap(messages, limit)
+	if saved <= 0 {
+		return body, compressionStat{}
 	}
 
 	out := make(map[string]any, len(body))
@@ -141,7 +118,11 @@ func compressRequest(profile string, body map[string]any) (map[string]any, compr
 		out[k] = v
 	}
 	out["messages"] = messages
-	return out, stat
+	return out, compressionStat{
+		OriginalBytes: approxSize(original),
+		SavedBytes:    saved,
+		Engines:       []string{"toolcap"},
+	}
 }
 
 // cloneMessages copies each message map so edits never reach the caller's.
@@ -173,8 +154,9 @@ func approxSize(messages []any) int {
 }
 
 // messageContent returns a message's content only when it is a plain string.
-// Structured content (an array of parts, as used for images) is left alone:
-// there is no safe generic way to clip it, and guessing is how corruption starts.
+// Structured content (an array of parts, as used for images and for Anthropic
+// tool results) is left alone: there is no safe generic way to clip it, and
+// guessing at a shape this code does not understand is how corruption starts.
 func messageContent(raw any) (string, bool) {
 	entry, ok := raw.(map[string]any)
 	if !ok {
@@ -195,7 +177,7 @@ func messageRole(raw any) string {
 
 // applyToolCap clips oversized tool results, keeping BOTH ends. A tool result
 // can carry its point at the start (a file) or at the end (a command's error),
-// so keeping only one end picks wrong half the time.
+// so keeping only one end picks wrong about half the time.
 //
 // A result that parses as JSON is never touched: truncating JSON yields invalid
 // JSON, and a corrupt result is worse than a long one.
@@ -222,51 +204,4 @@ func applyToolCap(messages []any, limit int) int {
 		saved += len(content) - len(clipped)
 	}
 	return saved
-}
-
-// applyDedup replaces earlier copies of an identical block with a reference to
-// the one that still travels.
-//
-// The LAST occurrence is always left whole. It is the copy the model is looking
-// at now; replacing that one would take the content away exactly when it is
-// needed, which is the failure this engine must never cause.
-func applyDedup(messages []any) int {
-	lastIndex := map[string]int{}
-	for i, raw := range messages {
-		content, ok := messageContent(raw)
-		if !ok || len(content) < 256 {
-			continue // below this, the reference costs more than the copy
-		}
-		lastIndex[hashContent(content)] = i
-	}
-
-	saved := 0
-	seen := map[string]int{} // hash -> 1-based ordinal of the surviving copy
-	for i, raw := range messages {
-		content, ok := messageContent(raw)
-		if !ok || len(content) < 256 {
-			continue
-		}
-		key := hashContent(content)
-		if lastIndex[key] == i {
-			continue // the survivor
-		}
-		ordinal, known := seen[key]
-		if !known {
-			ordinal = lastIndex[key] + 1
-			seen[key] = ordinal
-		}
-		replacement := fmt.Sprintf("[contenido idéntico al del mensaje #%d, omitido por CalvoProxy]", ordinal)
-		if len(replacement) >= len(content) {
-			continue
-		}
-		raw.(map[string]any)["content"] = replacement
-		saved += len(content) - len(replacement)
-	}
-	return saved
-}
-
-func hashContent(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:8])
 }
