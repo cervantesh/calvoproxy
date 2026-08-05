@@ -12,6 +12,33 @@ out — see v0.7.1.
 ## [Unreleased]
 
 ### Added
+- **`calvoproxy setup <tool>` — wires a coding client to the proxy, and can undo it.**
+  `doctor` knew how to *check* Hermes, but only check: when it failed it printed
+  the block and left you to paste it, and it knew about nothing else. The same
+  shape — find the install, know the right block, prove it took effect — applies
+  to Claude Code and Codex, the other two clients this proxy serves daily.
+
+  ```bash
+  calvoproxy setup --list            # what's installed here
+  calvoproxy setup claude-code       # show what would change (writes nothing)
+  calvoproxy setup claude-code --apply
+  calvoproxy setup claude-code --revert
+  ```
+
+  Writing into another program's configuration is the only destructive act in
+  this feature, so three rules are absolute. **`--check` is the default and never
+  touches disk** — only `--apply` writes. **Every write is preceded by a
+  byte-for-byte backup** that `--revert` restores. And **no parser round-trips on
+  formats that carry comments**: the Codex TOML is patched as a marker-delimited
+  block with everything outside it copied verbatim, because there is no vendored
+  TOML parser and a round-trip through one would silently eat the user's
+  comments. Only Claude Code's JSON — which has none — is decoded and re-encoded,
+  and even then every other key and env var is merged, never replaced.
+
+  Hermes stays read-only on purpose, and the interface says so rather than
+  hiding it: its YAML is inspected with a line-wise heuristic, and a heuristic
+  that reads must not write. `--apply` prints the block for you to paste.
+
 - **`calvoproxy chat` — a REPL for trying a chain without wiring anything.**
   Testing a profile meant either standing up Hermes or hand-writing `curl`, and
   `curl` leaves you decoding `v1;p=coding;s=0.83;a=2;prev=…` by eye. The new

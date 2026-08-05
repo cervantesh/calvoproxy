@@ -282,6 +282,27 @@ budget. `calvoproxy_build_info{version=...}` labels the running build.
 Reproduce or extend these measurements with the harness in
 [`test/load/`](test/load/); a slimmed version runs in CI as a regression gate.
 
+### Wiring a client (`calvoproxy setup`)
+
+```bash
+calvoproxy setup --list                   # what's installed on this machine
+calvoproxy setup claude-code              # show what would change — writes nothing
+calvoproxy setup claude-code --apply      # write it, with a backup
+calvoproxy setup claude-code --revert     # undo, byte for byte
+```
+
+Supported: `hermes`, `claude-code`, `codex`.
+
+Editing another program's config is the one destructive thing this tool does, so
+**`--check` is the default and never touches disk**, every write is preceded by a
+byte-for-byte backup, and formats that carry comments are patched as a
+marker-delimited block rather than round-tripped through a parser. `hermes` is
+read-only by design — its YAML is read with a line-wise heuristic, and a
+heuristic that reads should not write, so it prints the block for you to paste.
+
+None of these tools reload their configuration while running: restart them after
+applying, or nothing changes.
+
 ### Try a chain without wiring anything (`calvoproxy chat`)
 
 A REPL that talks to the proxy exactly as an agent does — profile route, full
