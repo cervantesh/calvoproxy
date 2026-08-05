@@ -27,9 +27,19 @@ type routeTrace struct {
 
 type traceCtxKey struct{}
 
+// traceEnabled gates the whole subsystem. Off means no trace is allocated at
+// all, not a blanked header: a diagnostic must be removable from the picture
+// entirely, and this is the escape hatch if it ever costs something on the hot
+// path.
+func traceEnabled() bool { return envBool("PROXY_ROUTE_TRACE", true) }
+
 // newRouteTrace mints a trace with the id the client is handed as
-// X-Calvoproxy-Decision-Id.
+// X-Calvoproxy-Decision-Id. Returns nil when tracing is off, which every
+// annotation point already tolerates.
 func newRouteTrace(profile string) *routeTrace {
+	if !traceEnabled() {
+		return nil
+	}
 	return &routeTrace{ID: newTraceID(), Profile: profile}
 }
 

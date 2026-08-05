@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -79,5 +80,71 @@ func TestTrace_RouteHeaderIsSingleValued(t *testing.T) {
 	}
 	if strings.Contains(values[0], "INJECTED") {
 		t.Errorf("upstream value must not survive, got %q", values[0])
+	}
+}
+
+// Invariant 2 (spec §7): with PROXY_ROUTE_TRACE=off nothing observable changes.
+// The trace is a diagnostic, so it must be possible to take it out of the
+// picture entirely — not merely to blank the header.
+func TestTrace_DisabledLeavesResponseUnchanged(t *testing.T) {
+	respond := func(t *testing.T) *headerSnapshotRecorder {
+		t.Helper()
+		upstream := &streamTransport{events: "data: [DONE]\n\n"}
+		svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+			DefaultProfile: "simple",
+			Profiles:       map[string][]string{"simple": {"model-a"}},
+			Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+		})
+		rec := newHeaderSnapshotRecorder()
+		svc.RouteRequestWithProvider(rec, trustedRequest(
+			http.MethodPost, "/v1/chat/completions", `{"messages":[],"stream":true}`), "k", "")
+		return rec
+	}
+
+	on := respond(t)
+	t.Setenv("PROXY_ROUTE_TRACE", "off")
+	off := respond(t)
+
+	if off.Code != on.Code {
+		t.Errorf("status changed with tracing off: %d vs %d", off.Code, on.Code)
+	}
+	if off.Body.String() != on.Body.String() {
+		t.Errorf("body changed with tracing off")
+	}
+	if got := off.sentHeader("X-Calvoproxy-Route"); got != "" {
+		t.Errorf("route header must be absent with tracing off, got %q", got)
+	}
+	if got := off.sentHeader("X-Calvoproxy-Decision-Id"); got != "" {
+		t.Errorf("decision id must be absent with tracing off, got %q", got)
+	}
+	// Everything the proxy said before P1 must still be said.
+	for _, h := range []string{"X-Calvoproxy-Model", "X-Calvoproxy-Profile"} {
+		if off.sentHeader(h) != on.sentHeader(h) {
+			t.Errorf("%s changed with tracing off: %q vs %q", h, off.sentHeader(h), on.sentHeader(h))
+		}
+	}
+}
+
+// Invariant 3 (spec §4): a nil trace is a no-op everywhere. Callers annotate
+// unconditionally; out-of-band callers (a direct executor call in a test, or a
+// replaced FallbackExecutor) must not panic.
+func TestTrace_NilReceiverIsNoOp(t *testing.T) {
+	var trace *routeTrace
+	if got := trace.header(); got != "" {
+		t.Errorf("nil trace must render an empty header, got %q", got)
+	}
+	// traceFrom on a context that never carried one.
+	if got := traceFrom(context.Background()); got != nil {
+		t.Errorf("traceFrom must return nil out of band, got %#v", got)
+	}
+	// withTrace(nil) must not wrap the context.
+	if ctx := withTrace(context.Background(), nil); traceFrom(ctx) != nil {
+		t.Error("withTrace(nil) must leave the context without a trace")
+	}
+	// Emitting from a nil trace writes nothing rather than blank headers.
+	h := http.Header{}
+	setRouteTraceHeaders(h, nil)
+	if len(h) != 0 {
+		t.Errorf("nil trace must write no headers, got %v", h)
 	}
 }
