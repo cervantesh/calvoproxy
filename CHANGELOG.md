@@ -48,6 +48,19 @@ out — see v0.7.1.
   free. `PROXY_ROUTE_TRACE=off` removes the whole thing, and off means no trace
   is allocated at all, not a blanked header.
 
+- **`GET /decisions/{id}` for the detail the header has no room for.** Every
+  response now carries `X-Calvoproxy-Decision-Id`, and the last 200 decisions
+  (`PROXY_TRACE_RING`) are kept in memory for lookup: the upstream error text
+  behind each failed attempt, and the stream outcome, which is only known after
+  the headers are already on the wire.
+
+  Admin-gated, like `/health`, because that error text is the one part of a
+  trace that comes from outside. A client that wants structure rather than the
+  compact form can ask for it per request with `X-Calvoproxy-Trace: full` and
+  gets the same JSON *without* the upstream text — that channel has no gate in
+  front of it. The ring is never written to disk: these records sit next to
+  conversation content, and `/metrics` remains the durable series.
+
 ### Fixed
 - **A header the upstream echoed could appear twice.** `streamProxyResponse`
   copies upstream headers with `Add`, and it runs *after* the proxy sets its
