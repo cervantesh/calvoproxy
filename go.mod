@@ -19,7 +19,7 @@ require (
 	github.com/cervantesh/cervo-model-policy v0.0.0
 	github.com/cervantesh/cervo-observe v0.0.0
 	github.com/cervantesh/cervo-retry v0.0.0
-	github.com/cervantesh/cervo-rules/v3 v3.0.0-rc.3
+	github.com/cervantesh/cervo-rules/v3 v3.0.0-rc.6
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	policyvocab "github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	policyvocab "github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 )
 
 type PolicyFactory struct{}
@@ -21,8 +21,8 @@ func (PolicyFactory) Metadata() cervoruntime.PolicyMetadata {
 		Name:           "calvoproxy.v3",
 		DSLVersion:     "cervorules.policy.v3",
 		GeneratedWith:  "cervorules-policygen/v3",
-		VocabularyHash: "8b062bf6de8f9e9c13afd936dafc610f4af39cc71c05116d897139c7cb205320",
-		PolicyHash:     "4085fa602cf2649291b652bd93c62d1d134753da2b469383fbc0912240bde3c8",
+		VocabularyHash: "2a59fe4999758594dd333bc0bd46feb91e302432d6dbcf81e6514bfdda056ccb",
+		PolicyHash:     "34caf9fd2884a64842a8f00335c2c3c7461614c8fe726c7e944dfde256cb5d25",
 	}
 }
 
@@ -100,15 +100,15 @@ func (PolicyFactory) Build(ctx context.Context, cfg cervoruntime.PolicyRuntimeCo
 		return nil, cervoruntime.NewPolicyBuildError(factory.Metadata(), err)
 	}
 	routes := map[cervorules.Operation]generatedRoute{
-		cervorules.Operation("chat_completion"):    {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: false},
-		cervorules.Operation("embedding"):          {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: false},
-		cervorules.Operation("planning"):           {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: false},
-		cervorules.Operation("secret_lookup"):      {target: cervorules.Target("cervovault_api"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: true},
-		cervorules.Operation("telegram_webhook"):   {target: cervorules.Target("cervobridge"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: false},
-		cervorules.Operation("tool_orchestration"): {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), reason: "route matched", requiresTrustedUser: false},
+		cervorules.Operation("chat_completion"):    {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "chat_completion", reason: "route matched", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("embedding"):          {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "embedding", reason: "route matched", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("planning"):           {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "planning", reason: "route matched", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("secret_lookup"):      {target: cervorules.Target("cervovault_api"), executor: cervorules.Executor(""), id: "secret_lookup", reason: "route matched", requiresTrustedUser: true, requires: nil},
+		cervorules.Operation("telegram_webhook"):   {target: cervorules.Target("cervobridge"), executor: cervorules.Executor(""), id: "telegram_webhook", reason: "route matched", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("tool_orchestration"): {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "tool_orchestration", reason: "route matched", requiresTrustedUser: false, requires: nil},
 	}
 	disabledRoutes := map[cervorules.Operation]generatedRoute{
-		cervorules.Operation("media_request"): {target: cervorules.Target("cervomedia"), executor: cervorules.Executor(""), reason: "runtime override", requiresTrustedUser: false},
+		cervorules.Operation("media_request"): {target: cervorules.Target("cervomedia"), executor: cervorules.Executor(""), id: "media_request", reason: "runtime override", requiresTrustedUser: false, requires: nil},
 	}
 	trustedUsers := map[string]struct{}{}
 	for _, user := range cfg.TrustedUsers {
@@ -125,6 +125,9 @@ func (PolicyFactory) Build(ctx context.Context, cfg cervoruntime.PolicyRuntimeCo
 		if route.executor == "" {
 			route.executor = cfg.DefaultExecutor
 		}
+		if route.id == "" {
+			route.id = string(operation)
+		}
 		if route.reason == "" {
 			route.reason = "runtime override"
 		}
@@ -133,8 +136,8 @@ func (PolicyFactory) Build(ctx context.Context, cfg cervoruntime.PolicyRuntimeCo
 	disabledDenies := map[cervorules.Operation]string{
 		cervorules.Operation("media_request"): "media backend not configured",
 	}
-	denies := map[cervorules.Operation]string{}
-	return generatedEngine{routes: routes, denies: denies, disabledDenies: disabledDenies, trustedUsers: trustedUsers, defaultExecutor: cfg.DefaultExecutor, executorFallbacks: cfg.ExecutorFallbacks}, nil
+	denies := []generatedDeny{}
+	return generatedEngine{routes: routes, denies: denies, disabledDenies: disabledDenies, trustedUsers: trustedUsers, defaultExecutor: cfg.DefaultExecutor, executorFallbacks: cfg.ExecutorFallbacks, conditions: cfg.Conditions}, nil
 }
 
 func mergeRuntimeConfig(base, override cervoruntime.PolicyRuntimeConfig) cervoruntime.PolicyRuntimeConfig {
@@ -144,6 +147,12 @@ func mergeRuntimeConfig(base, override cervoruntime.PolicyRuntimeConfig) cervoru
 	}
 	if override.DefaultExecutor != "" {
 		out.DefaultExecutor = override.DefaultExecutor
+	}
+	// The evaluator only ever arrives from the caller: DefaultConfig cannot
+	// supply one. Dropping it here made every condition-gated policy fail to
+	// build, because ValidateConfig then saw no evaluator at all.
+	if override.Conditions != nil {
+		out.Conditions = override.Conditions
 	}
 	for operation, target := range override.OperationTargets {
 		if out.OperationTargets == nil {
@@ -161,19 +170,32 @@ func mergeRuntimeConfig(base, override cervoruntime.PolicyRuntimeConfig) cervoru
 }
 
 type generatedRoute struct {
-	target              cervorules.Target
-	executor            cervorules.Executor
+	target   cervorules.Target
+	executor cervorules.Executor
+	// id names the rule in a trace step; reason is what the decision carries.
+	id                  string
 	reason              string
 	requiresTrustedUser bool
+	requires            []cervorules.Condition
+}
+
+// generatedDeny is one ordered deny rule. An empty operation applies it to
+// every operation.
+type generatedDeny struct {
+	operation cervorules.Operation
+	id        string
+	reason    string
+	requires  []cervorules.Condition
 }
 
 type generatedEngine struct {
 	routes            map[cervorules.Operation]generatedRoute
-	denies            map[cervorules.Operation]string
+	denies            []generatedDeny
 	disabledDenies    map[cervorules.Operation]string
 	trustedUsers      map[string]struct{}
 	defaultExecutor   cervorules.Executor
 	executorFallbacks map[cervorules.Executor][]cervorules.Executor
+	conditions        cervorules.Conditions
 }
 
 func (e generatedEngine) Decide(ctx context.Context, req cervorules.Request) (cervorules.DecisionResult, error) {
@@ -186,25 +208,84 @@ func (e generatedEngine) DecideWithOptions(ctx context.Context, req cervorules.R
 		return cervorules.DecisionResult{}, ctx.Err()
 	default:
 	}
-	if reason, denied := e.denies[req.Operation]; denied {
-		return cervorules.NewDecisionResult(req, cervorules.Decision{Allow: false, Reason: reason}, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled())), nil
+	traceEnabled := options.TraceEnabled()
+	var steps []cervorules.DecisionTraceStep
+	for _, deny := range e.denies {
+		if deny.operation != "" && deny.operation != req.Operation {
+			continue
+		}
+		applies, err := e.conditionsHold(ctx, deny.requires, req)
+		if err != nil {
+			return cervorules.DecisionResult{}, err
+		}
+		detail := ""
+		if traceEnabled {
+			steps = append(steps, cervorules.DecisionTraceStep{Name: deny.id, Matched: applies, Reason: detail})
+		}
+		if applies {
+			return e.finish(req, cervorules.Decision{Allow: false, Reason: deny.reason}, options, steps), nil
+		}
 	}
 	route, ok := e.routes[req.Operation]
 	if !ok {
 		if reason, denied := e.disabledDenies[req.Operation]; denied {
-			return cervorules.NewDecisionResult(req, cervorules.Decision{Allow: false, Reason: reason}, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled())), nil
+			return e.finish(req, cervorules.Decision{Allow: false, Reason: reason}, options, steps), nil
 		}
-		return cervorules.NewDecisionResult(req, cervorules.Decision{Allow: false, Reason: fmt.Sprintf("no route for operation %s", req.Operation)}, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled())), nil
+		return e.finish(req, cervorules.Decision{Allow: false, Reason: fmt.Sprintf("no route for operation %s", req.Operation)}, options, steps), nil
 	}
 	if route.requiresTrustedUser && !e.isTrustedUser(req.User) {
-		return cervorules.NewDecisionResult(req, cervorules.Decision{Allow: false, Reason: fmt.Sprintf("operation %s requires trusted user", req.Operation)}, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled())), nil
+		return e.finish(req, cervorules.Decision{Allow: false, Reason: fmt.Sprintf("operation %s requires trusted user", req.Operation)}, options, steps), nil
+	}
+	eligible, err := e.conditionsHold(ctx, route.requires, req)
+	if err != nil {
+		return cervorules.DecisionResult{}, err
+	}
+	routeDetail := ""
+	if traceEnabled {
+		steps = append(steps, cervorules.DecisionTraceStep{Name: route.id, Matched: eligible, Reason: routeDetail})
+	}
+	if !eligible {
+		return e.finish(req, cervorules.Decision{Allow: false, Reason: fmt.Sprintf("operation %s did not satisfy its required conditions", req.Operation)}, options, steps), nil
 	}
 	executor := route.executor
 	if executor == "" {
 		executor = e.defaultExecutor
 	}
 	decision := cervorules.Decision{Allow: true, Target: route.target, Executor: executor, FallbackExecutors: append([]cervorules.Executor(nil), e.executorFallbacks[executor]...), Reason: route.reason}
-	return cervorules.NewDecisionResult(req, decision, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled())), nil
+	return e.finish(req, decision, options, steps), nil
+}
+
+// finish assembles the decision envelope and attaches the trace steps that
+// were collected. Steps are only collected when trace is enabled, so an
+// untraced decision allocates nothing for explanation.
+func (e generatedEngine) finish(req cervorules.Request, decision cervorules.Decision, options cervorules.DecisionOptions, steps []cervorules.DecisionTraceStep) cervorules.DecisionResult {
+	result := cervorules.NewDecisionResult(req, decision, cervorules.WithTrace(options.TraceEnabled()), cervorules.WithObservation(options.ObservationEnabled()))
+	if result.Trace != nil {
+		result.Trace.Steps = steps
+	}
+	return result
+}
+
+// conditionsHold reports whether every required condition holds.
+// A condition that cannot be answered fails the decision instead of being
+// treated as a non-match, so an unanswerable guard never silently passes.
+func (e generatedEngine) conditionsHold(ctx context.Context, required []cervorules.Condition, req cervorules.Request) (bool, error) {
+	if len(required) == 0 {
+		return true, nil
+	}
+	if e.conditions == nil {
+		return false, cervorules.Error{Code: cervorules.ErrorCodeMissingConditions, Severity: cervorules.SeverityFatal, Component: "policy", Field: "conditions", Reason: "policy requires conditions but no evaluator is configured"}
+	}
+	for _, condition := range required {
+		holds, err := e.conditions.Holds(ctx, condition, req)
+		if err != nil {
+			return false, err
+		}
+		if !holds {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (e generatedEngine) isTrustedUser(user string) bool {
