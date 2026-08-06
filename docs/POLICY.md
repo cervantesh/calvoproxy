@@ -101,9 +101,30 @@ Supported overrides:
 - `PROXY_MAX_BODY_BYTES`
 - `PROXY_RETRY_POLICY_JSON`
 - `PROXY_TRUSTED_USERS`
+- `PROXY_TRUST_USER_HEADER`
 
 Generated CervoRules v3 policy validates operation, target and executor
 vocabulary. CalvoProxy validates and applies gateway-owned runtime behavior.
+
+## Caller-asserted facts
+
+Four request headers feed the policy: `X-Cervo-Capability` (operation),
+`X-Cervo-User`, `X-Cervo-Channel` and `X-Cervo-Risk`. The caller sets them, so
+the proxy treats them as claims, not as findings. Two of them reach a gate and
+are therefore checked:
+
+- **`X-Cervo-Capability`** is rejected with `400` unless it names an operation
+  the vocabulary declares. An undeclared one used to reach the policy and fail
+  there for lack of a matching route — the right outcome by accident, and one a
+  future catch-all route would have removed.
+- **`X-Cervo-User`** is discarded by default, because `requires_trusted_user`
+  resolves against it: believing it would let a request authorise itself by
+  naming a trusted user. Set `PROXY_TRUST_USER_HEADER=true` only when something
+  in front of the proxy authenticates the caller and sets the header itself, and
+  the proxy is not reachable except through it.
+
+With the default, routes gated on `requires_trusted_user` deny. Today that is
+only `secret_lookup`, which CalvoProxy does not route to in normal operation.
 
 Model policy precedence is:
 

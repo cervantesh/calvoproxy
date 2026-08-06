@@ -13,11 +13,17 @@ func TestProxyHTTPClassifierClassifiesKnownPaths(t *testing.T) {
 
 	facts := proxyHTTPClassifier.FactsFromHTTPRequest(req)
 
-	if facts.ID != "req-1" || facts.User != "cervantes" {
+	if facts.ID != "req-1" {
 		t.Fatalf("unexpected request facts: %+v", facts)
 	}
 	if facts.OperationHint != capChatCompletion {
 		t.Fatalf("expected chat operation, got %q", facts.OperationHint)
+	}
+	// The user header is a claim the proxy does not verify, and a policy gate
+	// resolves against it, so it is dropped unless the deployment opts in.
+	// See TestUserHeaderIsDroppedFromTheFactsByDefault.
+	if facts.User != "" {
+		t.Fatalf("user header believed without PROXY_TRUST_USER_HEADER: %+v", facts)
 	}
 }
 
