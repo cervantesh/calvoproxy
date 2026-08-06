@@ -55,8 +55,12 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 	start := time.Now()
 	policyCtx, span := otel.Tracer("calvoproxy/policy").Start(ctx, "calvoproxy.policy.evaluate")
 	defer span.End()
-	result, err := s.PolicyEngine.DecideWithOptions(policyCtx, req, policyDecisionOptionsForRequest(req, telemetryConfig))
+	// Ask the engine to explain itself only when someone will read the
+	// explanation. The route trace is the only consumer, and it is the gate that
+	// spec §7 promises turns the whole subsystem off.
+	result, err := s.PolicyEngine.DecideWithOptions(policyCtx, req, policyDecisionOptionsForRequest(req, telemetryConfig, traceEnabled()))
 	decision := s.proxyDecision(req, result.Decision)
+	decision.PolicySteps = policyStepsFromResult(result)
 	event := newPolicyTelemetryEventFromResult(req, result, decision, s.policyMetadata, err, time.Since(start))
 	recordPolicyTelemetry(policyCtx, event, telemetryConfig, span)
 	if err != nil {

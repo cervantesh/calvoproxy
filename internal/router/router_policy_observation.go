@@ -261,12 +261,41 @@ func loadPolicyTelemetryConfig() policyTelemetryConfig {
 	}
 }
 
-func policyDecisionOptionsForRequest(req cervorules.Request, cfg policyTelemetryConfig) cervorules.DecisionOptions {
+// policyDecisionOptionsForRequest decides what the engine is asked to produce
+// beyond the decision itself.
+//
+// routeTraceOn is passed in rather than read here so this stays a pure function
+// of its inputs, and so the ONE place that reads PROXY_ROUTE_TRACE for this
+// purpose is the call site next to the engine call. It only widens the trace
+// option, never the observation one: the observation feeds metrics and is
+// sampled deliberately, whereas the trace's cost is a handful of steps that die
+// with the request.
+//
+// The route trace is on by default, so on a default install this does ask the
+// engine for a trace on every request — one slice of at most one struct per
+// policy rule, all of it garbage by the end of the request. PROXY_ROUTE_TRACE=off
+// takes it back to nothing, which is the guarantee spec §7 makes.
+func policyDecisionOptionsForRequest(req cervorules.Request, cfg policyTelemetryConfig, routeTraceOn bool) cervorules.DecisionOptions {
 	includeDiagnostics := cfg.DebugIncludeTrace || shouldSamplePolicyObservation(req.ID, cfg.ObservationSampleRate)
 	return cervorules.NewDecisionOptions(
-		cervorules.WithTrace(includeDiagnostics),
+		cervorules.WithTrace(includeDiagnostics || routeTraceOn),
 		cervorules.WithObservation(includeDiagnostics),
 	)
+}
+
+// policyStepsFromResult flattens the engine's trace onto the router's own type.
+// Returns nil when the engine produced no trace, which is what happens whenever
+// the route trace is off — so with PROXY_ROUTE_TRACE=off nothing is allocated
+// here at all.
+func policyStepsFromResult(result cervorules.DecisionResult) []policyTraceStep {
+	if result.Trace == nil || len(result.Trace.Steps) == 0 {
+		return nil
+	}
+	steps := make([]policyTraceStep, 0, len(result.Trace.Steps))
+	for _, step := range result.Trace.Steps {
+		steps = append(steps, policyTraceStep{Name: step.Name, Matched: step.Matched, Detail: step.Reason})
+	}
+	return steps
 }
 
 func shouldSamplePolicyObservation(id string, rate float64) bool {

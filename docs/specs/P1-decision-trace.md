@@ -16,30 +16,37 @@ Internal structure, one pointer per request, in `internal/router/router_trace.go
 
 ```go
 type routeTrace struct {
-    ID        string    // 16 hex chars, crypto/rand
-    StartedAt time.Time
+    ID string // 16 hex chars, crypto/rand
 
     Profile        string   // as already resolved by determineProfile
     RequestedModel string   // "" when the client pinned no model
     RuleID         string   // policyDecision.RuleID
+    PolicyReason   string   // policyDecision.Reason — ADMIN CHANNEL ONLY, see §6
+    PolicySteps    []policyTraceStep
     CapsRequired   []string // nil when no vision/tools were required
 
     Planned   int // len after planModelAttempts
     AfterCaps int // len after applyCapabilityFilter
     Eligible  int // len after filterAvailableAttempts + rank + truncation
 
-    Excluded []traceExclusion
-    Attempts []traceAttempt
+    ExcludedByBreaker int // models the breaker gated out
+    ExcludedByQuota   int // models out of budget (P2)
 
-    Served      *traceAttempt     // nil when no attempt succeeded
-    Compression *traceCompression // nil until P3; the header says cmp=off
-    Outcome     string            // served | all_cooling | caps_none | caps_pinned | chain_failed
+    Attempts []traceAttempt
+    Served   *traceAttempt // nil when no attempt succeeded
+
+    compression compressionStat // P3; the header says cmp=off when there was none
+    scores      map[string]float64
+
+    Outcome string // served | all_cooling | caps_none | caps_pinned | chain_failed
 }
 
-type traceExclusion struct {
-    Model string
-    Why   string    // breaker | capability
-    Until time.Time // breaker only; zero otherwise
+// One rule the policy engine evaluated, flattened from
+// cervorules.DecisionTraceStep.
+type policyTraceStep struct {
+    Name    string // rule id, closed and config-derived
+    Matched bool
+    Detail  string // ADMIN CHANNEL ONLY — see §6
 }
 
 type traceAttempt struct {
@@ -49,12 +56,29 @@ type traceAttempt struct {
     Status int     // attemptError.StatusCode; 200 on the served one
     Kind   string  // ok | http | transport | skip | unavailable | stream_abort | probe_busy
     Reason string  // ADMIN CHANNEL ONLY — see §6
-    Millis int64
 }
 ```
 
 `Kind` is a closed enum. It is the field that travels on the public channels; `Reason` is
 free-form text of upstream origin and does not.
+
+The exclusion counts are kept apart on purpose: "broken right now" and "out of allowance until
+midnight" call for different actions, and folding them together is the ambiguity this trace
+exists to remove.
+
+### 2.1 Where the policy fields come from
+
+`RuleID`, `PolicyReason` and `PolicySteps` are produced by `authorizeOperationalRoute`, which
+runs **before** `dispatchChain` creates the trace — the decision is what selects the chain, so
+it cannot wait for a trace that does not exist yet. They therefore ride on `policyDecision`,
+the only value that crosses between the two, and `dispatchChain` replays them onto the trace
+with `recordPolicy` immediately after `newRouteTrace`.
+
+The engine is asked for its own trace only when the route trace is on:
+`policyDecisionOptionsForRequest(req, cfg, routeTraceOn)` widens `WithTrace` — and only
+`WithTrace`, never the sampled `WithObservation`, which feeds metrics on a deliberate budget.
+With `PROXY_ROUTE_TRACE=off` the engine collects no steps, `policyStepsFromResult` returns
+`nil`, and nothing is allocated (§7, invariant 2).
 
 ## 3. Short header format
 
@@ -62,7 +86,7 @@ Header `X-Calvoproxy-Route`, **single-valued**, ASCII, `;` between fields and `,
 entries of a list. The first field is always the version.
 
 ```
-X-Calvoproxy-Route: v1;p=coding;s=0.83;a=2;n=4/4/3;caps=tools;prev=gpt-oss-20b:429,gemma-4-31b:skip;brk=1;cmp=off
+X-Calvoproxy-Route: v1;p=coding;cmp=off;s=0.83;a=2;caps=tools;rid=route.chat_completion;n=4/4/3;brk=1;prev=gpt-oss-20b:429,gemma-4-31b:skip
 ```
 
 | Field | Present | Meaning |
@@ -73,6 +97,7 @@ X-Calvoproxy-Route: v1;p=coding;s=0.83;a=2;n=4/4/3;caps=tools;prev=gpt-oss-20b:4
 | `a=` | when `AttemptIndex > 1` | position in the chain (the degradation signal) |
 | `n=` | always | `Planned/AfterCaps/Eligible` |
 | `caps=` | when required | `tools`, `vision` or `tools+vision` |
+| `rid=` | when it renders (see below) | the policy rule that authorised this route |
 | `prev=` | when there were failures | `model:code` per failed attempt, in order |
 | `brk=` | when the breaker excluded models | number of models excluded |
 | `q=` | when quota excluded models (P2) | number of models out of budget |
@@ -83,6 +108,19 @@ X-Calvoproxy-Route: v1;p=coding;s=0.83;a=2;n=4/4/3;caps=tools;prev=gpt-oss-20b:4
 **Model names are abbreviated** in the header: the organisation prefix and the `:free` suffix
 are dropped. `nvidia/nemotron-3-super-120b-a12b:free` → `nemotron-3-super-120b-a12b`. The full
 name already travels in `X-Calvoproxy-Model` and in the JSON.
+
+`rid=` is an **additive, optional** v1 field: a consumer that has never heard of it parses the
+header exactly as before. It is the only thing the policy produced that belongs on this
+channel, because it is the only closed one — an opaque key the reader resolves against the
+policy it already holds. `PolicyReason` and a step's `Detail` are free text of unbounded length;
+either would spend the 512-byte budget on prose and push out `prev=`, which is the field that
+says what actually went wrong.
+
+The rule id is `"route." + operation`, and the operation can be supplied verbatim by the client
+through `X-Cervo-Capability` (`cervohttpadapter` does not constrain it to a vocabulary). It is
+therefore sanitised like every other header value, and **omitted entirely** when the sanitised
+form exceeds 64 bytes. Omission rather than truncation: a truncated identifier is a wrong
+identifier, and a consumer comparing it to its policy would silently mismatch.
 
 ### 3.1 Codes in `prev=`
 
@@ -107,7 +145,8 @@ with the worst constructible case.
 
 | Where | What it writes |
 |---|---|
-| `dispatchChain` ([router.go:263](../../internal/router/router.go)) | creates the trace and puts it in the `ctx`; `Profile`, `RequestedModel`, `RuleID`, `CapsRequired` |
+| `authorizeOperationalRoute` ([operational_policy.go](../../internal/router/operational_policy.go)) | collects the engine's steps onto `policyDecision.PolicySteps`, gated on `traceEnabled()` — see §2.1 |
+| `dispatchChain` ([router.go](../../internal/router/router.go)) | creates the trace and puts it in the `ctx`; `Profile`, then `recordPolicy` for `RuleID`, `PolicyReason`, `PolicySteps`, `RequestedModel` |
 | after `planModelAttempts` (:286) | `Planned` |
 | `applyCapabilityFilter` (:372) | `AfterCaps` + one `traceExclusion{Why:"capability"}` per drop |
 | after `filterAvailableAttempts` (:303) | `traceExclusion{Why:"breaker", Until}` per exclusion |
@@ -158,19 +197,49 @@ channel**, because it is upstream error body (`truncateReason` cuts it to 240 by
 
 | Channel | Gate | Contains |
 |---|---|---|
-| `X-Calvoproxy-Route` | none | short form; codes and enums only |
-| `X-Calvoproxy-Trace: full` (client opt-in) | none | full JSON **without** `Reason` |
-| `GET /decisions/{id}` | `admin` | full JSON **with** truncated `Reason` |
+| `X-Calvoproxy-Route` | none | short form; codes, enums and closed identifiers only |
+| `X-Calvoproxy-Trace: full` (client opt-in) | none | full JSON **without** any free-form text |
+| `GET /decisions/{id}`, `RecentDecisions` | `admin` | full JSON **with** the free-form text |
 
 Every value entering the header is filtered to `[A-Za-z0-9._/+-]`; any other byte becomes `_`.
-A model name comes from config, but `RequestedModel` comes from the client and must not be able
-to inject CR/LF or separators.
+A model name comes from config, but `RequestedModel` and (through `X-Cervo-Capability`) `RuleID`
+come from the client and must not be able to inject CR/LF or separators.
+
+### 6.1 The generalised rule
+
+The original rule — "`Reason` is admin-only because it is upstream error body" — does not
+decide where the policy fields go, because none of them is upstream error body: `PolicyReason`
+and a step's `Detail` are authored by this repo's own generated policy. The rule that does
+decide, and that subsumes the original:
+
+> **Closed identifiers travel on every channel. Free-form text travels only behind the admin
+> gate.**
+
+| Field | Header | Opt-in JSON | Admin JSON | Why |
+|---|---|---|---|---|
+| `RuleID` | `rid=` | `rule_id` | `rule_id` | closed identifier, resolved against the policy |
+| `PolicySteps[].Name`, `.Matched` | — | `policy_steps` | `policy_steps` | closed identifiers and a boolean; too many to fit the header |
+| `PolicySteps[].Detail` | — | — | `detail` | free text |
+| `PolicyReason` | — | — | `policy_reason` | free text |
+| `RequestedModel` | — | `requested_model` | `requested_model` | the caller's own input; it learns nothing new |
+| `traceAttempt.Reason` | — | — | `reason` | free text, and of upstream origin |
+
+For `PolicyReason` and `Detail` the justification is **not** the upstream-text one. It is that
+they narrate the internals of the authorisation rules to a caller that has passed no gate. That
+is a weaker argument than the one protecting `traceAttempt.Reason` — `PolicyReason` already
+reaches the client in the 403 body on a deny — but it is the conservative side of a line that is
+cheap to hold and expensive to move back.
 
 ## 7. Disabling
 
 `PROXY_ROUTE_TRACE=off` → `dispatchChain` creates no trace, `traceFrom` returns `nil`, no new
-header is emitted and the ring is untouched. Observable behaviour goes back to being byte-for-
-byte what it is today (invariant 2).
+header is emitted, the ring is untouched, **and the policy engine is not asked for its own
+trace**, so no `DecisionTraceStep` is allocated either. Observable behaviour goes back to being
+byte-for-byte what it is today (invariants 2 and 15).
+
+The switch defaults to **on**, so on a default install the engine does build a step per rule it
+evaluates, every request. That is the deliberate cost of the subsystem — the same one
+`newRouteTrace` already pays — and this is the one escape hatch that removes all of it.
 
 ## 8. Verifiable invariants
 
@@ -187,6 +256,10 @@ byte what it is today (invariant 2).
 | 9 | `X-Calvoproxy-Trace: full` returns the full JSON **without** `Reason`; without the opt-in nothing is emitted | one request with the header and one without |
 | 10 | `/decisions/{id}` returns the trace **with** `Reason`; an unknown id ⇒ not found | lookup after a real request, and with an invented id |
 | 11 | The ring is bounded and evicts the oldest traces | small `PROXY_TRACE_RING`, more requests than capacity |
+| 12 | Every field §2 declares as written on a served request **is** written | `TestTrace_WritesEveryFieldTheSpecDeclares` — asserts the struct, not one channel's projection of it |
+| 13 | `rid=` is carried, sanitised, and omitted rather than truncated when oversized | `TestTrace_HeaderOmitsAnOversizedRuleID`; invariant 4's cap re-checked with a maximal rule id |
+| 14 | The policy's free text never crosses the un-gated channel | `TestTrace_PolicyChannelSplit` — same trace rendered for both channels, diffed |
+| 15 | With `PROXY_ROUTE_TRACE=off` the engine is not asked for a trace either | `TestTrace_DisabledAsksThePolicyForNoTrace`, asserting `policyDecision.PolicySteps == nil` |
 
 The response header carrying the opt-in JSON is `X-Calvoproxy-Trace-Json`. It is a separate
 header from `X-Calvoproxy-Route` on purpose: the short form is the stable contract and must not
@@ -222,6 +295,35 @@ that call's `skipKeys`.
 > when OpenRouter said 500 misleads exactly the person trying to work out what really happened.
 > `executeAttempt` is the only point that sees `resp.StatusCode` unremapped, so the annotation
 > lives there. The loop annotates nothing.
+
+> **Correction (phase C).** §2 declared three fields the code never wrote: `RuleID`,
+> `RequestedModel` and `StartedAt`/`Millis`, plus a `traceExclusion` slice and a
+> `traceCompression` pointer that were implemented as plain counters and a `compressionStat`.
+> Only `CapsRequired` of the policy-adjacent group was real. This went unnoticed because every
+> test asserted on a *channel* — the header string, the opt-in JSON — and a field that is never
+> written is simply a field that never appears, which no `Contains` assertion can see.
+>
+> A spec field nobody writes is worse than no spec: a reader trusts it, builds a consumer on it,
+> and finds out in production. This phase closes the divergence in both directions — `RuleID`
+> and `RequestedModel` are now written, the rest of §2 is rewritten to describe the code as it
+> is — and adds invariant 12, which asserts on the `routeTrace` struct itself so the next
+> divergence fails a test instead of surviving a review.
+>
+> The root cause is worth naming: the schema was written before the annotation points were, and
+> nothing ever forced the two back together. Invariant 12 is that forcing function.
+
+> **Correction (phase C).** Upgrading the vendored CervoRules runtime did **not** regenerate
+> `internal/router/policyrules/generated_policy.go`. For one release `cervorules.DecisionTrace`
+> declared `Steps` and the committed engine populated nothing, so `result.Trace.Steps` was
+> always empty and any consumer of it silently saw an untraced policy. Generated code is a
+> build product with a lifetime of its own; a dependency bump that changes what the generator
+> emits is not complete until the generator has been re-run and the diff committed.
+>
+> Note also what the regenerated engine actually emits today: `Reason` on every step is the
+> empty string — the generator has the field but no text to put in it. `PolicySteps[].Detail`
+> is consequently always empty in practice. It is still routed as free text, because the
+> channel rule must hold for the value the type permits, not for the value today's generator
+> happens to produce.
 
 ## 9. Out of scope
 
