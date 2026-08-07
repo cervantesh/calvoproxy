@@ -8,15 +8,16 @@
 # the gate prints when it fails.
 pkg github.com/cervantesh/calvoproxy/cmd 59
 pkg github.com/cervantesh/calvoproxy/internal/router 81
-# Lowered 84 -> 73 in v0.14.0, and it is a real drop, not a regression in what is
-# tested. The rc.6 generator emits code for policy features this policy does not
-# use: a deny-rule loop (policy-rules.yaml declares no deny rules) and the
-# conditionsHold evaluator with its missing-evaluator and evaluator-error
-# branches (no route declares `requires:`). Those statements are unreachable
-# here, and the denominator grew by all of them. Everything reachable that rc.6
-# added IS covered — see generated_trace_test.go. Raise this back when the policy
-# gains conditions, which is what makes that code live.
-pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 73
+# 84 -> 73 -> 96 across v0.14.0. The dip was rc.6 emitting code for policy
+# features policy-rules.yaml does not use (no deny rules, no `requires:`
+# clauses), which grew the denominator by statements no runtime config can
+# reach. "Unreachable in production" turned out not to mean "untestable":
+# generated_conditions_test.go assembles generatedEngine directly and exercises
+# the deny loop and the condition guards. Worth doing rather than living with a
+# lowered floor, because what that code implements is fail-closed — a condition
+# that cannot be answered must DENY — and it starts governing real traffic the
+# day the policy grows its first `requires:` clause.
+pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 96
 pkg github.com/cervantesh/calvoproxy/internal/telemetry 100
 func RouteRequest 100.0
 func RouteRequestWithProvider 87.5

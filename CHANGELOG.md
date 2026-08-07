@@ -11,6 +11,25 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Changed
+- **The generated policy's guard code is tested, and its coverage floor went
+  73 -> 96.** v0.14.0 lowered that floor because rc.6 emits code for policy
+  features `policy-rules.yaml` does not use — a deny-rule loop with no deny
+  rules declared, and the `conditionsHold` evaluator with no route declaring
+  `requires:`. No runtime config can reach either.
+
+  "Unreachable in production" is not "untestable". The tests live in the same
+  package, so `generated_conditions_test.go` assembles `generatedEngine`
+  directly and exercises what the factory cannot produce: the deny loop and its
+  operation filter, and every arm of the condition guard.
+
+  Worth doing rather than carrying a lowered floor, because what that code
+  implements is **fail-closed** — a condition that cannot be answered must DENY
+  rather than read as a non-match — and none of it had a test. That is the same
+  defect as the trusted-user gate this release closed, one layer down: correct
+  code whose correctness nobody had checked. It starts governing real traffic
+  the day the policy grows its first `requires:` clause.
+
 ## [0.14.0] — 2026-08-06
 
 The policy layer got the thing it was missing: the engine now explains its own
