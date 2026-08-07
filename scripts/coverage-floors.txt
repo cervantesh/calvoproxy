@@ -8,15 +8,18 @@
 # the gate prints when it fails.
 pkg github.com/cervantesh/calvoproxy/cmd 59
 pkg github.com/cervantesh/calvoproxy/internal/router 81
-# Lowered 84 -> 73 in v0.14.0, and it is a real drop, not a regression in what is
-# tested. The rc.6 generator emits code for policy features this policy does not
-# use: a deny-rule loop (policy-rules.yaml declares no deny rules) and the
-# conditionsHold evaluator with its missing-evaluator and evaluator-error
-# branches (no route declares `requires:`). Those statements are unreachable
-# here, and the denominator grew by all of them. Everything reachable that rc.6
-# added IS covered — see generated_trace_test.go. Raise this back when the policy
-# gains conditions, which is what makes that code live.
-pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 73
+# 84 -> 73 -> 96 -> 98. The dip was rc.6 emitting code for policy features the
+# YAML did not use; the recovery was testing it anyway, white-box, because
+# "unreachable through the factory" never meant "untestable" — the tests live in
+# the same package. Then the policy grew its first `when:` predicate and the
+# generated fact frame arrived, which is the same fail-closed contract one layer
+# out: an absent, unparseable or out-of-bounds fact FAILS the decision rather
+# than reporting the guard as unsatisfied. Covered before it shipped.
+#
+# What remains uncovered is two statements in Build that no input can reach:
+# every operation in the vocabulary has a route, so the route.id == "" and
+# route.reason == "" fallbacks for an unrouted operation cannot fire.
+pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 98
 pkg github.com/cervantesh/calvoproxy/internal/telemetry 100
 func RouteRequest 100.0
 func RouteRequestWithProvider 87.5

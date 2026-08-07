@@ -5,6 +5,7 @@ package policyrules
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	policyvocab "github.com/cervantesh/calvoproxy/internal/router/policyvocab"
@@ -21,8 +22,8 @@ func (PolicyFactory) Metadata() cervoruntime.PolicyMetadata {
 		Name:           "calvoproxy.v3",
 		DSLVersion:     "cervorules.policy.v3",
 		GeneratedWith:  "cervorules-policygen/v3",
-		VocabularyHash: "2a59fe4999758594dd333bc0bd46feb91e302432d6dbcf81e6514bfdda056ccb",
-		PolicyHash:     "34caf9fd2884a64842a8f00335c2c3c7461614c8fe726c7e944dfde256cb5d25",
+		VocabularyHash: "323bc0e5371aa197be24d4b061a024394d35a084b2378625e3461bafaaa6a262",
+		PolicyHash:     "8ae977a39b798e431067bb4a6705e78ed80bb17c4021ef2df3d60d89dec47508",
 	}
 }
 
@@ -100,15 +101,15 @@ func (PolicyFactory) Build(ctx context.Context, cfg cervoruntime.PolicyRuntimeCo
 		return nil, cervoruntime.NewPolicyBuildError(factory.Metadata(), err)
 	}
 	routes := map[cervorules.Operation]generatedRoute{
-		cervorules.Operation("chat_completion"):    {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "chat_completion", reason: "route matched", requiresTrustedUser: false, requires: nil},
-		cervorules.Operation("embedding"):          {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "embedding", reason: "route matched", requiresTrustedUser: false, requires: nil},
-		cervorules.Operation("planning"):           {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "planning", reason: "route matched", requiresTrustedUser: false, requires: nil},
-		cervorules.Operation("secret_lookup"):      {target: cervorules.Target("cervovault_api"), executor: cervorules.Executor(""), id: "secret_lookup", reason: "route matched", requiresTrustedUser: true, requires: nil},
-		cervorules.Operation("telegram_webhook"):   {target: cervorules.Target("cervobridge"), executor: cervorules.Executor(""), id: "telegram_webhook", reason: "route matched", requiresTrustedUser: false, requires: nil},
-		cervorules.Operation("tool_orchestration"): {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "tool_orchestration", reason: "route matched", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("chat_completion"):    {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "chat_completion", reason: "route matched", requiresTrustedUser: false, requires: nil, match: nil},
+		cervorules.Operation("embedding"):          {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "embedding", reason: "route matched", requiresTrustedUser: false, requires: nil, match: nil},
+		cervorules.Operation("planning"):           {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "planning", reason: "route matched", requiresTrustedUser: false, requires: nil, match: nil},
+		cervorules.Operation("secret_lookup"):      {target: cervorules.Target("cervovault_api"), executor: cervorules.Executor(""), id: "secret_lookup", reason: "route matched", requiresTrustedUser: true, requires: nil, match: nil},
+		cervorules.Operation("telegram_webhook"):   {target: cervorules.Target("cervobridge"), executor: cervorules.Executor(""), id: "telegram_webhook", reason: "route matched", requiresTrustedUser: false, requires: nil, match: nil},
+		cervorules.Operation("tool_orchestration"): {target: cervorules.Target("cervocore"), executor: cervorules.Executor(""), id: "tool_orchestration", reason: "route matched", requiresTrustedUser: false, requires: nil, match: nil},
 	}
 	disabledRoutes := map[cervorules.Operation]generatedRoute{
-		cervorules.Operation("media_request"): {target: cervorules.Target("cervomedia"), executor: cervorules.Executor(""), id: "media_request", reason: "runtime override", requiresTrustedUser: false, requires: nil},
+		cervorules.Operation("media_request"): {target: cervorules.Target("cervomedia"), executor: cervorules.Executor(""), id: "media_request", reason: "runtime override", requiresTrustedUser: false, requires: nil, match: nil},
 	}
 	trustedUsers := map[string]struct{}{}
 	for _, user := range cfg.TrustedUsers {
@@ -136,7 +137,9 @@ func (PolicyFactory) Build(ctx context.Context, cfg cervoruntime.PolicyRuntimeCo
 	disabledDenies := map[cervorules.Operation]string{
 		cervorules.Operation("media_request"): "media backend not configured",
 	}
-	denies := []generatedDeny{}
+	denies := []generatedDeny{
+		{id: "deny-oversized-body", reason: "request body exceeds the size this policy allows", requires: nil, match: matchRule0DenyOversizedBody},
+	}
 	return generatedEngine{routes: routes, denies: denies, disabledDenies: disabledDenies, trustedUsers: trustedUsers, defaultExecutor: cfg.DefaultExecutor, executorFallbacks: cfg.ExecutorFallbacks, conditions: cfg.Conditions}, nil
 }
 
@@ -169,6 +172,107 @@ func mergeRuntimeConfig(base, override cervoruntime.PolicyRuntimeConfig) cervoru
 	return out
 }
 
+// factFrame holds the facts this policy reads, parsed once per decision.
+type factFrame struct {
+	factBodyBytes int64
+}
+
+// newFactFrame parses every fact this policy reads before any rule runs.
+// A fact that is absent, unparseable, non-finite or outside its declared
+// bounds fails the decision with a structured error. It never reports a
+// predicate as unsatisfied, which would read as "the guard ran and found
+// nothing wrong".
+func newFactFrame(req cervorules.Request) (factFrame, error) {
+	var frame factFrame
+	var err error
+	if frame.factBodyBytes, err = factIntegerValue(req, "body_bytes", factIntegerBounds{hasDefault: true, def: 0, hasMin: true, min: 0}); err != nil {
+		return factFrame{}, err
+	}
+	return frame, nil
+}
+
+// factRawValue reports the trimmed metadata value for a fact. A blank value
+// counts as absent: an empty string is not an answer.
+func factRawValue(req cervorules.Request, name string) (string, bool) {
+	raw, ok := req.Metadata[name]
+	if !ok {
+		return "", false
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	return raw, true
+}
+
+func missingFactError(name string) error {
+	return cervorules.Error{
+		Code:       cervorules.ErrorCodeMissingFact,
+		Severity:   cervorules.SeverityFatal,
+		Component:  "policy",
+		Field:      "facts." + name,
+		Reason:     "fact is absent from request metadata and the policy declares no default",
+		Suggestion: "supply the fact in Request.Metadata, or declare a default for it in the policy",
+	}
+}
+
+// invalidFactError marks the observed value sensitive: only the caller knows
+// whether a fact carries secrets, so it is withheld from serialization by
+// default and still available in process.
+func invalidFactError(name string, value string, reason string) error {
+	return cervorules.Error{
+		Code:      cervorules.ErrorCodeInvalidFact,
+		Severity:  cervorules.SeverityFatal,
+		Component: "policy",
+		Field:     "facts." + name,
+		Value:     value,
+		Reason:    reason,
+		Sensitive: true,
+	}
+}
+
+type factIntegerBounds struct {
+	hasDefault bool
+	def        int64
+	hasMin     bool
+	min        int64
+	hasMax     bool
+	max        int64
+}
+
+func factIntegerValue(req cervorules.Request, name string, bounds factIntegerBounds) (int64, error) {
+	raw, ok := factRawValue(req, name)
+	if !ok {
+		if bounds.hasDefault {
+			return bounds.def, nil
+		}
+		return 0, missingFactError(name)
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, invalidFactError(name, raw, "fact is not an integer")
+	}
+	if bounds.hasMin && value < bounds.min {
+		return 0, invalidFactError(name, raw, "fact is below its declared minimum")
+	}
+	if bounds.hasMax && value > bounds.max {
+		return 0, invalidFactError(name, raw, "fact is above its declared maximum")
+	}
+	return value, nil
+}
+
+// ruleMatcher is a compiled predicate. It reports whether the rule matched
+// and which leaf decided it, so a trace step can name the reason.
+type ruleMatcher func(ctx context.Context, e generatedEngine, req cervorules.Request, f factFrame) (bool, string, error)
+
+// body_bytes gt 10485760
+func matchRule0DenyOversizedBody(ctx context.Context, e generatedEngine, req cervorules.Request, f factFrame) (bool, string, error) {
+	if f.factBodyBytes > 10485760 {
+		return true, "body_bytes gt 10485760", nil
+	}
+	return false, "", nil
+}
+
 type generatedRoute struct {
 	target   cervorules.Target
 	executor cervorules.Executor
@@ -177,6 +281,7 @@ type generatedRoute struct {
 	reason              string
 	requiresTrustedUser bool
 	requires            []cervorules.Condition
+	match               ruleMatcher
 }
 
 // generatedDeny is one ordered deny rule. An empty operation applies it to
@@ -186,6 +291,7 @@ type generatedDeny struct {
 	id        string
 	reason    string
 	requires  []cervorules.Condition
+	match     ruleMatcher
 }
 
 type generatedEngine struct {
@@ -210,6 +316,12 @@ func (e generatedEngine) DecideWithOptions(ctx context.Context, req cervorules.R
 	}
 	traceEnabled := options.TraceEnabled()
 	var steps []cervorules.DecisionTraceStep
+	// The frame is built before any rule runs, so a malformed fact cannot
+	// hide behind an earlier rule that happened to match first.
+	frame, err := newFactFrame(req)
+	if err != nil {
+		return cervorules.DecisionResult{}, err
+	}
 	for _, deny := range e.denies {
 		if deny.operation != "" && deny.operation != req.Operation {
 			continue
@@ -219,6 +331,12 @@ func (e generatedEngine) DecideWithOptions(ctx context.Context, req cervorules.R
 			return cervorules.DecisionResult{}, err
 		}
 		detail := ""
+		if applies && deny.match != nil {
+			applies, detail, err = deny.match(ctx, e, req, frame)
+			if err != nil {
+				return cervorules.DecisionResult{}, err
+			}
+		}
 		if traceEnabled {
 			steps = append(steps, cervorules.DecisionTraceStep{Name: deny.id, Matched: applies, Reason: detail})
 		}
@@ -241,6 +359,12 @@ func (e generatedEngine) DecideWithOptions(ctx context.Context, req cervorules.R
 		return cervorules.DecisionResult{}, err
 	}
 	routeDetail := ""
+	if eligible && route.match != nil {
+		eligible, routeDetail, err = route.match(ctx, e, req, frame)
+		if err != nil {
+			return cervorules.DecisionResult{}, err
+		}
+	}
 	if traceEnabled {
 		steps = append(steps, cervorules.DecisionTraceStep{Name: route.id, Matched: eligible, Reason: routeDetail})
 	}
