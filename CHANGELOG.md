@@ -11,6 +11,12 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-07
+
+The policy stopped keeping its own numbers in Go. What decides is now written
+in the file the hash covers — and the code that enforces it is tested before it
+governs anything.
+
 ### Added
 - **Typed facts and compound predicates: the policy owns its own thresholds
   now.** `bodySizeClass` cut at `1<<20` and `1<<10`, hardcoded in Go. Those
@@ -874,7 +880,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.15.0
 [0.14.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.14.0
 [0.13.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.13.0
 [0.12.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.12.0
