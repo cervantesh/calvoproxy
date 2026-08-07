@@ -106,6 +106,58 @@ Supported overrides:
 Generated CervoRules v3 policy validates operation, target and executor
 vocabulary. CalvoProxy validates and applies gateway-owned runtime behavior.
 
+## Typed facts and predicates
+
+The vocabulary declares what a fact **is** — its name and its type. Where it
+**cuts** lives in `policy-rules.yaml`, because that is the file `PolicyHash`
+covers, so retuning a threshold is always a hash change.
+
+```yaml
+# policy-vocabulary.yaml — what the fact is
+facts:
+  body_bytes:
+    type: integer
+    go_name: BodyBytes
+
+# policy-rules.yaml — where it cuts, and what happens
+facts:
+  body_bytes: { min: 0, default: 0 }
+
+denies:
+  - id: deny-oversized-body
+    reason: request body exceeds the size this policy allows
+    when:
+      { fact: body_bytes, op: gt, value: 10485760 }
+```
+
+A predicate is a **closed tagged form**, not an expression string: composition is
+`all` / `any` / `not`, and a leaf compares one declared fact against a literal,
+against another fact, or consults a named condition. It compiles to Go boolean
+expressions in the generated policy, so there is no evaluator at runtime and no
+expression engine to sandbox.
+
+A fact is read from `Request.Metadata` under its own name. The proxy writes those
+keys through the generated `Fact*` constants rather than as bare strings, so the
+name in the vocabulary and the name at the write site cannot drift apart without
+the compiler saying so.
+
+**Facts are fail-closed.** A fact that is absent, unparseable or outside its
+declared bounds *fails the decision* with a structured error. It is never
+reported as an unsatisfied predicate, which would read as "the guard ran and
+found nothing wrong". A `default:` is therefore a policy statement about what
+absence means, not a convenience — `body_bytes` declares `default: 0` so a
+request that carried no body is decided rather than faulted.
+
+### The body-size threshold
+
+`deny-oversized-body` is set at 10 MiB, the same as the default
+`PROXY_MAX_BODY_BYTES`. With defaults the two agree and the policy rule never
+fires, because `http.MaxBytesReader` rejects the request before the policy sees
+it. It binds when `PROXY_MAX_BODY_BYTES` is raised above it: the transport
+accepts, the policy denies, and any change to the policy number moves
+`PolicyHash`. Raising the transport limit alone no longer raises the ceiling
+silently.
+
 ## Caller-asserted facts
 
 Four request headers feed the policy: `X-Cervo-Capability` (operation),

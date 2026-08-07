@@ -11,6 +11,45 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Added
+- **Typed facts and compound predicates: the policy owns its own thresholds
+  now.** `bodySizeClass` cut at `1<<20` and `1<<10`, hardcoded in Go. Those
+  numbers had two problems, and the second is worse than the first: changing one
+  did not move `PolicyHash`, and changing one did not change any decision either.
+  The facts that function derived were consumed only for their **count** —
+  `len(derived.Facts)` into a metadata field. It classified request bodies for
+  nobody.
+
+  The vocabulary now declares what a fact **is** (`body_bytes`, integer) and
+  `policy-rules.yaml` declares where it **cuts**. The threshold lives in the file
+  `PolicyHash` covers, so editing it is an auditable change — measured: moving
+  the rule from 10 MiB to 20 MiB moves the hash from `8ae977a3…` to `eb81741a…`.
+
+  A predicate is a closed tagged form, not an expression string: `all` / `any` /
+  `not`, with leaves comparing a declared fact to a literal, to another fact, or
+  to a named condition. It compiles to Go boolean expressions, so there is no
+  runtime evaluator and no expression engine to sandbox.
+
+  `deny-oversized-body` is set at 10 MiB, the same as the default
+  `PROXY_MAX_BODY_BYTES`. **With defaults nothing changes** — `MaxBytesReader`
+  rejects the request before the policy sees it, so the rule cannot fire. It
+  binds when an operator raises `PROXY_MAX_BODY_BYTES` above it, which today
+  silently raises the ceiling with no audit trail.
+
+  `request_body_class` and `bodySizeClass` are gone. Two silent copies of "how
+  big is big" is the defect, not the fix.
+
+- **`Fact*` constants.** The proxy writes `req.Metadata[policyvocab.FactBodyBytes]`
+  rather than `req.Metadata["body_bytes"]`. The name in the vocabulary and the
+  name at the write site were two unrelated strings that had to agree, with
+  nothing checking. Disagreeing now stops compiling instead of quietly producing
+  a decision made on an absent fact.
+
+  The generated fact frame is fail-closed: absent, unparseable or out of bounds
+  **fails the decision** rather than reporting the predicate as unsatisfied. The
+  `default: 0` on `body_bytes` is a policy statement about what absence means —
+  without it every bodyless request would fault.
+
 ### Changed
 - **The generated policy's guard code is tested, and its coverage floor went
   73 -> 96.** v0.14.0 lowered that floor because rc.6 emits code for policy
