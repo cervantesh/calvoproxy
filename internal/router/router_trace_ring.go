@@ -120,18 +120,40 @@ func (s *RouterService) Decision(id string) (any, bool) {
 	return trace.view(true), true
 }
 
-// traceView is the JSON shape of a trace. Reason is omitted unless the caller is
-// on the admin channel, because it is upstream error body.
+// traceView is the JSON shape of a trace, for both JSON channels. The rule that
+// splits them (spec §6.1): closed identifiers travel everywhere, free-form text
+// only behind the admin gate.
 type traceView struct {
-	ID       string             `json:"id"`
-	Profile  string             `json:"profile"`
-	Outcome  string             `json:"outcome,omitempty"`
-	Caps     []string           `json:"caps_required,omitempty"`
-	Planned  int                `json:"planned"`
-	Eligible int                `json:"eligible"`
-	Excluded int                `json:"excluded_by_breaker,omitempty"`
-	Attempts []traceAttemptView `json:"attempts,omitempty"`
-	Served   *traceAttemptView  `json:"served,omitempty"`
+	ID string `json:"id"`
+	// RuleID and RequestedModel are on both channels: the first is a closed
+	// identifier, the second is what the caller itself asked for, so neither
+	// tells an un-gated client anything it did not already know or hold.
+	RuleID         string `json:"rule_id,omitempty"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	// PolicyReason is the free text the matched rule carries. ADMIN CHANNEL
+	// ONLY. Not for the §6 reason — it is authored by our own policy config, not
+	// by an upstream — but because it narrates the authorisation logic, and the
+	// opt-in channel has no gate in front of it. The generalised rule: closed
+	// identifiers travel everywhere, free-form text only behind the admin gate.
+	PolicyReason string             `json:"policy_reason,omitempty"`
+	PolicySteps  []traceStepView    `json:"policy_steps,omitempty"`
+	Profile      string             `json:"profile"`
+	Outcome      string             `json:"outcome,omitempty"`
+	Caps         []string           `json:"caps_required,omitempty"`
+	Planned      int                `json:"planned"`
+	Eligible     int                `json:"eligible"`
+	Excluded     int                `json:"excluded_by_breaker,omitempty"`
+	Attempts     []traceAttemptView `json:"attempts,omitempty"`
+	Served       *traceAttemptView  `json:"served,omitempty"`
+}
+
+// traceStepView is one policy rule the engine looked at. Name and Matched are
+// the structural part and travel on both channels; Detail follows PolicyReason
+// and is admin-only.
+type traceStepView struct {
+	Name    string `json:"name"`
+	Matched bool   `json:"matched"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 type traceAttemptView struct {
@@ -143,20 +165,34 @@ type traceAttemptView struct {
 	Reason string  `json:"reason,omitempty"`
 }
 
-func (t *routeTrace) view(includeReason bool) traceView {
+// view renders the trace for one channel. adminChannel is what separates the
+// two: everything free-form hangs off it, everything closed and structural is
+// unconditional. See the field comments on traceView and spec §6.
+func (t *routeTrace) view(adminChannel bool) traceView {
 	if t == nil {
 		return traceView{}
 	}
 	attempt := func(a traceAttempt) traceAttemptView {
 		v := traceAttemptView{Model: a.Model, Index: a.Index, Score: a.Score, Status: a.Status, Kind: a.Kind}
-		if includeReason {
+		if adminChannel {
 			v.Reason = a.Reason
 		}
 		return v
 	}
 	out := traceView{
 		ID: t.ID, Profile: t.Profile, Outcome: t.Outcome, Caps: t.CapsRequired,
+		RuleID: t.RuleID, RequestedModel: t.RequestedModel,
 		Planned: t.Planned, Eligible: t.Eligible, Excluded: t.ExcludedByBreaker,
+	}
+	if adminChannel {
+		out.PolicyReason = t.PolicyReason
+	}
+	for _, step := range t.PolicySteps {
+		view := traceStepView{Name: step.Name, Matched: step.Matched}
+		if adminChannel {
+			view.Detail = step.Detail
+		}
+		out.PolicySteps = append(out.PolicySteps, view)
 	}
 	for _, a := range t.Attempts {
 		out.Attempts = append(out.Attempts, attempt(a))

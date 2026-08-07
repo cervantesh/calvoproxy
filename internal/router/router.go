@@ -272,6 +272,10 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	// materialised inside executeAttempt (setServedModelHeaders), and
 	// AttemptExecutor.ExecuteAttempt does not receive the execution struct.
 	ctx = withTrace(ctx, newRouteTrace(category))
+	// The authorisation decision is already made by the time we get here — it is
+	// what chose the chain — so it is replayed onto the trace rather than written
+	// by the policy path itself. See routeTrace.recordPolicy.
+	traceFrom(ctx).recordPolicy(decision.RuleID, decision.Reason, requestedModel, decision.PolicySteps)
 	// One publish per request, on every exit: the ring is what /decisions/{id}
 	// reads, and an unserved request is exactly the one worth looking up.
 	defer s.finishTrace(ctx)

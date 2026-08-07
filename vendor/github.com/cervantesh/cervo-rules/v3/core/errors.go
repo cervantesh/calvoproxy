@@ -44,6 +44,15 @@ const (
 	ErrorCodeExpensiveRule           ErrorCode = "expensive_rule"
 	ErrorCodeRuleDisabled            ErrorCode = "rule_disabled"
 
+	ErrorCodeUnknownCondition  ErrorCode = "unknown_condition"
+	ErrorCodeConditionFailed   ErrorCode = "condition_failed"
+	ErrorCodeMissingConditions ErrorCode = "missing_conditions"
+
+	// A policy predicate reads facts from Request.Metadata, which core owns, so
+	// the codes for an unusable fact belong here beside the conditions seam.
+	ErrorCodeMissingFact ErrorCode = "missing_fact"
+	ErrorCodeInvalidFact ErrorCode = "invalid_fact"
+
 	ErrorCodeBodyBytesExceeded ErrorCode = "body_bytes_exceeded"
 	ErrorCodeMaxTokensExceeded ErrorCode = "max_tokens_exceeded"
 	ErrorCodeStreamNotAllowed  ErrorCode = "stream_not_allowed"
@@ -74,6 +83,11 @@ type Error struct {
 	Reason     string    `json:"reason"`
 	Suggestion string    `json:"suggestion,omitempty"`
 	Cause      error     `json:"-"`
+
+	// Sensitive marks Value as caller-secret. The producer of the error decides
+	// this, because only the producer knows what the value means. It is never
+	// inferred from the field name.
+	Sensitive bool `json:"-"`
 }
 
 // MarshalJSON redacts sensitive Value fields by default while preserving the
@@ -84,10 +98,25 @@ func (e Error) MarshalJSON() ([]byte, error) {
 	return json.Marshal(redacted)
 }
 
-// Redacted returns a copy with sensitive user-provided values removed.
+// Redacted returns a copy with an explicitly sensitive value removed.
+//
+// Only the Sensitive marker is honored. core does not guess which field names
+// are secret; use RedactWith to apply a caller-owned field policy.
 func (e Error) Redacted() Error {
-	if e.Value != "" && isSensitiveErrorField(e.Field) {
-		e.Value = "[REDACTED]"
+	if e.Value != "" && e.Sensitive {
+		e.Value = RedactedValue
+	}
+	return e
+}
+
+// RedactWith returns a copy with the value removed when the error is marked
+// sensitive or when the caller-supplied Redactor matches the field.
+func (e Error) RedactWith(redactor Redactor) Error {
+	if e.Value == "" {
+		return e
+	}
+	if e.Sensitive || (redactor != nil && redactor(e.Field)) {
+		e.Value = RedactedValue
 	}
 	return e
 }
@@ -107,7 +136,11 @@ func (e Error) Error() string {
 		parts = append(parts, e.Rule)
 	}
 	if e.Value != "" {
-		parts = append(parts, e.Value)
+		if e.Sensitive {
+			parts = append(parts, RedactedValue)
+		} else {
+			parts = append(parts, e.Value)
+		}
 	}
 	if e.Reason != "" {
 		parts = append(parts, e.Reason)
@@ -126,24 +159,24 @@ func (e Error) Unwrap() error {
 	return e.Cause
 }
 
-func isSensitiveErrorField(field string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(field))
-	for _, sensitive := range []string{"token", "auth", "header", "body", "prompt", "content", "memory"} {
-		if strings.Contains(normalized, sensitive) {
-			return true
-		}
-	}
-	return false
-}
-
 // Errors is a multi-error collection with stable code lookup.
 type Errors []Error
 
-// Redacted returns a copy with sensitive user-provided values removed.
+// Redacted returns a copy with explicitly sensitive values removed.
 func (e Errors) Redacted() Errors {
 	out := make(Errors, 0, len(e))
 	for _, err := range e {
 		out = append(out, err.Redacted())
+	}
+	return out
+}
+
+// RedactWith returns a copy with values removed for errors marked sensitive or
+// whose field matches the caller-supplied Redactor.
+func (e Errors) RedactWith(redactor Redactor) Errors {
+	out := make(Errors, 0, len(e))
+	for _, err := range e {
+		out = append(out, err.RedactWith(redactor))
 	}
 	return out
 }

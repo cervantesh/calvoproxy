@@ -11,6 +11,78 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-06
+
+The policy layer got the thing it was missing: the engine now explains its own
+decisions, and the two facts it gates on are no longer taken on the caller's
+word.
+
+### Security
+- **`X-Cervo-User` is no longer believed by default.** The policy can gate a
+  route on `requires_trusted_user`, and it resolved that against a user the
+  caller set in a header. Nothing authenticated it, so the gate was satisfied by
+  naming the right person.
+
+  Measured, not theorised: an ordinary unauthenticated chat request carrying
+  `X-Cervo-Capability: secret_lookup` and `X-Cervo-User: <a name in
+  PROXY_TRUSTED_USERS>` was allowed, and the audit line read
+  `decision=allow rule_id=secret.route audit_class=sensitive
+  requires_audit=true`.
+
+  **No traffic was ever redirected.** The policy's `Target` is an audit label;
+  the upstream comes from the attempt's provider, and that path never consults
+  it. What the hole produced was a *false audit record* — a request the proxy
+  never authenticated, recorded as an authorised secret lookup by a trusted
+  user. That record is the one thing this layer exists to produce.
+
+  It also required reaching the proxy at all, which by default means
+  `127.0.0.1` and a caller credential on `/v1/*`. Not exploitable in the
+  shipped deployment; still a gate that did not gate.
+
+  **This is a behaviour change.** `requires_trusted_user` routes now deny.
+  Today that is only `secret_lookup`, which CalvoProxy does not route to in
+  normal operation, so nothing real breaks. Set
+  `PROXY_TRUST_USER_HEADER=true` if something in front of the proxy
+  authenticates the caller and sets the header itself.
+
+- **`X-Cervo-Capability` is validated against the vocabulary.** It became an
+  operation through `core.NewOperation`, which normalises a string and validates
+  nothing, and it outranked the operation derived from the path. An undeclared
+  one already failed — with "no route for operation", because no route happened
+  to match. That is the right outcome for the wrong reason, and the first
+  catch-all route anyone adds removes it. Undeclared operations now get a `400`
+  that names the header.
+
+  `TestProxyHTTPClassifierClassifiesKnownPaths` asserted the old behaviour. It
+  was not failing to catch the hole; it was pinning it.
+
+### Added
+- **The route trace now carries the policy's reasoning.** `X-Calvoproxy-Route`
+  and the trace ring gained `RuleID`, `PolicyReason` and `PolicySteps` — one
+  step per rule the engine evaluated, with whether it matched and why.
+
+  The channel rule from the P1 spec holds: closed identifiers (rule ids, match
+  booleans) travel on every channel; the engine's free-form prose only reaches
+  the admin-gated view. The `rid=` header field is omitted rather than truncated
+  when it would not fit the 512-byte cap — a truncated rule id is a rule id that
+  looks like a different rule.
+
+  The engine is asked to explain itself only when something will read the
+  explanation, so `PROXY_ROUTE_TRACE=off` still costs nothing.
+
+  The P1 spec had declared five fields the code never wrote. That divergence is
+  closed: the spec now describes what ships.
+
+### Changed
+- **CervoRules v3.0.0-rc.3 → v3.0.0-rc.6, and the generated engine rebuilt.**
+
+  Worth writing down because it cost a wrong recommendation first: upgrading the
+  vendored runtime does **not** regenerate the committed generated code.
+  `DecisionTrace.Steps` existed in rc.5's types with no producer anywhere in the
+  tree, because `internal/router/policyrules/generated_policy.go` was still the
+  file rc.3's generator had emitted. The generators had to be rebuilt from rc.6
+  and re-run.
+
 ## [0.13.0] — 2026-08-05
 
 ### Changed
@@ -744,7 +816,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.14.0
 [0.13.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.13.0
 [0.12.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.12.0
 [0.11.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.11.0
