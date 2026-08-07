@@ -29,9 +29,22 @@ type PolicyRuntimeConfig struct {
 	DefaultExecutor   core.Executor
 	OperationTargets  map[core.Operation]core.Target
 	ExecutorFallbacks map[core.Executor][]core.Executor
+
+	// Conditions resolves the named guards a policy consults before allowing an
+	// operation. A nil value means the policy declares no condition-gated rules;
+	// a policy that does declare them must be built with an evaluator, and the
+	// generated ValidateConfig rejects the combination when it is missing.
+	//
+	// Implementations must be side-effect free: a decision may consult the same
+	// condition more than once, and nothing may happen before the decision is
+	// returned.
+	Conditions core.Conditions
 }
 
 // Clone defensively copies mutable config fields.
+//
+// Conditions is carried by reference on purpose: an evaluator is a caller-owned
+// collaborator, not config data, and it is required to be side-effect free.
 func (c PolicyRuntimeConfig) Clone() PolicyRuntimeConfig {
 	out := c
 	out.TrustedUsers = append([]string(nil), c.TrustedUsers...)

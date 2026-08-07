@@ -20,8 +20,8 @@ github.com/cervantesh/cervo-requestmeta
 # github.com/cervantesh/cervo-retry v0.0.0 => ./third_party/cervo-retry
 ## explicit; go 1.25.6
 github.com/cervantesh/cervo-retry
-# github.com/cervantesh/cervo-rules/v3 v3.0.0-rc.3 => ./third_party/cervo-rules
-## explicit; go 1.25.8
+# github.com/cervantesh/cervo-rules/v3 v3.0.0-rc.6 => ./third_party/cervo-rules
+## explicit; go 1.25.11
 github.com/cervantesh/cervo-rules/v3/core
 github.com/cervantesh/cervo-rules/v3/facts
 github.com/cervantesh/cervo-rules/v3/httpadapter

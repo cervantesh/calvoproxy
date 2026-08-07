@@ -26,6 +26,21 @@ import (
 type routeTrace struct {
 	ID      string
 	Profile string
+	// RequestedModel is what the client pinned, "" when it pinned nothing. It
+	// comes straight off the wire, so it is sanitised before it can reach a
+	// header value (spec §6).
+	RequestedModel string
+	// RuleID is the policy rule that authorised this route, and PolicyReason the
+	// text that rule carries. PolicySteps is the engine's own evaluation trace:
+	// which rules were considered and which matched.
+	//
+	// These three answer a question the rest of the trace cannot: the chain
+	// section explains why a MODEL was picked from the chain, but not why THIS
+	// chain. Without the rule id, a request routed to the wrong profile looks
+	// identical to one routed correctly.
+	RuleID       string
+	PolicyReason string
+	PolicySteps  []policyTraceStep
 	// Outcome is empty while the request is still in flight and outcomeServed
 	// once a model answered. The other values name a request that never reached
 	// a model at all — precisely the ones where the caller most needs a reason,
@@ -70,6 +85,38 @@ type traceAttempt struct {
 	Status int
 	Kind   string
 	Reason string
+}
+
+// policyTraceStep is one rule the policy engine evaluated, flattened from
+// cervorules.DecisionTraceStep so the router's trace does not leak the engine's
+// types into its JSON shape.
+//
+// Detail is the engine's per-step text. It is NOT upstream error body — it is
+// authored by the policy, which is generated from this repo's own config — so
+// the §6 rule that keeps traceAttempt.Reason admin-only does not apply to it for
+// that reason. It is admin-only anyway, for a different one: it describes the
+// internals of the authorisation rules to a caller that has passed no gate.
+// Name and Matched are closed, config-derived identifiers and travel further.
+type policyTraceStep struct {
+	Name    string
+	Matched bool
+	Detail  string
+}
+
+// recordPolicy stamps the authorisation decision on the trace. Called from
+// dispatchChain rather than from authorizeOperationalRoute: the policy runs
+// BEFORE the trace exists (the decision is what selects the chain, so it cannot
+// wait for it), and the decision struct is the only thing that crosses between
+// them. Threading it that way beats moving newRouteTrace earlier, which would
+// have to be repeated at all four authorize call sites — two of which never
+// reach dispatchChain at all — and would mint trace ids for requests that have
+// no chain to trace.
+func (t *routeTrace) recordPolicy(ruleID, reason, requestedModel string, steps []policyTraceStep) {
+	if t == nil {
+		return
+	}
+	t.RuleID, t.PolicyReason, t.RequestedModel = ruleID, reason, requestedModel
+	t.PolicySteps = steps
 }
 
 func (t *routeTrace) recordChain(planned, afterCaps, eligible int, required []string) {
@@ -193,6 +240,13 @@ const (
 	traceFieldSep   = ";"
 	traceMaxHeader  = 512
 	traceNoCompress = "off"
+	// traceMaxRuleID bounds rid=. The rule id looks config-derived — it is
+	// "route." + the operation — but the operation can come from the client's
+	// X-Cervo-Capability header (cervohttpadapter takes it verbatim), so its
+	// length is not ours to assume. Over the bound the field is OMITTED rather
+	// than truncated: a truncated identifier is a wrong identifier, and rid= is
+	// only worth carrying if a consumer can compare it to the policy.
+	traceMaxRuleID = 64
 )
 
 // header renders the short form: the stable, always-on contract. Only codes and
@@ -226,6 +280,18 @@ func (t *routeTrace) header() string {
 	}
 	if len(t.CapsRequired) > 0 {
 		protected = append(protected, "caps="+traceSanitize(strings.Join(t.CapsRequired, "+")))
+	}
+	// rid= is additive and optional, per the v1 schema rule: a consumer that has
+	// never heard of it parses the header exactly as before.
+	//
+	// It belongs on THIS channel, unlike the rest of what the policy produced,
+	// because it is the one closed identifier among them — an opaque key a
+	// consumer resolves against the policy it already has. PolicyReason and the
+	// steps' Detail are free text of unbounded length; putting either here would
+	// spend the 512-byte budget on prose and push out prev=, which is the field
+	// that actually says what went wrong (spec §6).
+	if rid := traceRuleID(t.RuleID); rid != "" {
+		protected = append(protected, "rid="+rid)
 	}
 
 	// Droppable, in reverse order of value.
@@ -297,6 +363,20 @@ func attemptCode(a traceAttempt) string {
 		return traceSanitize(a.Kind)
 	}
 	return "err"
+}
+
+// traceRuleID renders the rule id for the header, or "" when it cannot be
+// rendered honestly: empty, or longer than the bound once sanitised. See
+// traceMaxRuleID for why absence beats truncation.
+func traceRuleID(ruleID string) string {
+	if ruleID == "" {
+		return ""
+	}
+	sanitized := traceSanitize(ruleID)
+	if len(sanitized) > traceMaxRuleID {
+		return ""
+	}
+	return sanitized
 }
 
 // traceShortModel drops the org prefix and the :free suffix. The full id

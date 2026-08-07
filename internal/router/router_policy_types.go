@@ -92,12 +92,18 @@ type policyDecision struct {
 	FallbackExecutors []cervorules.Executor
 	Reason            string
 	RuleID            string
-	AuditClass        string
-	RequiresAudit     bool
-	Timeout           time.Duration
-	RetryPolicy       RetryPolicy
-	BreakerPolicy     BreakerPolicy
-	Limits            Limits
+	// PolicySteps is the engine's own evaluation trace, riding on the decision
+	// because the decision is the only value that crosses from
+	// authorizeOperationalRoute into dispatchChain, where the route trace is
+	// created. Nil unless the route trace is on — see
+	// policyDecisionOptionsForRequest.
+	PolicySteps   []policyTraceStep
+	AuditClass    string
+	RequiresAudit bool
+	Timeout       time.Duration
+	RetryPolicy   RetryPolicy
+	BreakerPolicy BreakerPolicy
+	Limits        Limits
 }
 
 func (d policyDecision) coreDecision() cervorules.Decision {
