@@ -30,6 +30,10 @@ const (
 	ExecutorOpenRouter cervorules.Executor = "openrouter"
 )
 
+const (
+	FactBodyBytes = "body_bytes"
+)
+
 func Vocabulary() cervorules.Vocabulary {
 	return cervorules.NewVocabulary(
 		cervorules.AllowedOperations(

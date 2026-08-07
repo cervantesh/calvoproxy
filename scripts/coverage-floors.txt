@@ -8,16 +8,18 @@
 # the gate prints when it fails.
 pkg github.com/cervantesh/calvoproxy/cmd 59
 pkg github.com/cervantesh/calvoproxy/internal/router 81
-# 84 -> 73 -> 96 across v0.14.0. The dip was rc.6 emitting code for policy
-# features policy-rules.yaml does not use (no deny rules, no `requires:`
-# clauses), which grew the denominator by statements no runtime config can
-# reach. "Unreachable in production" turned out not to mean "untestable":
-# generated_conditions_test.go assembles generatedEngine directly and exercises
-# the deny loop and the condition guards. Worth doing rather than living with a
-# lowered floor, because what that code implements is fail-closed — a condition
-# that cannot be answered must DENY — and it starts governing real traffic the
-# day the policy grows its first `requires:` clause.
-pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 96
+# 84 -> 73 -> 96 -> 98. The dip was rc.6 emitting code for policy features the
+# YAML did not use; the recovery was testing it anyway, white-box, because
+# "unreachable through the factory" never meant "untestable" — the tests live in
+# the same package. Then the policy grew its first `when:` predicate and the
+# generated fact frame arrived, which is the same fail-closed contract one layer
+# out: an absent, unparseable or out-of-bounds fact FAILS the decision rather
+# than reporting the guard as unsatisfied. Covered before it shipped.
+#
+# What remains uncovered is two statements in Build that no input can reach:
+# every operation in the vocabulary has a route, so the route.id == "" and
+# route.reason == "" fallbacks for an unrouted operation cannot fire.
+pkg github.com/cervantesh/calvoproxy/internal/router/policyrules 98
 pkg github.com/cervantesh/calvoproxy/internal/telemetry 100
 func RouteRequest 100.0
 func RouteRequestWithProvider 87.5

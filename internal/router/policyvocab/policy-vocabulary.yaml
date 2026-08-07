@@ -38,6 +38,20 @@ targets:
     description: Optional media automation backend.
     go_name: CervoMedia
 
+# The vocabulary declares what a fact IS — its name and its type. Where it cuts
+# lives in policy-rules.yaml, because that is the file PolicyHash covers, so
+# retuning a threshold is always a hash change.
+#
+# A fact is read from the request metadata under its own name, parsed once per
+# decision. The proxy writes these keys through the generated Fact* constants
+# rather than as bare strings, so the name here and the name at the write site
+# cannot drift apart without the compiler saying so.
+facts:
+  body_bytes:
+    type: integer
+    description: Size of the request body in bytes, as the proxy measured it.
+    go_name: BodyBytes
+
 executors:
   openrouter:
     description: OpenRouter provider.

@@ -46,9 +46,12 @@ func derivePolicyFacts(request requestFacts, policy policyRequestFacts, health P
 	if policy.RequestedLimits.MaxTokens > 0 {
 		add("request_requested_tokens", strconv.Itoa(policy.RequestedLimits.MaxTokens))
 	}
-	if policy.RequestedLimits.BodyBytes > 0 {
-		add("request_body_class", bodySizeClass(policy.RequestedLimits.BodyBytes))
-	}
+	// There is no request_body_class fact any more. It was derived by
+	// bodySizeClass from two thresholds hardcoded in Go (1<<20 and 1<<10), and
+	// it decided nothing: this slice is consumed only for its length. Two
+	// silent copies of "how big is big" is the defect, not the fix. The
+	// decision-bearing threshold now lives in policy-rules.yaml as the
+	// deny-oversized-body rule, where editing it moves PolicyHash.
 	if health.Status != "" {
 		add("proxy_status", health.Status)
 	}
@@ -70,16 +73,5 @@ func fact1(predicate, value string) cervofacts.Fact {
 			Kind:  cervofacts.TermConst,
 			Value: value,
 		}},
-	}
-}
-
-func bodySizeClass(bytes int64) string {
-	switch {
-	case bytes >= 1<<20:
-		return "large"
-	case bytes >= 1<<10:
-		return "medium"
-	default:
-		return "small"
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	policyvocab "github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -41,7 +42,11 @@ func (s *RouterService) authorizeOperationalRoute(ctx context.Context, w http.Re
 		req.Metadata = map[string]string{}
 	}
 	if len(body) > 0 {
-		req.Metadata["body_bytes"] = strconv.Itoa(len(body))
+		// The generated constant, not the literal. The policy reads this fact
+		// from the metadata under exactly this key, so the two names have to
+		// agree — and with the constant, disagreeing stops compiling instead of
+		// silently producing a decision made on an absent fact.
+		req.Metadata[policyvocab.FactBodyBytes] = strconv.Itoa(len(body))
 	}
 	requested := requestedPolicyLimits(facts, body, requestedLimits...)
 	// Cheap facts only: the policy engine consumes just status/ready/open-count.
