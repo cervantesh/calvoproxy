@@ -89,7 +89,7 @@ jobs:
       - name: Build native macOS binary
         env:
           CGO_ENABLED: "1"
-        run: go build -mod=vendor ./cmd
+        run: go build -mod=vendor -o "$RUNNER_TEMP/calvoproxy" ./cmd
       - name: Test secret store
         env:
           CGO_ENABLED: "1"
