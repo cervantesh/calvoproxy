@@ -77,3 +77,20 @@ jobs:
             echo "CALVOPROXY_CONTRACT=1 OPENROUTER_API_KEY=... go test ./test/contract/ -v"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  macos-keychain:
+    name: macOS Keychain (native CGO)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - name: Build native macOS binary
+        env:
+          CGO_ENABLED: "1"
+        run: go build -mod=vendor -o "$RUNNER_TEMP/calvoproxy" ./cmd
+      - name: Test secret store
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./internal/secretstore

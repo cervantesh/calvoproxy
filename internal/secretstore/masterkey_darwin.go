@@ -71,7 +71,7 @@ func (s *darwinMasterKeySource) find() ([]byte, error) {
 	defer C.free(unsafe.Pointer(account))
 	var length C.UInt32
 	var data unsafe.Pointer
-	status := C.SecKeychainFindGenericPassword(nil,
+	status := C.SecKeychainFindGenericPassword(C.CFTypeRef(0),
 		C.UInt32(len(darwinKeychainService)), service,
 		C.UInt32(len(s.account)), account, &length, &data, nil)
 	if status == C.errSecItemNotFound {
@@ -92,7 +92,7 @@ func addDarwinKeychainItem(accountValue string, key []byte) C.OSStatus {
 	account := C.CString(accountValue)
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
-	return C.SecKeychainAddGenericPassword(nil,
+	return C.SecKeychainAddGenericPassword(C.SecKeychainRef(0),
 		C.UInt32(len(darwinKeychainService)), service,
 		C.UInt32(len(accountValue)), account,
 		C.UInt32(len(key)), unsafe.Pointer(&key[0]), nil)

@@ -9,68 +9,100 @@ permissions:
   packages: write
 
 jobs:
-  binaries:
+  packages:
+    name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            extension: .exe
+            archive: zip
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            extension: ""
+            archive: tar
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            extension: ""
+            archive: tar
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            extension: ""
+            archive: tar
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+            extension: ""
+            archive: tar
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - name: Build and package
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ startsWith(matrix.goos, 'darwin') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          pkg="calvoproxy-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p "$pkg" dist
+          go build -mod=vendor -ldflags "-X main.version=${VERSION}" \
+            -o "$pkg/calvoproxy${{ matrix.extension }}" ./cmd
+          cp model-policy.json README.md LICENSE "$pkg"/
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r "dist/${pkg}.zip" "$pkg"
+          else
+            tar czf "dist/${pkg}.tar.gz" "$pkg"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: packages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
-      - name: Cross-compile and package
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME}"
-          mkdir -p dist
-          build() {
-            os="$1"; arch="$2"; ext="${3:-}"
-            pkg="calvoproxy-${VERSION}-${os}-${arch}"
-            mkdir -p "$pkg"
-            GOOS="$os" GOARCH="$arch" go build -mod=vendor \
-              -ldflags "-X main.version=${VERSION}" \
-              -o "$pkg/calvoproxy${ext}" ./cmd
-            cp model-policy.json README.md LICENSE "$pkg"/
-            if [ "$os" = "windows" ]; then
-              zip -r "dist/${pkg}.zip" "$pkg"
-            else
-              tar czf "dist/${pkg}.tar.gz" "$pkg"
-            fi
-          }
-          build windows amd64 .exe
-          build darwin arm64
-          build darwin amd64
-          build linux amd64
-          build linux arm64
-          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: (cd dist && sha256sum calvoproxy-* > SHA256SUMS.txt)
       - name: Sign checksums (Ed25519) and verify against the embedded key
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-          # Set repo variable ALLOW_UNSIGNED_RELEASE=true to deliberately cut an
-          # unsigned release (only valid when no key is embedded — see below).
           ALLOW_UNSIGNED_RELEASE: ${{ vars.ALLOW_UNSIGNED_RELEASE }}
         run: |
           set -euo pipefail
-          # Do the shipped binaries REQUIRE a signature? They do whenever
-          # internal/releasekey.Public is non-empty. If so, publishing an
-          # unsigned release would fail-close every `calvoproxy update`, so we
-          # fail the job loudly here instead of shipping a broken release.
-          # No `|| true`: if this fails we must NOT fall through to the
-          # unsigned path while the binaries still require a signature.
           KEY_EMBEDDED="$(go run ./tools/keystatus)"
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
             if [ "$KEY_EMBEDDED" = "embedded" ] && [ "${ALLOW_UNSIGNED_RELEASE:-}" != "true" ]; then
-              echo "::error::RELEASE_SIGNING_KEY secret is missing but a release public key is embedded."
-              echo "::error::Publishing unsigned would make every 'calvoproxy update' refuse this release (fail-closed)."
-              echo "::error::Add the RELEASE_SIGNING_KEY secret, or set repo variable ALLOW_UNSIGNED_RELEASE=true to override."
+              echo "::error::RELEASE_SIGNING_KEY is missing while a public key is embedded."
               exit 1
             fi
             echo "No signing key and none embedded — publishing checksums only."
             exit 0
           fi
           go run ./tools/sign dist/SHA256SUMS.txt > dist/SHA256SUMS.txt.sig
-          # Prove the signature verifies with the SAME key the binaries embed,
-          # so a mismatched keypair fails CI rather than the user's update.
           go run ./tools/verify dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig
-          echo "Signed and verified dist/SHA256SUMS.txt -> dist/SHA256SUMS.txt.sig"
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*

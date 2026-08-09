@@ -11,6 +11,15 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-08-09
+
+### Fixed
+- **macOS release archives now contain the native Keychain backend.** The 0.16.0
+  Darwin archives were cross-compiled on Linux, which implicitly disabled CGO
+  and selected the intentional fail-locked backend. Darwin packages are now
+  built on native Intel and Apple Silicon runners with Security.framework
+  linked, and pull requests compile and test that path before release.
+
 ## [0.16.0] — 2026-08-09
 
 CalvoProxy can now spend multiple free-provider allowances as one coordinated
