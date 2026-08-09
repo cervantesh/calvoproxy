@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -22,11 +23,42 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	)
 	defer span.End()
 
+	providerKey, configured := s.providerCredential(ctx, attempt, apiKey)
+	if !configured {
+		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "provider " + string(attempt.Provider) + " is not configured"}
+	}
+	estimate := attempt.QuotaEstimate
+	if estimate.Requests <= 0 || estimate.Tokens <= 0 {
+		var requestBody map[string]interface{}
+		_ = json.Unmarshal(body, &requestBody)
+		estimate = providerQuotaEstimate(attempt, estimateRequestQuota(requestBody))
+		attempt.QuotaEstimate = estimate
+	}
+	ticket := attempt.QuotaTicket
+	sent, settled := false, false
+	defer func() {
+		if !ticket.Valid() || settled {
+			return
+		}
+		if !sent {
+			s.quotaLedger().Release(ticket, time.Now())
+			return
+		}
+		// The request left the process but no response proved its exact usage.
+		// Commit the estimate conservatively; the unique ticket prevents any
+		// duplicate cleanup from releasing another request's reservation.
+		s.observeAndSettleQuota(ticket, attempt, providerKey, 0, nil, nil, estimate.Tokens, time.Now())
+	}()
+	if !s.tryStartProvider(attempt) {
+		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "provider " + string(attempt.Provider) + " is cooling down"}
+	}
+
 	// Single-flight the half-open recovery probe: if this model's circuit just
 	// entered its half-open window and another request already claimed the probe,
 	// skip to the next model instead of stampeding the recovering upstream. This
 	// is a soft skip (retryable, not breaker-eligible, no score penalty).
 	if !s.tryStartAttempt(attempt) {
+		s.resolveProviderProbe(attempt.Provider)
 		recordTraceFailure(ctx, attempt, 0, "probe", "recovery probe already in flight")
 		return &attemptError{StatusCode: http.StatusServiceUnavailable, Retryable: true, SkipModel: true, Message: "recovery probe already in flight for " + attempt.Model}
 	}
@@ -40,9 +72,20 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		slog.InfoContext(ctx, "[CalvoProxy] 🛠️ Routing agentic request to GeminiCLIAPI", slog.String("profile", attempt.Profile))
 	}
 
-	proxyReq, err := newUpstreamRequest(ctx, http.MethodPost, target.URL, body, apiKey)
+	proxyReq, err := newUpstreamRequest(ctx, http.MethodPost, target.URL, body, providerKey)
 	if err != nil {
+		s.resolveProbe(attempt)
+		s.resolveProviderProbe(attempt.Provider)
 		return classifyTransportError(err)
+	}
+	if !ticket.Valid() {
+		var ok bool
+		ticket, ok = s.reserveFallbackQuota(attempt, providerKey, estimate, time.Now())
+		if !ok {
+			s.resolveProbe(attempt)
+			s.resolveProviderProbe(attempt.Provider)
+			return &attemptError{StatusCode: http.StatusTooManyRequests, Retryable: true, SkipModel: true, QuotaLimited: true, Message: providerDisplayName(attempt.Provider) + " is temporarily rate-limited for this model; trying another provider"}
+		}
 	}
 
 	// Clock for time-to-first-token, started BEFORE the upstream call so it
@@ -50,6 +93,8 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	// consumes it, so a non-streaming attempt — whose headers arrive when
 	// generation is essentially finished — can never contribute a sample.
 	attemptStart := time.Now()
+	s.recordProviderAttempt(attempt.Provider, attempt.BalanceReserved)
+	sent = true
 	resp, err := s.Client.Do(proxyReq)
 	if err != nil {
 		span.RecordError(err)
@@ -72,6 +117,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// timeout firing, which is real evidence the model is too slow.
 		if errors.Is(ctx.Err(), context.Canceled) {
 			s.resolveProbe(attempt) // release the half-open claim without a verdict
+			s.resolveProviderProbe(attempt.Provider)
 			return &attemptError{
 				StatusCode: http.StatusServiceUnavailable,
 				Retryable:  false,
@@ -85,19 +131,11 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		if attErr.BreakerEligible {
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
 		}
+		s.resolveProviderProbe(attempt.Provider)
 		return attErr
 	}
 	defer func() { _ = resp.Body.Close() }()
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
-
-	// The upstream answered, so this attempt spent a slot in the window whatever
-	// the status — a 429 costs quota too. Transport failures above never reached
-	// the upstream and are deliberately NOT counted.
-	s.quota.record(attempt)
-	s.quota.ingestHeaders(attempt,
-		resp.Header.Get("X-RateLimit-Limit"),
-		resp.Header.Get("X-RateLimit-Remaining"),
-		parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset")))
 
 	if resp.StatusCode != http.StatusOK {
 		// Error bodies are only used for classification/logging — cap the read so
@@ -108,6 +146,34 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			span.SetStatus(codes.Error, "Upstream HTTP Error")
 		}
 		attErr := classifyHTTPError(resp.StatusCode, string(respBytes))
+		providerRetryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		quotaObservations := s.observeAndSettleQuota(ticket, attempt, providerKey, resp.StatusCode, resp.Header, respBytes, estimate.Tokens, time.Now())
+		settled = true
+		providerQuotaExhausted := false
+		quotaLimited := resp.StatusCode == http.StatusTooManyRequests
+		for _, observation := range quotaObservations {
+			if observation.RetryAfter > providerRetryAfter {
+				providerRetryAfter = observation.RetryAfter
+			}
+			if observation.Exhausted && observation.Scope == providerQuotaScopeFreePool {
+				providerQuotaExhausted = true
+			}
+		}
+		providerAuthFailure := (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !isProviderRelayedError(string(respBytes))
+		if providerAuthFailure && attempt.Provider != providerOpenRouter {
+			attErr.ProviderUnavailable = true
+		}
+		if quotaLimited {
+			attErr.QuotaLimited = true
+			attErr.SkipModel = true
+			providerRetryAfter = s.setQuotaCooldown(attempt, providerRetryAfter, time.Now())
+			attErr.RetryAfter = providerRetryAfter
+			if providerQuotaExhausted {
+				attErr.QuotaPool = quotaFreePool
+			}
+			s.resolveProbe(attempt)
+			s.resolveProviderProbe(attempt.Provider)
+		}
 		// A 400 from ONE upstream is not a verdict on the request. The same body
 		// goes to providers with different limits, so "invalid" here can be
 		// perfectly valid there — and 400 is otherwise terminal, which ends the
@@ -143,20 +209,22 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 				slog.Int("status", resp.StatusCode),
 				slog.Bool("provider_relayed", isProviderRelayedError(string(respBytes))))
 		}
-		// The UPSTREAM status, not attErr.StatusCode: cervoretry.ClassifyHTTPStatus
-		// remaps (500 becomes 502), and a trace that reports the remapped code
-		// misleads exactly the operator trying to find out what OpenRouter said.
 		recordTraceFailure(ctx, attempt, resp.StatusCode, traceKindFor(attErr), attErr.Message)
-		s.penalizeScore(attempt, attErr.StatusCode)
-		if resp.StatusCode == http.StatusTooManyRequests {
-			// Learn WHEN to come back, never how many fit: a 429 says "not now".
-			// The breaker still opens below — quota is predictive, the breaker is
-			// reactive, and this is the case where the prediction already failed.
-			s.quota.learnFrom429(attempt, parseRetryAfter(resp.Header.Get("Retry-After")))
+		nonModelFailure := quotaLimited || providerAuthFailure
+		if !nonModelFailure {
+			s.penalizeScore(attempt, attErr.StatusCode)
 		}
-		if attErr.BreakerEligible {
+		if attErr.BreakerEligible && !nonModelFailure {
 			// A 429/503 may carry Retry-After — respect it as a minimum cooldown.
-			s.recordFailure(attempt, attErr.StatusCode, attErr.Message, parseRetryAfter(resp.Header.Get("Retry-After")))
+			s.recordFailure(attempt, attErr.StatusCode, attErr.Message, providerRetryAfter)
+		}
+		if attErr.ProviderUnavailable {
+			s.recordProviderFailure(attempt, attErr.StatusCode, attErr.Message, true, providerRetryAfter)
+		} else {
+			s.resolveProviderProbe(attempt.Provider)
+		}
+		if nonModelFailure || !attErr.BreakerEligible {
+			s.resolveProbe(attempt)
 		}
 		return attErr
 	}
@@ -165,9 +233,12 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 	// through with flushing so tokens arrive incrementally. We can't fall back
 	// once bytes are on the wire, so record success on the 200 and stream.
 	if isEventStream(resp) {
+		s.observeAndSettleQuota(ticket, attempt, providerKey, resp.StatusCode, resp.Header, nil, estimate.Tokens, time.Now())
+		settled = true
 		// The model answered, so release the circuit / half-open probe now — but
 		// do NOT score it a success yet: the stream still has to actually deliver.
 		s.resolveProbe(attempt)
+		s.resolveProviderProbe(attempt.Provider)
 
 		// Fail fast on a queued model, BEFORE committing headers to the client.
 		// A 200 with an event-stream content type only means the request was
@@ -193,7 +264,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 			firstEventStart := time.Now()
 			replayed, gotEvent, timedOut := awaitFirstStreamEvent(body, budget)
 			s.recordFirstEventLatency(attempt, time.Since(firstEventStart))
-			if timedOut {
+			if timedOut && (attempt.ReserveFallback == nil || attempt.ReserveFallback()) {
 				_ = resp.Body.Close() // unblocks the reader still parked in Read
 				// A soft score penalty, never a breaker failure. resolveProbe
 				// above already zeroed ConsecutiveFailures, so recordFailure
@@ -235,12 +306,14 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		switch {
 		case outcome == streamCompleted:
 			s.recordSuccess(attempt) // clean EOF: a real success
+			s.resolveProviderSuccess(attempt.Provider)
 		case outcome.upstreamFault():
 			// Stalled or died mid-stream — the model's fault. Penalise the score
 			// and count it toward the breaker so a broken model stops being first.
 			attErr := &attemptError{StatusCode: http.StatusBadGateway, Message: "stream ended abnormally: " + outcome.String()}
 			s.penalizeScore(attempt, attErr.StatusCode)
 			s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
+			s.resolveProviderProbe(attempt.Provider)
 			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ stream ended abnormally",
 				slog.String("model", attempt.Model), slog.String("reason", outcome.String()))
 		default:
@@ -264,14 +337,21 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// aborting (nothing was written to the client yet).
 		attErr := &attemptError{StatusCode: http.StatusBadGateway, Retryable: true, Message: "truncated upstream response: " + readErr.Error()}
 		s.penalizeScore(attempt, attErr.StatusCode)
+		s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
+		s.resolveProviderProbe(attempt.Provider)
 		return attErr
 	}
 	if int64(len(respBytes)) > limit {
 		attErr := &attemptError{StatusCode: http.StatusBadGateway, Retryable: true, Message: "upstream response exceeds PROXY_MAX_RESPONSE_BYTES"}
 		s.penalizeScore(attempt, attErr.StatusCode)
+		s.recordFailure(attempt, attErr.StatusCode, attErr.Message)
+		s.resolveProviderProbe(attempt.Provider)
 		return attErr
 	}
+	s.observeAndSettleQuota(ticket, attempt, providerKey, resp.StatusCode, resp.Header, respBytes, actualResponseTokens(respBytes, estimate.Tokens), time.Now())
+	settled = true
 	s.recordSuccess(attempt)
+	s.resolveProviderSuccess(attempt.Provider)
 	// Only the chat-completions response shape is transformed; pass other
 	// operations (e.g. Anthropic /messages) through untouched.
 	if opPath == chatCompletionsPath {

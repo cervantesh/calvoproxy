@@ -31,6 +31,8 @@ func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
 	// may have OPENROUTER_API_KEY set, and a prior test may have left bindHost on
 	// loopback where the env-key fallback applies).
 	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("CEREBRAS_API_KEY", "")
+	t.Setenv("GROQ_API_KEY", "")
 	mux := newMux(router.NewRouterService(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))

@@ -13,8 +13,10 @@ func storeService(t *testing.T, chain ...string) (*RouterService, string) {
 	path := filepath.Join(t.TempDir(), "scores.json")
 	t.Setenv("PROXY_SCORE_FILE", path)
 	s := &RouterService{
-		modelBreakers: map[string]*modelBreakerState{},
-		policy:        policyConfig{DefaultProfile: "coding", Profiles: map[string][]string{"coding": chain}},
+		modelBreakers:    map[string]*modelBreakerState{},
+		providerAttempts: map[providerID]int64{},
+		providerBalance:  map[providerID]int64{},
+		policy:           policyConfig{DefaultProfile: "coding", Profiles: map[string][]string{"coding": chain}},
 	}
 	return s, path
 }
@@ -27,6 +29,12 @@ func TestScoresSurviveARestart(t *testing.T) {
 	s.modelBreakers["coding:good"] = &modelBreakerState{Score: 0.95, ScoreUpdatedAt: now, ScoreAttemptSeq: 40, Successes: 96}
 	s.modelBreakers["coding:slow"] = &modelBreakerState{Score: 0.15, ScoreUpdatedAt: now, ScoreAttemptSeq: 41, Successes: 0}
 	s.scoreAttempts.Store(41)
+	s.providerAttempts[providerOpenRouter] = 17
+	s.providerAttempts[providerCerebras] = 16
+	s.providerAttempts[providerGroq] = 16
+	s.providerBalance[providerOpenRouter] = 9
+	s.providerBalance[providerCerebras] = 8
+	s.providerBalance[providerGroq] = 8
 	s.markScoresDirty()
 	if err := s.SaveScores(); err != nil {
 		t.Fatalf("save: %v", err)
@@ -51,6 +59,12 @@ func TestScoresSurviveARestart(t *testing.T) {
 	if got := restarted.scoreAttempts.Load(); got != 41 {
 		t.Errorf("the evidence clock must be restored too, got %d", got)
 	}
+	if restarted.providerAttempts[providerOpenRouter] != 17 || restarted.providerAttempts[providerCerebras] != 16 || restarted.providerAttempts[providerGroq] != 16 {
+		t.Errorf("provider consumption clock must survive restart, got %v", restarted.providerAttempts)
+	}
+	if restarted.providerBalance[providerOpenRouter] != 9 || restarted.providerBalance[providerCerebras] != 8 || restarted.providerBalance[providerGroq] != 8 {
+		t.Errorf("provider scheduling clock must survive restart, got %v", restarted.providerBalance)
+	}
 	// And the whole point: the chain still knows which one to try first.
 	t.Setenv("PROXY_SCORING_ENABLED", "true")
 	ranked := restarted.rankAttemptsByScore([]modelAttempt{
@@ -59,6 +73,46 @@ func TestScoresSurviveARestart(t *testing.T) {
 	})
 	if ranked[0].Model != "good" {
 		t.Fatalf("after a restart the chain must still prefer the proven model, got %q", ranked[0].Model)
+	}
+}
+
+func TestActiveQuotaSurvivesRestartWithoutInflightReservations(t *testing.T) {
+	s, path := storeService(t, "good")
+	now := time.Now()
+	s.quota = NewQuotaLedger()
+	active := QuotaBucketKey{Provider: string(providerGroq), Scope: credentialQuotaScope("model", "secret"), ModelOrPool: "good", Dimension: QuotaDimensionRequests, Window: QuotaWindowDay}
+	expired := QuotaBucketKey{Provider: string(providerCerebras), Scope: credentialQuotaScope("model", "secret"), ModelOrPool: "good", Dimension: QuotaDimensionTokens, Window: QuotaWindowMinute}
+	s.quota.Observe(active, QuotaObservation{Limit: 100, Remaining: 7, ResetAt: now.Add(time.Hour), Source: QuotaSourceProviderHeader, Confidence: QuotaConfidenceAuthoritative}, now)
+	s.quota.Observe(expired, QuotaObservation{Limit: 1000, Remaining: 0, ResetAt: now.Add(time.Millisecond), Source: QuotaSourceProviderHeader, Confidence: QuotaConfidenceAuthoritative}, now)
+	if _, ok := s.quota.Reserve(active, 2, now); !ok {
+		t.Fatal("could not create in-flight reservation")
+	}
+	s.markScoresDirty()
+	if err := s.SaveScores(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	restarted, _ := storeService(t, "good")
+	t.Setenv("PROXY_SCORE_FILE", path)
+	restarted.LoadScores()
+	snapshot, ok := restarted.quota.Snapshot(active, now.Add(2*time.Millisecond))
+	if !ok || snapshot.Remaining != 7 || snapshot.Reserved != 0 || snapshot.Available != 7 {
+		t.Fatalf("active quota was not restored without reservations: %+v ok=%v", snapshot, ok)
+	}
+	if _, ok := restarted.quota.Snapshot(expired, now.Add(2*time.Millisecond)); ok {
+		t.Fatal("expired quota must not survive restart")
+	}
+}
+
+func TestVersionOneScoreStoreStillLoads(t *testing.T) {
+	s, path := storeService(t, "good")
+	now := time.Now()
+	if err := writeScoreFile(path, scoreStoreFile{Version: 1, SavedAt: now, Models: map[string]persistedScore{"coding:good": {Score: .7, ScoreUpdatedAt: now, Successes: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	s.LoadScores()
+	if got := s.modelBreakers["coding:good"]; got == nil || got.Score != .7 {
+		t.Fatalf("version 1 store lost backward compatibility: %+v", got)
 	}
 }
 

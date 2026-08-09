@@ -26,7 +26,8 @@ import (
 // open circuit would keep a healthy model excluded for a window that had already
 // expired while the process was down.
 const (
-	scoreStoreVersion = 1
+	scoreStoreVersion    = 2
+	scoreStoreMinVersion = 1
 	// defaultScoreMaxAge discards a whole store file older than this. Scores are
 	// evidence about models, and a week-old file is evidence about models as they
 	// were a week ago — free-tier slugs get retired and re-provisioned on exactly
@@ -56,6 +57,25 @@ type scoreStoreFile struct {
 	// score would read as "no new evidence since" forever and never decay.
 	AttemptSeq int64                     `json:"attempt_seq"`
 	Models     map[string]persistedScore `json:"models"`
+	// ProviderAttempts preserves the fair-consumption clock across restarts.
+	// Optional for backward compatibility with existing version-1 files.
+	ProviderAttempts map[string]int64 `json:"provider_attempts,omitempty"`
+	ProviderBalance  map[string]int64 `json:"provider_balance,omitempty"`
+	Quota            []persistedQuota `json:"quota,omitempty"`
+}
+
+type persistedQuota struct {
+	Provider    string          `json:"provider"`
+	Scope       string          `json:"scope"`
+	ModelOrPool string          `json:"model_or_pool"`
+	Dimension   QuotaDimension  `json:"dimension"`
+	Window      QuotaWindow     `json:"window"`
+	Limit       int64           `json:"limit"`
+	Remaining   int64           `json:"remaining"`
+	ResetAt     time.Time       `json:"reset_at,omitempty"`
+	ObservedAt  time.Time       `json:"observed_at,omitempty"`
+	Source      QuotaSource     `json:"source"`
+	Confidence  QuotaConfidence `json:"confidence"`
 }
 
 // scoreFilePath is where the score map is persisted. Defaults to
@@ -94,10 +114,12 @@ func (s *RouterService) snapshotScores() scoreStoreFile {
 	s.breakerMu.RLock()
 	defer s.breakerMu.RUnlock()
 	out := scoreStoreFile{
-		Version:    scoreStoreVersion,
-		SavedAt:    time.Now(),
-		AttemptSeq: s.scoreAttempts.Load(),
-		Models:     make(map[string]persistedScore, len(s.modelBreakers)),
+		Version:          scoreStoreVersion,
+		SavedAt:          time.Now(),
+		AttemptSeq:       s.scoreAttempts.Load(),
+		Models:           make(map[string]persistedScore, len(s.modelBreakers)),
+		ProviderAttempts: make(map[string]int64, len(s.providerAttempts)),
+		ProviderBalance:  make(map[string]int64, len(s.providerBalance)),
 	}
 	for key, state := range s.modelBreakers {
 		if state == nil || state.ScoreUpdatedAt.IsZero() {
@@ -108,6 +130,32 @@ func (s *RouterService) snapshotScores() scoreStoreFile {
 			ScoreUpdatedAt:  state.ScoreUpdatedAt,
 			ScoreAttemptSeq: state.ScoreAttemptSeq,
 			Successes:       state.Successes,
+		}
+	}
+	for provider, attempts := range s.providerAttempts {
+		if attempts > 0 {
+			out.ProviderAttempts[string(provider)] = attempts
+		}
+	}
+	for provider, balance := range s.providerBalance {
+		if balance > 0 {
+			out.ProviderBalance[string(provider)] = balance
+		}
+	}
+	if ledger := s.quotaLedger(); ledger != nil {
+		now := time.Now()
+		for _, key := range ledger.Keys(now) {
+			snapshot, ok := ledger.Snapshot(key, now)
+			if !ok {
+				continue
+			}
+			out.Quota = append(out.Quota, persistedQuota{
+				Provider: key.Provider, Scope: key.Scope, ModelOrPool: key.ModelOrPool,
+				Dimension: key.Dimension, Window: key.Window, Limit: snapshot.Limit,
+				Remaining: snapshot.Remaining, ResetAt: snapshot.ResetAt,
+				ObservedAt: snapshot.ObservedAt, Source: snapshot.Source,
+				Confidence: snapshot.Confidence,
+			})
 		}
 	}
 	return out
@@ -128,6 +176,36 @@ func (s *RouterService) snapshotScores() scoreStoreFile {
 func (s *RouterService) restoreScores(file scoreStoreFile, known map[string]struct{}, now time.Time, maxAge time.Duration) int {
 	s.breakerMu.Lock()
 	defer s.breakerMu.Unlock()
+	if s.providerAttempts == nil {
+		s.providerAttempts = make(map[providerID]int64)
+	}
+	if s.providerBalance == nil {
+		s.providerBalance = make(map[providerID]int64)
+	}
+	ledger := s.quotaLedger()
+	for _, persisted := range file.Quota {
+		provider := providerID(strings.ToLower(strings.TrimSpace(persisted.Provider)))
+		if _, supported := supportedDirectProviders[provider]; !supported || (!persisted.ResetAt.IsZero() && !persisted.ResetAt.After(now)) {
+			continue
+		}
+		key := QuotaBucketKey{Provider: string(provider), Scope: persisted.Scope, ModelOrPool: persisted.ModelOrPool, Dimension: persisted.Dimension, Window: persisted.Window}
+		ledger.Observe(key, QuotaObservation{
+			Limit: persisted.Limit, Remaining: persisted.Remaining, ResetAt: persisted.ResetAt,
+			ObservedAt: persisted.ObservedAt, Source: persisted.Source, Confidence: persisted.Confidence,
+		}, now)
+	}
+	for rawProvider, attempts := range file.ProviderAttempts {
+		provider := providerID(strings.ToLower(strings.TrimSpace(rawProvider)))
+		if _, supported := supportedDirectProviders[provider]; supported && attempts >= 0 {
+			s.providerAttempts[provider] = attempts
+		}
+	}
+	for rawProvider, balance := range file.ProviderBalance {
+		provider := providerID(strings.ToLower(strings.TrimSpace(rawProvider)))
+		if _, supported := supportedDirectProviders[provider]; supported && balance >= 0 {
+			s.providerBalance[provider] = balance
+		}
+	}
 	restored := 0
 	for key, rec := range file.Models {
 		if _, ok := known[key]; !ok {
@@ -192,13 +270,16 @@ func writeScoreFile(path string, file scoreStoreFile) error {
 		os.Remove(tmpName)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return err
 	}
-	// Windows os.Rename won't replace an existing file — remove the target first.
-	_ = os.Remove(path)
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := atomicReplaceFile(tmpName, path); err != nil {
 		os.Remove(tmpName)
 		return err
 	}
@@ -229,7 +310,7 @@ func (s *RouterService) LoadScores() {
 		}
 		return
 	}
-	if file.Version != scoreStoreVersion {
+	if file.Version < scoreStoreMinVersion || file.Version > scoreStoreVersion {
 		slog.Info("[CalvoProxy] ignoring score store from a different version", slog.Int("file_version", file.Version))
 		return
 	}

@@ -1,13 +1,16 @@
 package router
 
 import (
+	"strings"
+
 	cervomodelpolicy "github.com/cervantesh/cervo-model-policy"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 )
 
 type PolicyModelAttemptPlanner struct {
-	Policy policyConfig
-	model  *cervomodelpolicy.Policy
+	Policy           policyConfig
+	ProviderProfiles providerProfiles
+	model            *cervomodelpolicy.Policy
 }
 
 func NewPolicyModelAttemptPlanner(policy policyConfig) PolicyModelAttemptPlanner {
@@ -24,6 +27,20 @@ func (p PolicyModelAttemptPlanner) Plan(decision policyDecision, category string
 		Profile:        category,
 		RequestedModel: requestedModel,
 	})
+	if targets := p.ProviderProfiles[modelDecision.Profile]; len(targets) > 0 &&
+		(strings.TrimSpace(requestedModel) == "" || strings.EqualFold(strings.TrimSpace(requestedModel), "auto") ||
+			strings.EqualFold(strings.TrimSpace(requestedModel), modelDecision.Profile)) {
+		attempts := make([]modelAttempt, 0, len(targets))
+		for _, target := range targets {
+			attempts = append(attempts, modelAttempt{
+				Profile:       modelDecision.Profile,
+				Model:         target.Model,
+				Provider:      target.Provider,
+				BreakerPolicy: decision.BreakerPolicy,
+			})
+		}
+		return attempts
+	}
 	models := modelDecision.ModelChain
 
 	providers := []cervorules.Executor{decision.Executor}

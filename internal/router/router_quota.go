@@ -1,343 +1,466 @@
 package router
 
 import (
-	"encoding/json"
-	"log/slog"
-	"strconv"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 )
 
-// The quota ledger is the predictive half of resilience; the breaker is the
-// reactive half.
+// QuotaBucketKey identifies one independently enforced upstream quota. ModelOrPool
+// deliberately supports both per-model limits (for example Groq) and a shared
+// pool (for example OpenRouter's free models).
 //
-// Free-tier limits used to be discovered by hitting them: a 429 arrived, the
-// circuit opened, and the request was already spent. The breaker is reactive by
-// design and should stay that way. What was missing is knowing how much of the
-// window is left and degrading BEFORE it runs out.
-//
-// Two things about this file are load-bearing and easy to get wrong:
-//
-// Scope keys are NOT breakerKey. breakerKey is profile+":"+model, which is right
-// for reliability — the same model under `coding` and `bulk` sees different load
-// and deserves its own circuit and score. It is fatal for quota: OpenRouter
-// charges per account and per model, so two partial counters of the same pocket
-// would each see a fraction of the traffic and never detect exhaustion.
-//
-// The ledger has its own mutex and never calls back into the breaker. Lock order
-// is breakerMu → quotaMu, because isModelAvailableLocked is reached from Health()
-// with breakerMu already held.
+// Scope is the upstream enforcement scope when it is known, such as "organization",
+// "project", or "account". A provider must not reuse a key across scopes unless it
+// has evidence that the quota is genuinely shared.
+type QuotaBucketKey struct {
+	Provider    string
+	Scope       string
+	ModelOrPool string
+	Dimension   QuotaDimension
+	Window      QuotaWindow
+}
+
+// QuotaDimension is deliberately small, while the string type keeps the ledger
+// forward-compatible with provider-specific dimensions.
+type QuotaDimension string
 
 const (
-	quotaScopeAccount = "account"
-	// minuteSuffix marks a scope's per-minute window, kept beside its daily one.
-	// The daily budget is what runs out; the per-minute one is what trips first
-	// during a burst, and they expire on completely different clocks.
-	minuteSuffix = "#m"
+	QuotaDimensionRequests QuotaDimension = "requests"
+	QuotaDimensionTokens   QuotaDimension = "tokens"
 )
 
-// quotaLimit is what an operator (or an upstream header) says fits in a window.
-type quotaLimit struct {
-	RPD int64 `json:"rpd,omitempty"`
-	RPM int64 `json:"rpm,omitempty"`
+// QuotaWindow names the period over which a quota is enforced.
+type QuotaWindow string
+
+const (
+	QuotaWindowMinute QuotaWindow = "minute"
+	QuotaWindowHour   QuotaWindow = "hour"
+	QuotaWindowDay    QuotaWindow = "day"
+)
+
+// QuotaSource says where an observation came from. ProviderHeader is preferred
+// over an estimate because account limits can differ from published defaults.
+type QuotaSource string
+
+const (
+	QuotaSourceProviderHeader QuotaSource = "provider_header"
+	QuotaSourceProviderBody   QuotaSource = "provider_body"
+	QuotaSourceConfig         QuotaSource = "config"
+	QuotaSourceLocalEstimate  QuotaSource = "local_estimate"
+)
+
+// QuotaConfidence describes how safe it is to make routing decisions from an
+// observation. The ledger retains this for callers and does not invent a value.
+type QuotaConfidence string
+
+const (
+	QuotaConfidenceAuthoritative QuotaConfidence = "authoritative"
+	QuotaConfidenceEstimated     QuotaConfidence = "estimated"
+)
+
+// QuotaObservation is the provider's view of a bucket. Remaining is always
+// normalised to [0, Limit], preventing a malformed header from creating a
+// negative available balance. ResetAt is optional; a zero value means that the
+// observation has no known expiry.
+type QuotaObservation struct {
+	Limit      int64
+	Remaining  int64
+	ResetAt    time.Time
+	Source     QuotaSource
+	Confidence QuotaConfidence
+	ObservedAt time.Time
 }
 
-type quotaWindow struct {
-	Limit   int64
-	Used    int64
-	ResetAt time.Time
-	// Source records where the limit came from: config, header or learned.
-	// Nothing infers a ceiling — see learnFrom429.
-	Source string
-	daily  bool
-}
-
-type quotaLedger struct {
-	mu     sync.RWMutex
-	limits map[string]quotaLimit
-	scopes map[string]*quotaWindow
-	dirty  bool
-}
-
-func newQuotaLedger(limits map[string]quotaLimit) *quotaLedger {
-	if limits == nil {
-		limits = map[string]quotaLimit{}
-	}
-	return &quotaLedger{limits: limits, scopes: map[string]*quotaWindow{}}
-}
-
-// quotaLimitsFromEnv reads PROXY_QUOTA_LIMITS_JSON. Configuration lives in the
-// environment rather than model-policy.json because that file's shape is owned
-// by the vendored policy package. Malformed input is ignored with a warning:
-// quota is an optimisation, and a typo in an env var is not a reason to refuse
-// traffic.
-func quotaLimitsFromEnv() map[string]quotaLimit {
-	raw := strings.TrimSpace(envValue("PROXY_QUOTA_LIMITS_JSON"))
-	if raw == "" {
-		return map[string]quotaLimit{}
-	}
-	parsed := map[string]quotaLimit{}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		slog.Warn("[CalvoProxy] PROXY_QUOTA_LIMITS_JSON is not valid JSON; quota limits ignored",
-			slog.String("error", err.Error()))
-		return map[string]quotaLimit{}
-	}
-	return parsed
-}
-
-func quotaHardSkipEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(envValue("PROXY_QUOTA_HARD_SKIP")), "true")
-}
-
-func modelScope(attempt modelAttempt) string {
-	return "model:" + strings.TrimSpace(attempt.Model)
-}
-
-// nextReset is when a fresh window closes. Daily windows land on the next UTC
-// midnight because that is how free tiers roll; minute windows are relative.
-func nextReset(daily bool, now time.Time) time.Time {
-	if !daily {
-		return now.Add(time.Minute)
-	}
-	utc := now.UTC()
-	return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
-}
-
-// windowLocked returns the live window for a scope, rolling it first if its
-// reset has passed. Rolling zeroes the count and KEEPS the limit: discarding the
-// window would throw away what we know about the ceiling along with the count.
-func (l *quotaLedger) windowLocked(scope string, daily bool, now time.Time) *quotaWindow {
-	w := l.scopes[scope]
-	if w == nil {
-		limit := l.configuredLimit(scope, daily)
-		w = &quotaWindow{Limit: limit, ResetAt: nextReset(daily, now), daily: daily}
-		if limit > 0 {
-			w.Source = "config"
-		}
-		l.scopes[scope] = w
-		return w
-	}
-	if !w.ResetAt.After(now) {
-		w.Used = 0
-		w.ResetAt = nextReset(w.daily, now)
-	}
-	return w
-}
-
-func (l *quotaLedger) configuredLimit(scope string, daily bool) int64 {
-	base := strings.TrimSuffix(scope, minuteSuffix)
-	limit, ok := l.limits[base]
-	if !ok {
-		return 0
-	}
-	if daily {
-		return limit.RPD
-	}
-	return limit.RPM
-}
-
-// record counts one attempt against the model's pocket and the account's.
-func (l *quotaLedger) record(attempt modelAttempt) {
-	if l == nil {
-		return
-	}
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, scope := range []string{modelScope(attempt), quotaScopeAccount} {
-		l.windowLocked(scope, true, now).Used++
-		l.windowLocked(scope+minuteSuffix, false, now).Used++
-	}
-	l.dirty = true
-}
-
-func (l *quotaLedger) used(scope string) int64 {
-	if l == nil {
-		return 0
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.windowLocked(scope, !strings.HasSuffix(scope, minuteSuffix), time.Now()).Used
-}
-
-func (l *quotaLedger) limit(scope string) int64 {
-	if l == nil {
-		return 0
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.windowLocked(scope, !strings.HasSuffix(scope, minuteSuffix), time.Now()).Limit
-}
-
-// headroom is what is left of the tightest window this attempt touches, in
-// [0,1]. With no known limit it is 1: nothing pretends to know a ceiling, and
-// inventing one would be worse than having none.
-func (l *quotaLedger) headroom(attempt modelAttempt) float64 {
-	if l == nil {
-		return 1
-	}
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	lowest := 1.0
-	model := modelScope(attempt)
-	for _, s := range []struct {
-		scope string
-		daily bool
-	}{
-		{model, true}, {model + minuteSuffix, false},
-		{quotaScopeAccount, true}, {quotaScopeAccount + minuteSuffix, false},
-	} {
-		w := l.windowLocked(s.scope, s.daily, now)
-		if w.Limit <= 0 {
-			continue
-		}
-		left := float64(w.Limit-w.Used) / float64(w.Limit)
-		if left < 0 {
-			left = 0
-		}
-		if left < lowest {
-			lowest = left
-		}
-	}
-	return lowest
-}
-
-// exhausted reports a hard exclusion, and only when explicitly asked for. The
-// default is soft degradation: a hard skip widens the "all models cooling down"
-// surface on the strength of limits that may have been learned — and therefore
-// may be wrong.
-func (l *quotaLedger) exhausted(attempt modelAttempt) bool {
-	if l == nil || !quotaHardSkipEnabled() {
-		return false
-	}
-	return l.headroom(attempt) <= 0
-}
-
-// retryAfter is how long until this attempt's tightest exhausted window rolls,
-// so a quota-driven 503 can tell the client when to come back.
-func (l *quotaLedger) retryAfter(attempt modelAttempt) time.Duration {
-	if l == nil {
-		return 0
-	}
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	var soonest time.Duration
-	model := modelScope(attempt)
-	for _, s := range []struct {
-		scope string
-		daily bool
-	}{
-		{model, true}, {model + minuteSuffix, false},
-		{quotaScopeAccount, true}, {quotaScopeAccount + minuteSuffix, false},
-	} {
-		w := l.windowLocked(s.scope, s.daily, now)
-		if w.Limit <= 0 || w.Used < w.Limit {
-			continue
-		}
-		d := w.ResetAt.Sub(now)
-		if d > 0 && (soonest == 0 || d < soonest) {
-			soonest = d
-		}
-	}
-	return soonest
-}
-
-// learnFrom429 records WHEN to come back, never HOW MANY fit. A 429 says "not
-// now"; reading a ceiling out of it would be a fabrication, and a fabricated
-// ceiling is what turns a helpful gate into an outage.
-func (l *quotaLedger) learnFrom429(attempt modelAttempt, retryAfter time.Duration) {
-	if l == nil || retryAfter <= 0 {
-		return
-	}
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w := l.windowLocked(modelScope(attempt), true, now)
-	if reset := now.Add(retryAfter); reset.After(w.ResetAt) || w.Source == "" {
-		w.ResetAt = reset
-	}
-	if w.Source == "" {
-		w.Source = "learned"
-	}
-	l.dirty = true
-}
-
-// ingestHeaders takes the upstream's own account of the window when it sends
-// one — the best source available, because it is the authority.
-func (l *quotaLedger) ingestHeaders(attempt modelAttempt, limitHdr, remainingHdr string, reset time.Time) {
-	if l == nil {
-		return
-	}
-	limit, err := strconv.ParseInt(strings.TrimSpace(limitHdr), 10, 64)
-	if err != nil || limit <= 0 {
-		return
-	}
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w := l.windowLocked(modelScope(attempt), true, now)
-	w.Limit = limit
-	w.Source = "header"
-	if remaining, err := strconv.ParseInt(strings.TrimSpace(remainingHdr), 10, 64); err == nil && remaining >= 0 {
-		w.Used = limit - remaining
-	}
-	if !reset.IsZero() {
-		w.ResetAt = reset
-	}
-	l.dirty = true
-}
-
-// QuotaSnapshot is the observable view for /health and the dashboard.
+// QuotaSnapshot combines a provider observation with proxy-local in-flight
+// reservations. Available is the only balance a scheduler should spend.
 type QuotaSnapshot struct {
-	Scope   string    `json:"scope"`
-	Limit   int64     `json:"limit,omitempty"`
-	Used    int64     `json:"used"`
-	ResetAt time.Time `json:"reset_at,omitempty"`
-	Source  string    `json:"source,omitempty"`
+	QuotaObservation
+	Key       QuotaBucketKey
+	Reserved  int64
+	Available int64
 }
 
-func (l *quotaLedger) observe() []QuotaSnapshot {
-	if l == nil {
+// QuotaReservation is an atomic unit to reserve, release, or reconcile. A
+// single request commonly has one requests reservation and one tokens
+// reservation, which must succeed or fail together.
+type QuotaReservation struct {
+	Key  QuotaBucketKey
+	Cost int64
+}
+
+// QuotaEstimate is the routing-time estimate for a request. Providers may map
+// either or both values into QuotaReservation values, depending on the headers
+// they expose.
+type QuotaEstimate struct {
+	Requests       int64
+	Tokens         int64
+	InputTokens    int64
+	OutputTokens   int64
+	OutputExplicit bool
+}
+
+// QuotaSettlement settles one dimension held by a QuotaTicket. Actual is used
+// only when no provider observation is supplied: with an authoritative
+// remaining header, that header already includes the completed request and wins
+// over estimates.
+type QuotaSettlement struct {
+	Key         QuotaBucketKey
+	Actual      int64
+	Observation *QuotaObservation
+}
+
+// QuotaTicket is an opaque, ledger-owned reservation handle. A ticket can be
+// released or reconciled exactly once. This ownership is essential: amount-
+// based cleanup cannot distinguish a duplicate cleanup for request A from a
+// valid reservation belonging to request B.
+type QuotaTicket struct {
+	ledger *QuotaLedger
+	id     uint64
+}
+
+func (t QuotaTicket) Valid() bool { return t.ledger != nil && t.id != 0 }
+
+// Reservations returns copies of the dimensions owned by an active ticket.
+// It is stable even when a reset replaces a bucket with the same logical key.
+func (l *QuotaLedger) Reservations(ticket QuotaTicket) []QuotaReservation {
+	if l == nil || ticket.ledger != l || ticket.id == 0 {
 		return nil
 	}
-	now := time.Now()
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	out := make([]QuotaSnapshot, 0, len(l.scopes))
-	for scope, w := range l.scopes {
-		used := w.Used
-		if !w.ResetAt.After(now) {
-			used = 0 // reporting a closed window's count would be a lie
-		}
-		out = append(out, QuotaSnapshot{Scope: scope, Limit: w.Limit, Used: used, ResetAt: w.ResetAt, Source: w.Source})
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	state, ok := l.tickets[ticket.id]
+	if !ok {
+		return nil
 	}
+	out := make([]QuotaReservation, 0, len(state.holds))
+	for key, hold := range state.holds {
+		out = append(out, QuotaReservation{Key: key, Cost: hold.cost})
+	}
+	sort.Slice(out, func(i, j int) bool { return quotaKeyString(out[i].Key) < quotaKeyString(out[j].Key) })
 	return out
 }
 
-// parseRateLimitReset reads an X-RateLimit-Reset value. Providers disagree on
-// the unit — seconds since epoch, milliseconds since epoch, or seconds from now
-// — so the magnitude decides, and anything unrecognisable yields the zero time
-// rather than a confidently wrong window.
-func parseRateLimitReset(raw string) time.Time {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return time.Time{}
+type quotaBucket struct {
+	observation QuotaObservation
+	reserved    int64
+}
+
+type quotaHold struct {
+	key    QuotaBucketKey
+	cost   int64
+	bucket *quotaBucket
+}
+
+type quotaTicketState struct {
+	holds map[QuotaBucketKey]quotaHold
+}
+
+// QuotaLedger is an in-memory, concurrency-safe view of upstream quotas. It
+// intentionally has no provider-specific header parsing: adapters should turn
+// native provider responses into QuotaObservation before reaching this layer.
+type QuotaLedger struct {
+	mu           sync.Mutex
+	buckets      map[QuotaBucketKey]*quotaBucket
+	tickets      map[uint64]quotaTicketState
+	nextTicketID uint64
+}
+
+func NewQuotaLedger() *QuotaLedger {
+	return &QuotaLedger{
+		buckets: make(map[QuotaBucketKey]*quotaBucket),
+		tickets: make(map[uint64]quotaTicketState),
 	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n <= 0 {
-		return time.Time{}
+}
+
+// ReservationsForEstimate maps a request/token estimate to the supplied
+// buckets, omitting zero costs. It is a convenience for provider adapters and
+// preserves atomicity when passed to ReserveAll.
+func ReservationsForEstimate(requestBucket, tokenBucket QuotaBucketKey, estimate QuotaEstimate) []QuotaReservation {
+	reservations := make([]QuotaReservation, 0, 2)
+	if estimate.Requests > 0 {
+		reservations = append(reservations, QuotaReservation{Key: requestBucket, Cost: estimate.Requests})
 	}
-	switch {
-	case n > 1e12: // milliseconds since epoch
-		return time.UnixMilli(n)
-	case n > 1e9: // seconds since epoch
-		return time.Unix(n, 0)
-	default: // a relative number of seconds
-		return time.Now().Add(time.Duration(n) * time.Second)
+	if estimate.Tokens > 0 {
+		reservations = append(reservations, QuotaReservation{Key: tokenBucket, Cost: estimate.Tokens})
 	}
+	return reservations
+}
+
+// Observe records a provider observation. Expired observations are discarded
+// rather than retained as a permanent zero quota.
+func (l *QuotaLedger) Observe(key QuotaBucketKey, observation QuotaObservation, now time.Time) bool {
+	if !validQuotaKey(key) || observation.Limit < 0 || observation.Remaining < 0 {
+		return false
+	}
+	if observation.ObservedAt.IsZero() {
+		observation.ObservedAt = now
+	}
+	if !observation.ResetAt.IsZero() && !observation.ResetAt.After(now) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.purgeExpiredLocked(now)
+		delete(l.buckets, key)
+		return false
+	}
+	if observation.Remaining > observation.Limit {
+		observation.Remaining = observation.Limit
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	bucket := l.buckets[key]
+	if bucket == nil {
+		bucket = &quotaBucket{}
+		l.buckets[key] = bucket
+	}
+	bucket.observation = observation
+	return true
+}
+
+// Snapshot returns the current bucket state. Buckets whose known reset has
+// passed are removed and reported as absent.
+func (l *QuotaLedger) Snapshot(key QuotaBucketKey, now time.Time) (QuotaSnapshot, bool) {
+	if l == nil {
+		return QuotaSnapshot{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	bucket := l.buckets[key]
+	if bucket == nil {
+		return QuotaSnapshot{}, false
+	}
+	available := bucket.observation.Remaining - bucket.reserved
+	if available < 0 {
+		available = 0
+	}
+	return QuotaSnapshot{
+		QuotaObservation: bucket.observation,
+		Key:              key,
+		Reserved:         bucket.reserved,
+		Available:        available,
+	}, true
+}
+
+// ReserveAll atomically reserves every known bucket in reservations and returns
+// the unique ticket that owns those reservations. Unknown buckets impose no
+// local hard limit until an adapter observes or configures them, but remain on
+// the ticket so a response observation can establish them during reconciliation.
+// A negative cost is invalid; a zero cost is ignored.
+func (l *QuotaLedger) ReserveAll(reservations []QuotaReservation, now time.Time) (QuotaTicket, bool) {
+	if l == nil {
+		return QuotaTicket{}, false
+	}
+	amounts, ok := aggregateReservations(reservations)
+	if !ok {
+		return QuotaTicket{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	for key, cost := range amounts {
+		if bucket := l.buckets[key]; bucket != nil && bucket.observation.Remaining-bucket.reserved < cost {
+			return QuotaTicket{}, false
+		}
+	}
+	holds := make(map[QuotaBucketKey]quotaHold, len(amounts))
+	for key, cost := range amounts {
+		bucket := l.buckets[key]
+		if bucket != nil {
+			bucket.reserved += cost
+		}
+		holds[key] = quotaHold{key: key, cost: cost, bucket: bucket}
+	}
+	ticketID := l.newTicketIDLocked()
+	l.tickets[ticketID] = quotaTicketState{holds: holds}
+	return QuotaTicket{ledger: l, id: ticketID}, true
+}
+
+// Reserve is the single-bucket form of ReserveAll.
+func (l *QuotaLedger) Reserve(key QuotaBucketKey, cost int64, now time.Time) (QuotaTicket, bool) {
+	return l.ReserveAll([]QuotaReservation{{Key: key, Cost: cost}}, now)
+}
+
+// Release removes all in-flight reservations owned by ticket. It succeeds
+// exactly once. Duplicate, forged, foreign-ledger, and zero tickets are no-ops
+// that return false.
+func (l *QuotaLedger) Release(ticket QuotaTicket, now time.Time) bool {
+	if l == nil || ticket.ledger != l || ticket.id == 0 {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	state, ok := l.consumeTicketLocked(ticket)
+	if !ok {
+		return false
+	}
+	l.releaseHoldsLocked(state)
+	return true
+}
+
+// Reconcile atomically settles a ticket exactly once. For dimensions with an
+// observation, provider remaining is authoritative. Otherwise Actual is
+// committed after releasing the reservation. A reserved dimension omitted from
+// settlements is charged its estimated cost conservatively.
+func (l *QuotaLedger) Reconcile(ticket QuotaTicket, settlements []QuotaSettlement, now time.Time) bool {
+	if l == nil || ticket.ledger != l || ticket.id == 0 {
+		return false
+	}
+	byKey := make(map[QuotaBucketKey]QuotaSettlement, len(settlements))
+	for _, settlement := range settlements {
+		if !validQuotaKey(settlement.Key) || settlement.Actual < 0 {
+			return false
+		}
+		if _, duplicate := byKey[settlement.Key]; duplicate {
+			return false
+		}
+		if observation := settlement.Observation; observation != nil &&
+			(observation.Limit < 0 || observation.Remaining < 0) {
+			return false
+		}
+		byKey[settlement.Key] = settlement
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	state, exists := l.tickets[ticket.id]
+	if !exists {
+		return false
+	}
+	for key := range byKey {
+		if _, held := state.holds[key]; !held {
+			return false
+		}
+	}
+	delete(l.tickets, ticket.id)
+	for key, hold := range state.holds {
+		if hold.bucket != nil {
+			hold.bucket.reserved -= minInt64(hold.bucket.reserved, hold.cost)
+		}
+		settlement, supplied := byKey[key]
+		if supplied && settlement.Observation != nil {
+			observation := normaliseQuotaObservation(*settlement.Observation, now)
+			if !observation.ResetAt.IsZero() && !observation.ResetAt.After(now) {
+				delete(l.buckets, key)
+				continue
+			}
+			bucket := l.buckets[key]
+			if bucket == nil {
+				bucket = &quotaBucket{}
+				l.buckets[key] = bucket
+			}
+			bucket.observation = observation
+			continue
+		}
+		actual := hold.cost
+		if supplied {
+			actual = settlement.Actual
+		}
+		if hold.bucket != nil {
+			hold.bucket.observation.Remaining -= minInt64(hold.bucket.observation.Remaining, actual)
+		}
+	}
+	return true
+}
+
+func (l *QuotaLedger) consumeTicketLocked(ticket QuotaTicket) (quotaTicketState, bool) {
+	state, ok := l.tickets[ticket.id]
+	if !ok {
+		return quotaTicketState{}, false
+	}
+	delete(l.tickets, ticket.id)
+	return state, true
+}
+
+func (l *QuotaLedger) releaseHoldsLocked(state quotaTicketState) {
+	for _, hold := range state.holds {
+		if hold.bucket != nil {
+			hold.bucket.reserved -= minInt64(hold.bucket.reserved, hold.cost)
+		}
+	}
+}
+
+func (l *QuotaLedger) newTicketIDLocked() uint64 {
+	for {
+		l.nextTicketID++
+		if l.nextTicketID == 0 {
+			continue
+		}
+		if _, exists := l.tickets[l.nextTicketID]; !exists {
+			return l.nextTicketID
+		}
+	}
+}
+
+func (l *QuotaLedger) purgeExpiredLocked(now time.Time) {
+	for key, bucket := range l.buckets {
+		if !bucket.observation.ResetAt.IsZero() && !bucket.observation.ResetAt.After(now) {
+			delete(l.buckets, key)
+		}
+	}
+}
+
+func aggregateReservations(reservations []QuotaReservation) (map[QuotaBucketKey]int64, bool) {
+	amounts := make(map[QuotaBucketKey]int64, len(reservations))
+	for _, reservation := range reservations {
+		if !validQuotaKey(reservation.Key) || reservation.Cost < 0 {
+			return nil, false
+		}
+		if reservation.Cost == 0 {
+			continue
+		}
+		amounts[reservation.Key] += reservation.Cost
+		if amounts[reservation.Key] < 0 { // int64 overflow
+			return nil, false
+		}
+	}
+	return amounts, true
+}
+
+func validQuotaKey(key QuotaBucketKey) bool {
+	return key.Provider != "" && key.Scope != "" && key.ModelOrPool != "" && key.Dimension != "" && key.Window != ""
+}
+
+func normaliseQuotaObservation(observation QuotaObservation, now time.Time) QuotaObservation {
+	if observation.ObservedAt.IsZero() {
+		observation.ObservedAt = now
+	}
+	if observation.Remaining > observation.Limit {
+		observation.Remaining = observation.Limit
+	}
+	return observation
+}
+
+func minInt64(left, right int64) int64 {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+// Keys returns the currently non-expired keys in a deterministic order. It is
+// primarily useful for health reporting and tests; callers receive copies only.
+func (l *QuotaLedger) Keys(now time.Time) []QuotaBucketKey {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeExpiredLocked(now)
+	keys := make([]QuotaBucketKey, 0, len(l.buckets))
+	for key := range l.buckets {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return quotaKeyString(keys[i]) < quotaKeyString(keys[j])
+	})
+	return keys
+}
+
+func quotaKeyString(key QuotaBucketKey) string {
+	return key.Provider + "\x00" + key.Scope + "\x00" + key.ModelOrPool + "\x00" + string(key.Dimension) + "\x00" + string(key.Window)
 }
