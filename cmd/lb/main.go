@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,12 +16,12 @@ import (
 )
 
 type Backend struct {
-	URL          *url.URL
-	Proxy        *httputil.ReverseProxy
-	mu           sync.RWMutex
-	healthy      bool
-	connections  int32
-	lastCheck    time.Time
+	URL         *url.URL
+	Proxy       *httputil.ReverseProxy
+	mu          sync.RWMutex
+	healthy     bool
+	connections int32
+	lastCheck   time.Time
 }
 
 func (b *Backend) setHealthy(h bool) {
@@ -38,8 +37,8 @@ func (b *Backend) isHealthy() bool {
 	return b.healthy
 }
 
-func (b *Backend) incConn() { atomic.AddInt32(&b.connections, 1) }
-func (b *Backend) decConn() { atomic.AddInt32(&b.connections, -1) }
+func (b *Backend) incConn()   { atomic.AddInt32(&b.connections, 1) }
+func (b *Backend) decConn()   { atomic.AddInt32(&b.connections, -1) }
 func (b *Backend) conns() int { return int(atomic.LoadInt32(&b.connections)) }
 
 type LoadBalancer struct {
@@ -165,8 +164,6 @@ func (lb *LoadBalancer) DrainBackend(addr string, timeout time.Duration) {
 func main() {
 	lbPort := getEnv("LB_PORT", "8080")
 	backendStartPort := getEnvInt("BACKEND_START_PORT", 8081)
-	maxBackends := getEnvInt("MAX_BACKENDS", 3)
-
 	lb := NewLoadBalancer()
 
 	// Start initial backend
