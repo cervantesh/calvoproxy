@@ -89,6 +89,29 @@
     "creative": "coding",
     "vision": "vision"
   },
+  "ContextWindows": {
+    "openrouter": {
+      "nvidia/nemotron-3-super-120b-a12b:free": { "ContextTokens": 262144, "OutputReserveTokens": 16384 },
+      "openai/gpt-oss-20b:free": { "ContextTokens": 131072, "OutputReserveTokens": 16384 },
+      "nvidia/nemotron-3-ultra-550b-a55b:free": { "ContextTokens": 1000000, "OutputReserveTokens": 16384 },
+      "google/gemma-4-31b-it:free": { "ContextTokens": 262144, "OutputReserveTokens": 16384 },
+      "inclusionai/ling-3.0-flash:free": { "ContextTokens": 131072, "OutputReserveTokens": 8192 },
+      "cohere/north-mini-code:free": { "ContextTokens": 256000, "OutputReserveTokens": 8192 },
+      "poolside/laguna-s-2.1:free": { "ContextTokens": 262144, "OutputReserveTokens": 8192 },
+      "nvidia/nemotron-3-nano-30b-a3b:free": { "ContextTokens": 256000, "OutputReserveTokens": 8192 },
+      "google/gemma-4-26b-a4b-it:free": { "ContextTokens": 262144, "OutputReserveTokens": 8192 },
+      "nvidia/nemotron-nano-9b-v2:free": { "ContextTokens": 128000, "OutputReserveTokens": 8192 },
+      "nvidia/nemotron-nano-12b-v2-vl:free": { "ContextTokens": 128000, "OutputReserveTokens": 16384 },
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": { "ContextTokens": 256000, "OutputReserveTokens": 16384 }
+    },
+    "cerebras": {
+      "gpt-oss-120b": { "ContextTokens": 131072, "OutputReserveTokens": 16384 }
+    },
+    "groq": {
+      "openai/gpt-oss-120b": { "ContextTokens": 131072, "OutputReserveTokens": 16384 },
+      "llama-3.1-8b-instant": { "ContextTokens": 131072, "OutputReserveTokens": 8192 }
+    }
+  },
   "Capabilities": {
     "nvidia/nemotron-3-super-120b-a12b:free": [
       "tools"
