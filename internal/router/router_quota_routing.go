@@ -291,7 +291,11 @@ func (s *RouterService) quotaRankAndReserve(ctx context.Context, attempts []mode
 			policyProviderOrder[provider] = len(policyProviderOrder)
 		}
 	}
-	base := s.rankAttemptsByScore(attempts)
+	// Reliability/quota determine the route for a new session. An existing
+	// session may promote its last successful route, but only after the normal
+	// breaker/context/configuration gates and only while quota can still fit.
+	base := s.applySessionAffinity(ctx, s.rankAttemptsByScore(attempts))
+	preferred, hasPreferred := s.affinity.preferred(affinityKeyFrom(ctx))
 	if trace := traceFrom(ctx); trace != nil {
 		models := make([]string, len(base))
 		scores := make([]float64, len(base))
@@ -311,6 +315,7 @@ func (s *RouterService) quotaRankAndReserve(ctx context.Context, attempts []mode
 		latency        time.Duration
 		latencySamples int64
 		order          int
+		preferred      bool
 	}
 	groups := make([]group, 0, 3)
 	index := map[providerID]int{}
@@ -330,6 +335,9 @@ func (s *RouterService) quotaRankAndReserve(ctx context.Context, attempts []mode
 			groups = append(groups, group{provider: attempt.Provider, order: policyProviderOrder[attempt.Provider]})
 		}
 		groups[i].attempts = append(groups[i].attempts, attempt)
+		if hasPreferred && attempt.Provider == preferred.Provider && attempt.Model == preferred.Model {
+			groups[i].preferred = true
+		}
 	}
 	for i := range groups {
 		credential, _ := s.providerCredential(ctx, groups[i].attempts[0], openRouterCredential)
@@ -338,6 +346,9 @@ func (s *RouterService) quotaRankAndReserve(ctx context.Context, attempts []mode
 		groups[i].latency, groups[i].latencySamples = s.meanFirstTokenLatency(groups[i].attempts[0])
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
+		if groups[i].preferred != groups[j].preferred {
+			return groups[i].preferred
+		}
 		const pressureBand = 0.05
 		if groups[i].known && groups[j].known && math.Abs(groups[i].pressure-groups[j].pressure) > pressureBand {
 			return groups[i].pressure < groups[j].pressure

@@ -11,6 +11,28 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-09
+
+### Added
+- **Soft session affinity across provider fallbacks.** Clients may send
+  `X-Calvoproxy-Session-Id`, `X-Claude-Code-Session-Id`, `X-Session-Id`, or
+  `X-Opencode-Session`; CalvoProxy keeps the last successful provider/model
+  while it remains healthy, configured, context-compatible, and within quota.
+  A failed route is released immediately and the successful fallback becomes
+  the new preference. Session identifiers are retained only as process-local
+  HMACs in a bounded TTL/LRU cache.
+- **Provider/model context-window admission.** `ContextWindows` in
+  `model-policy.json` records the actual total window and a default output
+  reserve for each known route. Oversized candidates are removed before quota
+  reservation or upstream I/O; when none fit, clients receive a clear English
+  `422` asking them to compact or start a new session. Unknown custom models
+  remain backward-compatible instead of being rejected without metadata.
+
+### Changed
+- Hermes examples advertise the guaranteed cross-provider floor of 128,000
+  tokens instead of 131,072, so client-side compaction happens before the
+  smallest configured OpenRouter vision route is exceeded.
+
 ## [0.16.1] — 2026-08-09
 
 ### Fixed

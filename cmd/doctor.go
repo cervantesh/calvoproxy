@@ -86,10 +86,10 @@ custom_providers:
     api_mode: chat_completions
     discover_models: false   # the proxy does not expose /v1/models
     models:
-      coding:    {context_length: 131072}
-      simple:    {context_length: 131072}
-      reasoning: {context_length: 131072}
-      vision:    {context_length: 131072}`, baseURL, baseURL)
+      coding:    {context_length: 128000}
+      simple:    {context_length: 128000}
+      reasoning: {context_length: 128000}
+      vision:    {context_length: 128000}`, baseURL, baseURL)
 }
 
 // Loopback detection reuses isLoopbackHost from security.go: Hermes refuses to

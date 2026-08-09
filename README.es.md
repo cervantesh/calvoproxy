@@ -49,10 +49,10 @@ custom_providers:
     api_mode: chat_completions
     discover_models: false              # el proxy no sirve /v1/models
     models:
-      coding:    {context_length: 131072}
-      simple:    {context_length: 131072}
-      reasoning: {context_length: 131072}
-      vision:    {context_length: 131072}
+      coding:    {context_length: 128000}
+      simple:    {context_length: 128000}
+      reasoning: {context_length: 128000}
+      vision:    {context_length: 128000}
 ```
 
 - **`model.base_url` es lo que enlaza `provider: custom` con la entrada de
