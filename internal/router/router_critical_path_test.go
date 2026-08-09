@@ -138,6 +138,39 @@ func TestDispatchChainRejectsContextBeforeUpstreamOrQuota(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySkipsIneligiblePreferredRouteAndRepinsSuccess(t *testing.T) {
+	upstream := &recordingTransport{}
+	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"preferred-model", "fallback-model"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+	preferred := modelAttempt{Profile: "simple", Provider: providerOpenRouter, Model: "preferred-model"}
+	affinityKey := svc.affinity.key("session-a", "k")
+	svc.affinity.pin(affinityKey, preferred)
+	svc.breakerMu.Lock()
+	svc.modelBreakers[svc.breakerKey(preferred)] = &modelBreakerState{OpenUntil: time.Now().Add(time.Hour)}
+	svc.breakerMu.Unlock()
+
+	req := trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"simple","messages":[{"role":"user","content":"continue"}]}`)
+	req.Header.Set(headerCalvoProxySession, "session-a")
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, req, "k", "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected eligible fallback success, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sent map[string]any
+	_ = json.Unmarshal([]byte(upstream.body), &sent)
+	if upstream.calls != 1 || sent["model"] != "fallback-model" {
+		t.Fatalf("preferred open circuit must never reach upstream, calls=%d body=%s", upstream.calls, upstream.body)
+	}
+	repinned, ok := svc.affinity.preferred(affinityKey)
+	if !ok || repinned.Provider != providerOpenRouter || repinned.Model != "fallback-model" {
+		t.Fatalf("expected successful eligible route to become affinity, got %+v ok=%v", repinned, ok)
+	}
+}
+
 // streamProxyResponse had 0% coverage while streaming was the newest thing in
 // production. The header order is the load-bearing part: setServedModelHeaders
 // must land BEFORE WriteHeader, or the client streams an answer with no way to
