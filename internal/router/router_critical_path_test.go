@@ -107,6 +107,37 @@ func trustedRequest(method, path, body string) *http.Request {
 	return req
 }
 
+func TestDispatchChainRejectsContextBeforeUpstreamOrQuota(t *testing.T) {
+	upstream := &streamTransport{events: "should not be called"}
+	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+		DefaultProfile: "simple",
+		Profiles:       map[string][]string{"simple": {"tiny-model"}},
+		Aliases:        map[string]string{"default": "simple", "simple": "simple"},
+	})
+	svc.policyMu.Lock()
+	svc.contextWindows = contextWindowIndex{
+		providerModelKey(providerOpenRouter, "tiny-model"): {ContextTokens: 16, OutputReserveTokens: 8},
+	}
+	svc.policyMu.Unlock()
+
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, trustedRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		`{"model":"simple","messages":[{"role":"user","content":"this request cannot fit the configured context window"}],"max_tokens":8}`,
+	), "k", "")
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected context 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Compact the conversation or start a new session") {
+		t.Fatalf("expected actionable context message, got %s", rec.Body.String())
+	}
+	if upstream.calls != 0 {
+		t.Fatalf("oversized context reached upstream %d times", upstream.calls)
+	}
+}
+
 // streamProxyResponse had 0% coverage while streaming was the newest thing in
 // production. The header order is the load-bearing part: setServedModelHeaders
 // must land BEFORE WriteHeader, or the client streams an answer with no way to
