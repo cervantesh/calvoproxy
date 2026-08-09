@@ -100,8 +100,8 @@ func TestStreamCopy_OutcomeStalledAndClientGone(t *testing.T) {
 	}
 
 	// Context cancel → client gone, NOT an upstream fault.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
 	got = streamCopy(ctx, httptest.NewRecorder(), newBlockingBody(), time.Hour, 0)
 	if got != streamClientGone {
 		t.Fatalf("cancelled ctx should be streamClientGone, got %v", got)
@@ -156,6 +156,7 @@ func TestResolveProbe_ReleasesCircuitWithoutScoring(t *testing.T) {
 type stubRoundTripper struct {
 	mu     sync.Mutex
 	status int
+	err    error
 	calls  int
 	// gate, when set, blocks the transport inside RoundTrip until the test
 	// releases it, and entered reports that a call has arrived. Together they
@@ -179,6 +180,9 @@ func (s *stubRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	if gate != nil {
 		<-gate
+	}
+	if s.err != nil {
+		return nil, s.err
 	}
 	return &http.Response{StatusCode: s.status, Body: io.NopCloser(nil), Header: http.Header{}}, nil
 }
@@ -209,22 +213,47 @@ func TestHostBreaker_429IsNeutral(t *testing.T) {
 	}
 }
 
-func TestHostBreaker_OpensOn5xxAndSingleFlightsRecovery(t *testing.T) {
+func TestHostBreaker_RequestDeadlineIsNeutral(t *testing.T) {
+	tr, stub := newHostBreaker(http.StatusOK)
+	stub.err = context.DeadlineExceeded
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.test/x", nil)
+
+	for i := 0; i < 5; i++ {
+		_, _ = tr.RoundTrip(req)
+	}
+	state := tr.hosts["example.test"]
+	if state.failures != 0 || !state.openUntil.IsZero() {
+		t.Fatalf("per-attempt context deadline must not affect shared host breaker: %+v", state)
+	}
+}
+
+func TestHostBreaker_5xxIsModelScopedAndTransportErrorsSingleFlightRecovery(t *testing.T) {
 	tr, stub := newHostBreaker(http.StatusServiceUnavailable)
 	req, _ := http.NewRequest(http.MethodGet, "http://example.test/x", nil)
 
-	// Two 503s (threshold=2) open the circuit.
+	// HTTP 503 can belong to one downstream model and must not open the shared
+	// provider host circuit.
 	tr.RoundTrip(req)
 	tr.RoundTrip(req)
+	if !tr.hosts["example.test"].openUntil.IsZero() {
+		t.Fatal("model-scoped 503 must not open the shared host circuit")
+	}
+	// Two actual transport failures do open it.
+	stub.err = context.DeadlineExceeded
+	tr.RoundTrip(req)
+	tr.RoundTrip(req)
+	stub.err = nil
 	if _, err := tr.RoundTrip(req); err == nil {
-		t.Fatal("host circuit should be open after the failure threshold")
+		t.Fatal("host circuit should be open after transport failure threshold")
 	}
 
 	// After the cooldown, exactly ONE probe may go through.
 	//
 	// Entering half-open by SLEEPING past the cooldown is what made this test
 	// flaky: it failed in CI with "got 2", and both probes were legitimate. The
-	// probe's own 503 re-opens the circuit for another Cooldown, so any caller
+	// probe's own transport failure re-opens the circuit for another Cooldown, so any caller
 	// the scheduler delays past that second window enters a second half-open
 	// window and correctly sends a second probe. Under -race on a loaded runner,
 	// starting 16 goroutines can easily take longer than a 50ms cooldown.

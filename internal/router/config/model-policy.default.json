@@ -33,6 +33,47 @@
       "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     ]
   },
+  "ProviderProfiles": {
+    "coding": [
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-super-120b-a12b:free" },
+      { "Provider": "openrouter", "Model": "openai/gpt-oss-20b:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
+      { "Provider": "openrouter", "Model": "google/gemma-4-31b-it:free" },
+      { "Provider": "cerebras", "Model": "gpt-oss-120b" },
+      { "Provider": "groq", "Model": "openai/gpt-oss-120b" }
+    ],
+    "reasoning": [
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
+      { "Provider": "openrouter", "Model": "google/gemma-4-31b-it:free" },
+      { "Provider": "openrouter", "Model": "openai/gpt-oss-20b:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-super-120b-a12b:free" },
+      { "Provider": "cerebras", "Model": "gpt-oss-120b" },
+      { "Provider": "groq", "Model": "openai/gpt-oss-120b" }
+    ],
+    "critic": [
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
+      { "Provider": "openrouter", "Model": "google/gemma-4-31b-it:free" },
+      { "Provider": "openrouter", "Model": "openai/gpt-oss-20b:free" },
+      { "Provider": "cerebras", "Model": "gpt-oss-120b" },
+      { "Provider": "groq", "Model": "openai/gpt-oss-120b" }
+    ],
+    "bulk": [
+      { "Provider": "openrouter", "Model": "inclusionai/ling-3.0-flash:free" },
+      { "Provider": "openrouter", "Model": "cohere/north-mini-code:free" },
+      { "Provider": "openrouter", "Model": "poolside/laguna-s-2.1:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-nano-30b-a3b:free" },
+      { "Provider": "openrouter", "Model": "google/gemma-4-26b-a4b-it:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-nano-9b-v2:free" },
+      { "Provider": "cerebras", "Model": "gpt-oss-120b" },
+      { "Provider": "groq", "Model": "llama-3.1-8b-instant" }
+    ],
+    "vision": [
+      { "Provider": "openrouter", "Model": "google/gemma-4-31b-it:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-nano-12b-v2-vl:free" },
+      { "Provider": "openrouter", "Model": "google/gemma-4-26b-a4b-it:free" },
+      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" }
+    ]
+  },
   "Aliases": {
     "default": "coding",
     "coding": "coding",
@@ -56,6 +97,15 @@
       "tools"
     ],
     "openai/gpt-oss-20b:free": [
+      "tools"
+    ],
+    "gpt-oss-120b": [
+      "tools"
+    ],
+    "openai/gpt-oss-120b": [
+      "tools"
+    ],
+    "llama-3.1-8b-instant": [
       "tools"
     ],
     "cohere/north-mini-code:free": [

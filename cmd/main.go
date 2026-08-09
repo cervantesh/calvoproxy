@@ -16,6 +16,7 @@ import (
 
 	"github.com/cervantesh/calvoproxy/internal/dashboard"
 	"github.com/cervantesh/calvoproxy/internal/router"
+	"github.com/cervantesh/calvoproxy/internal/secretstore"
 	"github.com/cervantesh/calvoproxy/internal/telemetry"
 	httpx "github.com/cervantesh/cervo-httpkit"
 	"github.com/cervantesh/cervo-requestmeta"
@@ -40,6 +41,11 @@ func resolveAPIKey(r *http.Request) string {
 			slog.Info("Using API key from environment (header was empty or dummy)")
 			return envKey
 		}
+		if vaultKey, ok := managedProviderCredential(secretstore.ProviderOpenRouter); ok {
+			defer clear(vaultKey)
+			slog.Info("Using managed OpenRouter credential (header/environment were empty)")
+			return strings.TrimSpace(string(vaultKey))
+		}
 		if fileKey := storedAPIKey(); fileKey != "" {
 			slog.Info("Using API key from login file (header/env were empty)")
 			return fileKey
@@ -57,11 +63,21 @@ func requirePostAPIKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 
 	apiKey := resolveAPIKey(r)
-	if apiKey == "" {
+	if apiKey == "" && !ambientDirectProviderConfigured(r.Context()) {
 		http.Error(w, "API Key required", http.StatusUnauthorized)
 		return "", false
 	}
 	return apiKey, true
+}
+
+func ambientDirectProviderConfigured(ctx context.Context) bool {
+	if boundToPublicInterface() && !allowEnvKeyOnPublicBind() {
+		return false
+	}
+	return strings.TrimSpace(os.Getenv("CEREBRAS_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("GROQ_API_KEY")) != "" ||
+		managedProviderConfigured(secretstore.ProviderCerebras) ||
+		managedProviderConfigured(secretstore.ProviderGroq)
 }
 
 func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeMux {
@@ -77,6 +93,8 @@ func newMux(routerService *router.RouterService, idle *idleTracker) *http.ServeM
 			rec := newStatusRecorder(w)
 			start := time.Now()
 			defer func() { metrics.observe(rec.status, time.Since(start).Nanoseconds()) }()
+			allowAmbient := !boundToPublicInterface() || allowEnvKeyOnPublicBind()
+			r = r.WithContext(router.WithAmbientProviderCredentials(r.Context(), allowAmbient))
 			apiKey, ok := requirePostAPIKey(rec, r)
 			if !ok {
 				return
@@ -420,13 +438,15 @@ func main() {
 			"host", host)
 	}
 
+	credentialStore := initializeManagedCredentials(context.Background())
 	routerService := router.NewRouterService()
 	defer routerService.Close()
 	// Let /health report a key configured via `calvoproxy login` too, not just the
 	// env var (the router alone can't see the login file).
 	routerService.AmbientKeyPresent = func() bool {
-		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || storedAPIKey() != ""
+		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || managedProviderConfigured(secretstore.ProviderOpenRouter) || storedAPIKey() != ""
 	}
+	routerService.AmbientProviderCredential = managedProviderCredentialByName
 	// Reliability scores are learned from real traffic and are worth keeping
 	// across restarts — a new build or a crash used to wipe them, and the chain
 	// then re-paid the whole discovery cost on the next burst. Loads now and
@@ -434,12 +454,11 @@ func main() {
 	scoreCtx, cancelScores := context.WithCancel(context.Background())
 	defer cancelScores()
 	routerService.StartScorePersistence(scoreCtx)
-	// Quotas persist on the same clock but in their own file: a budget's expiry
-	// is its reset time, which is nothing like the score store's max-age rule.
-	routerService.StartQuotaPersistence(scoreCtx)
-
 	tracker := newIdleTracker()
 	mux := newMux(routerService, tracker)
+	if credentialStore != nil {
+		MountAdminProviders(mux, credentialStore)
+	}
 
 	// Best-effort background check for a newer release; logs a recommendation
 	// and caches the result for GET /version. Silent for dev builds or when

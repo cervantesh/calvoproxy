@@ -53,25 +53,54 @@ type BreakerSnapshot struct {
 	State               string    `json:"state"`
 }
 
+type ProviderSnapshot struct {
+	Provider            string                `json:"provider"`
+	Configured          bool                  `json:"configured"`
+	State               string                `json:"state"`
+	Attempts            int64                 `json:"attempts"`
+	ReliabilityScore    float64               `json:"reliability_score"`
+	ConsecutiveFailures int                   `json:"consecutive_failures"`
+	LastFailureCode     int                   `json:"last_failure_code,omitempty"`
+	LastFailureReason   string                `json:"last_failure_reason,omitempty"`
+	LastFailureAt       time.Time             `json:"last_failure_at,omitempty"`
+	OpenUntil           time.Time             `json:"open_until,omitempty"`
+	Quota               []QuotaHealthSnapshot `json:"quota,omitempty"`
+}
+
+type QuotaHealthSnapshot struct {
+	Scope       string          `json:"scope"`
+	ModelOrPool string          `json:"model_or_pool"`
+	Dimension   QuotaDimension  `json:"dimension"`
+	Window      QuotaWindow     `json:"window"`
+	Limit       int64           `json:"limit"`
+	Remaining   int64           `json:"remaining"`
+	Reserved    int64           `json:"reserved"`
+	Available   int64           `json:"available"`
+	ResetAt     time.Time       `json:"reset_at,omitempty"`
+	Source      QuotaSource     `json:"source"`
+	Confidence  QuotaConfidence `json:"confidence"`
+}
+
 type ProxyHealth struct {
-	Service            string            `json:"service"`
-	Status             string            `json:"status"`
-	Ready              bool              `json:"ready"`
-	OpenCircuitCount   int               `json:"open_circuit_count"`
-	ConfiguredAPIKey   bool              `json:"configured_api_key"`
-	DefaultExecutor    string            `json:"default_executor"`
-	Profiles           []string          `json:"profiles"`
-	FailureThreshold   int               `json:"failure_threshold"`
-	CooldownSeconds    int               `json:"cooldown_seconds"`
-	RequestTimeoutSecs int               `json:"request_timeout_seconds"`
-	PolicyName         string            `json:"policy_name"`
-	PolicyDSLVersion   string            `json:"policy_dsl_version"`
-	PolicyHash         string            `json:"policy_hash"`
-	PolicyVocabHash    string            `json:"policy_vocabulary_hash"`
-	ModelPolicy        ModelPolicyHealth `json:"model_policy"`
-	Circuits           []BreakerSnapshot `json:"circuits"`
-	Quotas             []QuotaSnapshot   `json:"quotas,omitempty"`
-	Timestamp          time.Time         `json:"timestamp"`
+	Service            string             `json:"service"`
+	Status             string             `json:"status"`
+	Ready              bool               `json:"ready"`
+	OpenCircuitCount   int                `json:"open_circuit_count"`
+	ConfiguredAPIKey   bool               `json:"configured_api_key"`
+	DefaultExecutor    string             `json:"default_executor"`
+	Profiles           []string           `json:"profiles"`
+	FailureThreshold   int                `json:"failure_threshold"`
+	CooldownSeconds    int                `json:"cooldown_seconds"`
+	RequestTimeoutSecs int                `json:"request_timeout_seconds"`
+	PolicyName         string             `json:"policy_name"`
+	PolicyDSLVersion   string             `json:"policy_dsl_version"`
+	PolicyHash         string             `json:"policy_hash"`
+	PolicyVocabHash    string             `json:"policy_vocabulary_hash"`
+	ModelPolicy        ModelPolicyHealth  `json:"model_policy"`
+	Providers          []ProviderSnapshot `json:"providers"`
+	Circuits           []BreakerSnapshot  `json:"circuits"`
+	Quotas             []QuotaSnapshot    `json:"quotas,omitempty"`
+	Timestamp          time.Time          `json:"timestamp"`
 }
 
 type ModelPolicyHealth struct {
@@ -93,28 +122,53 @@ type attemptError struct {
 	// in flight): the fallback loop advances to the next model immediately with no
 	// backoff and no score/breaker penalty, exactly like a model-unavailable 404.
 	SkipModel bool
+	// ProviderUnavailable means the failure applies to the provider/account,
+	// not just this model. The fallback loop skips sibling models from the same
+	// provider while preserving this original actionable error.
+	ProviderUnavailable bool
+	// QuotaLimited is deliberately separate from reliability/breaker failure.
+	// A provider can be healthy while one request/token window is exhausted.
+	QuotaLimited bool
+	// QuotaPool identifies a shared quota pool (currently OpenRouter's free
+	// models) without declaring the entire provider unavailable.
+	QuotaPool  string
+	RetryAfter time.Duration
 }
 
 func (e *attemptError) Error() string { return e.Message }
 
 type RouterService struct {
-	Client         HTTPDoer
-	SideEffects    SideEffectExtractor
-	Transformer    ResponseTransformer
-	AttemptPlanner ModelAttemptPlanner
-	TargetResolver AttemptTargetResolver
-	Fallbacks      FallbackExecutor
-	PolicyEngine   cervorules.Engine
-	config         breakerConfig
-	policyMu       sync.RWMutex // guards policy + modelPolicy for hot-reload
-	policy         policyConfig
-	modelPolicy    *cervomodelpolicy.Policy
-	modelWarnings  []cervomodelpolicy.ValidationIssue
-	modelStrict    bool
-	runtimeConfig  ruleRuntimeConfig
-	policyMetadata cervoruntime.PolicyMetadata
-	breakerMu      sync.RWMutex
-	modelBreakers  map[string]*modelBreakerState
+	Client           HTTPDoer
+	SideEffects      SideEffectExtractor
+	Transformer      ResponseTransformer
+	AttemptPlanner   ModelAttemptPlanner
+	TargetResolver   AttemptTargetResolver
+	Fallbacks        FallbackExecutor
+	PolicyEngine     cervorules.Engine
+	config           breakerConfig
+	policyMu         sync.RWMutex // guards policy + modelPolicy for hot-reload
+	policy           policyConfig
+	providerProfiles providerProfiles
+	modelPolicy      *cervomodelpolicy.Policy
+	modelWarnings    []cervomodelpolicy.ValidationIssue
+	modelStrict      bool
+	runtimeConfig    ruleRuntimeConfig
+	policyMetadata   cervoruntime.PolicyMetadata
+	breakerMu        sync.RWMutex
+	modelBreakers    map[string]*modelBreakerState
+	providerBreakers map[providerID]*modelBreakerState
+	// providerAttempts is the durable global consumption clock used to balance
+	// which healthy provider starts each request. It counts real upstream calls
+	// (plus the primary reservation made atomically by the scheduler).
+	providerAttempts map[providerID]int64
+	// providerBalance is a virtual fair-scheduling clock. It is separate from
+	// providerAttempts so rebasing a newly recovered/configured provider avoids
+	// catch-up bursts without falsifying the actual usage table.
+	providerBalance map[providerID]int64
+	quotaInitMu     sync.Mutex
+	quota           *QuotaLedger
+	quotaCooldownMu sync.RWMutex
+	quotaCooldowns  map[string]time.Time
 	// scoreAttempts counts every scored outcome, proxy-wide. It is the "evidence
 	// clock" score decay is measured against (see router_scoring.go).
 	scoreAttempts atomic.Int64
@@ -123,17 +177,8 @@ type RouterService struct {
 	// final write. See router_scoring_store.go.
 	scoresDirty   atomic.Bool
 	persistScores atomic.Bool
-	// quota is the predictive counterpart to the breaker: it knows how much of
-	// each window is left and degrades before it runs out. Keyed by bare model
-	// plus an account scope — never by breakerKey, which carries the profile.
-	// Lock order is breakerMu -> quota.mu; the ledger never calls back here.
-	quota         *quotaLedger
-	persistQuotas atomic.Bool
 	admission     *admissionControl
 	capabilities  *capabilityIndex
-	// traces is the bounded, in-memory decision ring behind /decisions/{id}.
-	// Built lazily so a service assembled as a struct literal (as the tests do)
-	// gets one without every construction site knowing about it.
 	traceRingOnce sync.Once
 	traces        *traceRing
 	counters      routerCounters
@@ -143,6 +188,12 @@ type RouterService struct {
 	// file). The router only knows about the env var, so /health used to claim no
 	// key was configured for a login-file user.
 	AmbientKeyPresent func() bool
+	// AmbientProviderCredential resolves a provider credential at the moment an
+	// upstream attempt is made. Keeping this as a callback avoids caching vault
+	// plaintext in the router and makes key replacement effective immediately.
+	// The returned byte slice remains owned by the caller and is cleared after
+	// it has been copied into the HTTP request.
+	AmbientProviderCredential func(provider string) ([]byte, bool)
 }
 
 type HTTPDoer interface {
@@ -185,6 +236,9 @@ type FallbackExecution struct {
 	// PerAttemptTimeout bounds a single non-streaming upstream call; zero leaves
 	// the attempt bounded only by the parent context.
 	PerAttemptTimeout time.Duration
+	// ReserveQuota atomically claims quota for a fallback at the instant a
+	// streaming attempt reaches its first-event fail-fast boundary.
+	ReserveQuota func(modelAttempt) (QuotaTicket, bool)
 }
 
 type AttemptTarget struct {
@@ -212,4 +266,15 @@ type modelAttempt struct {
 	// exactly backwards during the broad upstream slowness where an answer
 	// matters most. The last attempt runs under the ordinary bounds.
 	LastInChain bool
+	// ReserveFallback runs only when the first-event budget expires. It closes
+	// the availability race without holding unused provider quota throughout a
+	// healthy primary stream.
+	ReserveFallback func() bool
+	// BalanceReserved means the scheduler already reserved this primary in the
+	// virtual fair-use clock. The real upstream attempt is still counted once.
+	BalanceReserved bool
+	// QuotaReservations are atomically claimed by the scheduler for the primary
+	// attempt. Fallback attempts claim their own immediately before dispatch.
+	QuotaTicket   QuotaTicket
+	QuotaEstimate QuotaEstimate
 }

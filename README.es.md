@@ -105,6 +105,8 @@ en vuelo antes de salir.
 | `PORT`               | `8080`  | Puerto HTTP                          |
 | `GRPC_PORT`          | `9090`  | Puerto gRPC (ver [gRPC](#transporte-grpc)); un fallo de bind no es fatal |
 | `OPENROUTER_API_KEY` | —       | Key del upstream para el ejecutor por defecto |
+| `CEREBRAS_API_KEY`   | —       | Key directa para el fallback de Cerebras |
+| `GROQ_API_KEY`       | —       | Key directa para el fallback de Groq |
 | `PROXY_IDLE_TIMEOUT` | off     | Sale tras este período de inactividad (duración Go, ej. `20m`) — habilita el uso on-demand |
 | `PROXY_MAX_BODY_BYTES` | `10485760` | Body de request máximo (10 MiB) — protege contra payloads gigantes |
 | `PROXY_MAX_RESPONSE_BYTES` | `26214400` | Respuesta upstream no-stream máxima en memoria (25 MiB) — protege contra OOM |
@@ -126,6 +128,9 @@ en vuelo antes de salir.
 | `PROXY_AGENTIC_URL`  | off     | Si se setea, los perfiles `agent`/`plan` van acá; sin setear → ruteo normal a OpenRouter |
 | `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Extractor git/sqlite del monorepo, opt-in (apagado por defecto) |
 | `PROXY_ADMIN_TOKEN`  | off     | Si se setea, protege `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` tras un token Bearer (comparación constant-time) |
+| `PROXY_VAULT_FILE` | `<dir-de-config>/calvoproxy/providers.vault` | Ruta del vault cifrado de proveedores |
+| `PROXY_VAULT_MASTER_KEY_FILE` | off | Archivo explícito de 32 bytes para Linux sin systemd; rechaza symlinks y permisos de grupo/mundo |
+| `PROXY_ADMIN_ALLOW_INSECURE_REMOTE` | `false` | Permite la consola de keys por HTTP remoto sin TLS; no recomendado |
 | `PROXY_METRICS_TOKEN` | off    | Si se setea, `/metrics` acepta este token O el admin — desacopla la credencial del scraper de la de admin |
 | `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Permite gastar la `OPENROUTER_API_KEY` del entorno para requests sin key en un bind **público** (loopback siempre lo permite) |
 | `PROXY_OAUTH_REQUIRE_STATE` | `true` | Exige un `state` CSRF coincidente en el callback de `calvoproxy login`. OpenRouter lo devuelve, así que viene activado; poné `false` solo para un proveedor que no lo haga (siguen aplicando el path secreto + PKCE) |
@@ -498,6 +503,29 @@ Chequeo rápido:
 ```bash
 curl -s http://127.0.0.1:8080/health
 ```
+
+## Consola de keys de proveedores
+
+Definí un `PROXY_ADMIN_TOKEN` fuerte, iniciá CalvoProxy y abrí
+`http://127.0.0.1:8080/admin/providers`. La consola web administra una key
+cifrada para OpenRouter, Cerebras y Groq, y permite probarla sin devolvérsela al
+navegador. La interfaz y todos sus mensajes operacionales están en inglés.
+
+El formato del vault es común, pero la llave maestra aleatoria de 256 bits queda
+bajo el sistema operativo: DPAPI CurrentUser en Windows, Keychain en builds
+nativos de macOS, y una credencial systemd o archivo protegido explícito en
+Linux headless. Ver [`docs/linux-headless-vault.md`](docs/linux-headless-vault.md).
+No existe fallback implícito a texto plano; si falta la llave maestra el vault
+queda bloqueado y las variables de entorno siguen funcionando.
+
+Precedencia efectiva:
+
+- OpenRouter: `Authorization` del request → entorno → vault → archivo login legado.
+- Cerebras: entorno → vault.
+- Groq: entorno → vault.
+
+Las credenciales ambientales de cualquier origen se rechazan para tráfico sin
+key sobre un bind público salvo que `PROXY_ALLOW_ENV_KEY_PUBLIC=true`.
 
 ## Iniciar sesión en OpenRouter (`calvoproxy login`)
 

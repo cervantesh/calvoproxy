@@ -2,8 +2,77 @@ package router
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
+
+const openRouterDailyFreeQuotaPrefix = "OpenRouter daily free-model quota exhausted"
+
+// openRouterDailyFreeQuotaMessage turns OpenRouter's account-wide daily free
+// quota response into an operator-facing explanation. A generic "HTTP 429"
+// makes clients look hung and encourages retries that cannot succeed; this
+// quota is shared by every :free model until the advertised UTC reset.
+func openRouterDailyFreeQuotaMessage(body string) (string, bool) {
+	details, ok := openRouterDailyFreeQuotaDetails(body)
+	return details.Message, ok
+}
+
+type dailyFreeQuotaDetails struct {
+	Message string
+	Reset   time.Time
+}
+
+func openRouterDailyFreeQuotaDetails(body string) (dailyFreeQuotaDetails, bool) {
+	var parsed struct {
+		Error struct {
+			Code     int `json:"code"`
+			Metadata struct {
+				Headers     map[string]string `json:"headers"`
+				LimitSource string            `json:"limit_source"`
+			} `json:"metadata"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil ||
+		parsed.Error.Code != 429 || parsed.Error.Metadata.LimitSource != "openrouter_free_tier_daily" {
+		return dailyFreeQuotaDetails{}, false
+	}
+
+	limit := quotaHeader(parsed.Error.Metadata.Headers, "X-RateLimit-Limit")
+	remaining := quotaHeader(parsed.Error.Metadata.Headers, "X-RateLimit-Remaining")
+	usage := "no requests remaining"
+	if limitValue, limitErr := strconv.ParseInt(limit, 10, 64); limitErr == nil {
+		if remainingValue, remainingErr := strconv.ParseInt(remaining, 10, 64); remainingErr == nil && remainingValue >= 0 && remainingValue <= limitValue {
+			usage = fmt.Sprintf("%d/%d", limitValue-remainingValue, limitValue)
+		}
+	}
+
+	resetText := "at the next daily reset"
+	var reset time.Time
+	if resetMillis, err := strconv.ParseInt(quotaHeader(parsed.Error.Metadata.Headers, "X-RateLimit-Reset"), 10, 64); err == nil {
+		reset = time.UnixMilli(resetMillis)
+		resetText = reset.UTC().Format("2006-01-02 15:04 UTC")
+		local := reset.Local()
+		if _, offset := local.Zone(); offset != 0 {
+			resetText += " (local time: " + local.Format("2006-01-02 15:04 -07:00") + ")"
+		}
+	}
+
+	return dailyFreeQuotaDetails{
+		Message: fmt.Sprintf("%s (%s). Resets: %s. Switching to another :free model will not help; wait for the reset or use a direct provider/paid model.", openRouterDailyFreeQuotaPrefix, usage, resetText),
+		Reset:   reset,
+	}, true
+}
+
+func quotaHeader(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
 
 // isProviderRelayedError reports whether an upstream error body is OpenRouter
 // relaying a failure from the PROVIDER it routed to, rather than rejecting the

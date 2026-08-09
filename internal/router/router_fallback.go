@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 var errAllFallbackModelsFailed = errors.New("all fallback models failed")
@@ -20,8 +21,9 @@ var errAllFallbackModelsFailed = errors.New("all fallback models failed")
 // It is only the loop's verdict, not the final answer. Context state outranks
 // it; see classifyChainFailure.
 type chainError struct {
-	reason chainFailureReason
-	err    error
+	reason           chainFailureReason
+	err              error
+	providerFailures []providerFailure
 }
 
 func (e *chainError) Error() string { return e.err.Error() }
@@ -90,24 +92,58 @@ type DefaultFallbackExecutor struct {
 	AttemptExecutor AttemptExecutor
 }
 
+type providerFailure struct {
+	Provider providerID
+	Error    *attemptError
+}
+
 func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWriter, execution FallbackExecution) error {
 	if e.AttemptExecutor == nil {
 		return &chainError{reason: chainExecutorError, err: errors.New("fallback attempt executor is not configured")}
 	}
 
 	var lastErr error
+	unavailableProviders := map[providerID]struct{}{}
+	unavailablePools := map[string]struct{}{}
+	unavailableAttempts := map[int]struct{}{}
+	providerFailures := make([]providerFailure, 0, 3)
+	reportedProviderFailure := make(map[providerID]struct{}, 3)
 	// stoppedEarly, not "did we break": a non-retryable error on the LAST model
 	// breaks out of the loop with nothing left untried, which is diagnostically
 	// "exhausted" — the chain got its full run. What makes "terminal" worth
 	// alerting on is that models REMAINED, so the failure cost the request
 	// options it never spent.
 	stoppedEarly := false
-	for attemptIndex, attempt := range execution.Attempts {
+	defer func() {
+		for _, attempt := range execution.Attempts {
+			if attempt.QuotaTicket.Valid() {
+				attempt.QuotaTicket.ledger.Release(attempt.QuotaTicket, time.Now())
+			}
+		}
+	}()
+	for attemptIndex := range execution.Attempts {
+		attempt := execution.Attempts[attemptIndex]
+		if _, unavailable := unavailableAttempts[attemptIndex]; unavailable {
+			continue
+		}
+		if _, unavailable := unavailableProviders[attempt.Provider]; unavailable {
+			continue
+		}
+		if quotaPoolUnavailable(attempt, unavailablePools) {
+			continue
+		}
 		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
 		execution.RequestBody["model"] = attempt.Model
 		upBytes, _ := json.Marshal(execution.RequestBody)
 		attempt.AttemptIndex = attemptIndex + 1
-		attempt.LastInChain = attemptIndex == len(execution.Attempts)-1
+		_, hasNextExecutable := nextExecutableAttempt(execution.Attempts, attemptIndex, unavailableProviders, unavailablePools, unavailableAttempts)
+		attempt.LastInChain = !hasNextExecutable
+		if hasNextExecutable && execution.ReserveQuota != nil {
+			attempt.ReserveFallback = func() bool {
+				_, ok := reserveNextExecutableAttempt(&execution, attemptIndex, unavailableProviders, unavailablePools, unavailableAttempts)
+				return ok
+			}
+		}
 
 		// Each non-streaming attempt gets its own deadline so a slow model is cut
 		// at PerAttemptTimeout, leaving the rest of the overall budget for the
@@ -129,6 +165,24 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ Fallback", slog.String("model", attempt.Model), slog.Any("error", err))
 			var attErr *attemptError
 			if errors.As(err, &attErr) {
+				if attErr.ProviderUnavailable {
+					unavailableProviders[attempt.Provider] = struct{}{}
+					if _, reported := reportedProviderFailure[attempt.Provider]; !reported {
+						providerFailures = append(providerFailures, providerFailure{Provider: attempt.Provider, Error: attErr})
+						reportedProviderFailure[attempt.Provider] = struct{}{}
+					}
+					continue
+				}
+				if attErr.QuotaLimited {
+					if _, reported := reportedProviderFailure[attempt.Provider]; !reported {
+						providerFailures = append(providerFailures, providerFailure{Provider: attempt.Provider, Error: attErr})
+						reportedProviderFailure[attempt.Provider] = struct{}{}
+					}
+				}
+				if attErr.QuotaPool != "" {
+					unavailablePools[quotaPoolKey(attempt.Provider, attErr.QuotaPool)] = struct{}{}
+					continue
+				}
 				// Model-specific unavailability (a retired OpenRouter :free slug
 				// → 404) or a soft skip (half-open probe already in flight): jump
 				// straight to the next model, no backoff — not the request's fault.
@@ -138,11 +192,15 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 				// Otherwise honour the retry policy: a terminal error that
 				// every model would hit (auth, malformed request) stops here.
 				if !shouldRetryAttempt(execution.RetryPolicy, attErr) {
-					stoppedEarly = attemptIndex < len(execution.Attempts)-1
+					_, stoppedEarly = nextExecutableAttempt(execution.Attempts, attemptIndex, unavailableProviders, unavailablePools, unavailableAttempts)
 					break
 				}
 			}
-			if attemptIndex < len(execution.Attempts)-1 {
+			// A different provider is an immediately usable fallback, not a
+			// retry of the failing upstream. Do not make it pay that upstream's
+			// backoff. Keep the existing backoff between models on the same
+			// provider, where it still protects that shared upstream.
+			if next, ok := nextExecutableAttempt(execution.Attempts, attemptIndex, unavailableProviders, unavailablePools, unavailableAttempts); ok && next.Provider == attempt.Provider {
 				waitBeforeRetry(ctx, execution.RetryPolicy, attemptIndex)
 			}
 		}
@@ -153,7 +211,7 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 		reason = chainTerminal
 	}
 	if lastErr != nil {
-		return &chainError{reason: reason, err: lastErr}
+		return &chainError{reason: reason, err: lastErr, providerFailures: providerFailures}
 	}
 	// Reached only with an empty Attempts slice. dispatchChain catches that case
 	// before calling the executor (it is the "all models cooling down" 503, which
@@ -162,10 +220,73 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 	return &chainError{reason: chainExhausted, err: errAllFallbackModelsFailed}
 }
 
+// nextExecutableAttempt returns the next candidate that has not been removed
+// by provider-wide evidence learned earlier in this chain. The raw slice tail
+// is not necessarily executable: it may consist entirely of sibling models
+// belonging to a provider whose account-wide quota has already been exhausted.
+func nextExecutableAttempt(attempts []modelAttempt, currentIndex int, unavailableProviders map[providerID]struct{}, unavailablePools map[string]struct{}, unavailableAttempts map[int]struct{}) (modelAttempt, bool) {
+	for i := currentIndex + 1; i < len(attempts); i++ {
+		if _, unavailable := unavailableAttempts[i]; unavailable {
+			continue
+		}
+		candidate := attempts[i]
+		if _, unavailable := unavailableProviders[candidate.Provider]; unavailable {
+			continue
+		}
+		if quotaPoolUnavailable(candidate, unavailablePools) {
+			continue
+		}
+		return candidate, true
+	}
+	return modelAttempt{}, false
+}
+
+func reserveNextExecutableAttempt(execution *FallbackExecution, currentIndex int, unavailableProviders map[providerID]struct{}, unavailablePools map[string]struct{}, unavailableAttempts map[int]struct{}) (modelAttempt, bool) {
+	for i := currentIndex + 1; i < len(execution.Attempts); i++ {
+		if _, unavailable := unavailableAttempts[i]; unavailable {
+			continue
+		}
+		candidate := execution.Attempts[i]
+		if _, unavailable := unavailableProviders[candidate.Provider]; unavailable {
+			continue
+		}
+		if quotaPoolUnavailable(candidate, unavailablePools) {
+			continue
+		}
+		if execution.ReserveQuota != nil && !candidate.QuotaTicket.Valid() {
+			ticket, ok := execution.ReserveQuota(candidate)
+			if !ok {
+				unavailableAttempts[i] = struct{}{}
+				continue
+			}
+			candidate.QuotaTicket = ticket
+			execution.Attempts[i] = candidate
+		}
+		return candidate, true
+	}
+	return modelAttempt{}, false
+}
+
+func quotaPoolKey(provider providerID, pool string) string {
+	return string(provider) + "\x00" + pool
+}
+
+func quotaPoolUnavailable(attempt modelAttempt, unavailablePools map[string]struct{}) bool {
+	if strings.HasSuffix(strings.ToLower(attempt.Model), ":free") {
+		_, unavailable := unavailablePools[quotaPoolKey(attempt.Provider, quotaFreePool)]
+		return unavailable
+	}
+	return false
+}
+
 func fallbackErrorResponse(err error) (int, string) {
 	statusCode := http.StatusBadGateway
 	message := errAllFallbackModelsFailed.Error()
 	if err != nil {
+		var chainErr *chainError
+		if errors.As(err, &chainErr) && len(chainErr.providerFailures) > 1 {
+			return http.StatusServiceUnavailable, multiProviderUnavailableMessage(chainErr.providerFailures)
+		}
 		message = err.Error()
 		var attErr *attemptError
 		if errors.As(err, &attErr) {
@@ -178,6 +299,74 @@ func fallbackErrorResponse(err error) (int, string) {
 	return statusCode, message
 }
 
+func fallbackRetryAfter(err error) time.Duration {
+	var chainErr *chainError
+	if !errors.As(err, &chainErr) {
+		return 0
+	}
+	var soonest time.Duration
+	for _, failure := range chainErr.providerFailures {
+		if failure.Error == nil || failure.Error.RetryAfter <= 0 {
+			continue
+		}
+		if soonest == 0 || failure.Error.RetryAfter < soonest {
+			soonest = failure.Error.RetryAfter
+		}
+	}
+	return soonest
+}
+
+func multiProviderUnavailableMessage(failures []providerFailure) string {
+	parts := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		parts = append(parts, providerDisplayName(failure.Provider)+": "+safeProviderFailureSummary(failure.Error))
+	}
+	return "All configured model providers are temporarily rate-limited or unavailable. " + strings.Join(parts, "; ") + ". Automatic routing will retry them after their cooldowns."
+}
+
+func providerDisplayName(provider providerID) string {
+	switch provider {
+	case providerOpenRouter:
+		return "OpenRouter"
+	case providerCerebras:
+		return "Cerebras"
+	case providerGroq:
+		return "Groq"
+	default:
+		return string(provider)
+	}
+}
+
+func safeProviderFailureSummary(err *attemptError) string {
+	if err == nil {
+		return "unavailable"
+	}
+	if strings.HasPrefix(err.Message, openRouterDailyFreeQuotaPrefix) {
+		if resetAt := strings.Index(err.Message, "Resets: "); resetAt >= 0 {
+			reset := err.Message[resetAt+len("Resets: "):]
+			if end := strings.Index(reset, "."); end >= 0 {
+				reset = reset[:end]
+			}
+			return "daily free-model quota exhausted; resets " + reset
+		}
+		return "daily free-model quota exhausted"
+	}
+	if err.Timeout {
+		return "timed out"
+	}
+	switch err.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "authentication or account authorization failed"
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return "rate limited or temporarily unavailable"
+	default:
+		if err.StatusCode >= 500 {
+			return "temporarily unavailable"
+		}
+		return "request rejected"
+	}
+}
+
 type routerAttemptExecutor struct {
 	service *RouterService
 }
@@ -187,6 +376,20 @@ func (e routerAttemptExecutor) ExecuteAttempt(ctx context.Context, w http.Respon
 }
 
 func (s *RouterService) executeFallbacks(ctx context.Context, w http.ResponseWriter, execution FallbackExecution) error {
+	if execution.ReserveQuota == nil {
+		baseEstimate := estimateRequestQuota(execution.RequestBody)
+		execution.ReserveQuota = func(attempt modelAttempt) (QuotaTicket, bool) {
+			credential, configured := s.providerCredential(ctx, attempt, execution.APIKey)
+			if !configured {
+				return QuotaTicket{}, false
+			}
+			estimate := attempt.QuotaEstimate
+			if estimate.Requests <= 0 || estimate.Tokens <= 0 {
+				estimate = providerQuotaEstimate(attempt, baseEstimate)
+			}
+			return s.reserveFallbackQuota(attempt, credential, estimate, time.Now())
+		}
+	}
 	executor := s.Fallbacks
 	if executor == nil {
 		executor = DefaultFallbackExecutor{AttemptExecutor: routerAttemptExecutor{service: s}}

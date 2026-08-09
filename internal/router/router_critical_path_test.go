@@ -213,6 +213,37 @@ func TestDispatch_AllModelsCoolingDownAdvertisesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestDispatch_AllModelsCoolingDownPreservesDailyFreeQuotaReason(t *testing.T) {
+	upstream := &recordingTransport{}
+	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"model-a", "model-b"}},
+		Aliases:        map[string]string{"default": "coding", "coding": "coding"},
+	})
+	svc.config.FailureThreshold = 1
+	quotaMessage, ok := openRouterDailyFreeQuotaMessage(realDailyFreeQuota429)
+	if !ok {
+		t.Fatal("premise: captured daily quota response was not recognized")
+	}
+	for _, model := range []string{"model-a", "model-b"} {
+		svc.recordFailure(modelAttempt{Profile: "coding", Model: model}, http.StatusServiceUnavailable, quotaMessage)
+	}
+
+	rec := httptest.NewRecorder()
+	svc.RouteRequestWithProvider(rec, trustedRequest(
+		http.MethodPost, "/v1/chat/completions", `{"messages":[]}`), "k", "")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("all-open chain should be 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "OpenRouter daily free-model quota exhausted") {
+		t.Fatalf("cooling response lost the actionable quota reason: %s", rec.Body.String())
+	}
+	if upstream.calls != 0 {
+		t.Errorf("an open breaker must not reach upstream, got %d calls", upstream.calls)
+	}
+}
+
 // A caller who pins a model that cannot see images gets a clear 422 instead of
 // a silent upstream breakage. 422 is deliberate: it is not retryable, unlike
 // the 503 the chain returns when NO model qualifies.

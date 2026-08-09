@@ -10,6 +10,8 @@ const (
 	defaultOllamaBaseURL         = "http://ollama:11434"
 	defaultOpenRouterChatURL     = "https://openrouter.ai/api/v1/chat/completions"
 	defaultOpenRouterMessagesURL = "https://openrouter.ai/api/v1/messages"
+	defaultCerebrasChatURL       = "https://api.cerebras.ai/v1/chat/completions"
+	defaultGroqChatURL           = "https://api.groq.com/openai/v1/chat/completions"
 )
 
 // openRouterMessagesURL resolves the upstream Anthropic /messages endpoint. It
@@ -55,6 +57,10 @@ func (DefaultAttemptTargetResolver) Resolve(attempt modelAttempt, path string) A
 		}
 	}
 	switch attempt.Provider {
+	case providerCerebras:
+		return AttemptTarget{URL: targetURL("PROXY_CEREBRAS_URL", defaultCerebrasChatURL)}
+	case providerGroq:
+		return AttemptTarget{URL: targetURL("PROXY_GROQ_URL", defaultGroqChatURL)}
 	case providerAnthropic:
 		return AttemptTarget{URL: targetURL("PROXY_ANTHROPIC_URL", defaultAnthropicBaseURL) + path}
 	case providerOpenAI:
