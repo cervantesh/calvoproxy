@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-09
+
 ### Added
 - **Hermes-owned proactive compaction integration.** An optional Hermes context
   engine now compacts at a client-side operational threshold, guards against
@@ -952,7 +954,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.18.0
 [0.15.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.15.0
 [0.14.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.14.0
 [0.13.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.13.0
