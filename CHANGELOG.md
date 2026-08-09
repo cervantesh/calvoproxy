@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-09
+
 ### Added
 - **Soft session affinity across provider fallbacks.** Clients may send
   `X-Calvoproxy-Session-Id`, `X-Claude-Code-Session-Id`, `X-Session-Id`, or
