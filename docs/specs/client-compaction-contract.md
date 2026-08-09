@@ -38,6 +38,8 @@ compaction header; it must not smuggle the metadata into the prompt.
 - `X-Calvoproxy-Model`, `X-Calvoproxy-Profile`, and
   `X-Calvoproxy-Attempt`: the route that served the request and whether fallback
   was required.
+- `X-Calvoproxy-Decision-Id`: an ephemeral diagnostic correlation value only;
+  clients must not persist it or treat it as conversation identity.
 
 Clients must tolerate every hint being absent. They do not derive deletion or
 summary policy from proxy headers. A quota hint can delay a retry; it cannot

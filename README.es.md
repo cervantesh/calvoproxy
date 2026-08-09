@@ -65,6 +65,12 @@ custom_providers:
 - **El gateway NO relee `config.yaml` en caliente.** Reinicialo después de
   editar, o no cambia nada.
 
+Hermes también puede ser dueño de la compactación proactiva de la conversación
+sin sacar estado hacia CalvoProxy. La integración opcional del motor de
+contexto, el puente local de `cervo-compress`, el fallback nativo seguro y el
+contrato de metadatos compartido con Pi están documentados en
+[`client-compaction-contract.md`](docs/specs/client-compaction-contract.md).
+
 Confirmá que surtió efecto — los contadores del propio proxy son la única
 prueba:
 
