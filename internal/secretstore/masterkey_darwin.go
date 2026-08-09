@@ -92,7 +92,7 @@ func addDarwinKeychainItem(accountValue string, key []byte) C.OSStatus {
 	account := C.CString(accountValue)
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
-	return C.SecKeychainAddGenericPassword(C.CFTypeRef(0),
+	return C.SecKeychainAddGenericPassword(C.SecKeychainRef(0),
 		C.UInt32(len(darwinKeychainService)), service,
 		C.UInt32(len(accountValue)), account,
 		C.UInt32(len(key)), unsafe.Pointer(&key[0]), nil)
