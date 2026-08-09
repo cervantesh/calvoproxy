@@ -1,0 +1,3 @@
+name: calvoproxy
+description: Proactive Hermes compaction with local cervo-compress preprocessing and native fallback
+version: 1

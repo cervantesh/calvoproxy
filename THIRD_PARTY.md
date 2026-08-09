@@ -1,12 +1,15 @@
 # Vendored dependencies
 
 Most of this repo's dependencies are ordinary Go modules pinned by `go.sum`.
-The `github.com/cervantesh/cervo-*` modules are not, and anyone auditing,
-forking, or trusting this proxy should know exactly how they differ.
+The locally replaced `github.com/cervantesh/cervo-*` modules are not, and
+anyone auditing, forking, or trusting this proxy should know exactly how they
+differ. `cervo-compress` is the exception: it is a public, checksummed module,
+but its vendored copy is still covered by the manifest below.
 
 ## What the state actually is
 
-`go.mod` declares each of them with a `replace` pointing into `./third_party/`:
+`go.mod` declares each locally sourced module with a `replace` pointing into
+`./third_party/`:
 
 ```
 replace github.com/cervantesh/cervo-rules/v3 => ./third_party/cervo-rules
@@ -51,6 +54,7 @@ change that should be loud.
 
 | Module | Files | What it does here |
 |---|---|---|
+| `cervo-compress` | 8 | Public, checksummed tool-result preprocessing used by the local client bridge; no network or model calls. |
 | `cervo-rules/v3` | 21 | Policy engine: the allow/deny decision, operation targets, limits. Every request passes through it. |
 | `cervo-config` | 9 | Configuration loading and the CalvoProxy-specific config shape. |
 | `cervo-httpkit` | 5 | HTTP transport helpers, including the global (host-level) breaker transport. |

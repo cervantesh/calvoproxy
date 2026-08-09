@@ -11,6 +11,15 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Added
+- **Hermes-owned proactive compaction integration.** An optional Hermes context
+  engine now compacts at a client-side operational threshold, guards against
+  overlapping/repeated passes, validates a six-field continuity summary, and
+  falls back to Hermes' untouched native summary whenever validation fails.
+  The local `calvoproxy compact-tools` bridge exposes the vendored
+  `cervo-compress` pipeline to Hermes without moving conversation state into
+  the proxy or making a network call.
+
 ## [0.17.0] — 2026-08-09
 
 ### Added

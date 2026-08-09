@@ -12,6 +12,8 @@
 *.exe.*
 *.log
 *~
+__pycache__/
+*.py[cod]
 .env
 /calvoproxy
 /calvoproxy.exe

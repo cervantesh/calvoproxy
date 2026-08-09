@@ -370,6 +370,12 @@ calvoproxy setup claude-code --revert     # undo, byte for byte
 
 Supported: `hermes`, `claude-code`, `codex`.
 
+Hermes can also own proactive conversation compaction while continuing to use
+CalvoProxy only for routing. The optional context-engine integration, local
+`cervo-compress` bridge, safe native fallback, and shared Pi/Hermes metadata
+contract are documented in
+[`client-compaction-contract.md`](docs/specs/client-compaction-contract.md).
+
 Editing another program's config is the one destructive thing this tool does, so
 **`--check` is the default and never touches disk**, every write is preceded by a
 byte-for-byte backup, and formats that carry comments are patched as a
