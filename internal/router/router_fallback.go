@@ -159,8 +159,14 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 			cancel()
 		}
 		if err == nil {
+			if execution.OnSuccess != nil {
+				execution.OnSuccess(attempt)
+			}
 			return nil
 		} else {
+			if execution.OnFailure != nil {
+				execution.OnFailure(attempt)
+			}
 			lastErr = err
 			slog.WarnContext(ctx, "[CalvoProxy] ⚠️ Fallback", slog.String("model", attempt.Model), slog.Any("error", err))
 			var attErr *attemptError
@@ -376,6 +382,12 @@ func (e routerAttemptExecutor) ExecuteAttempt(ctx context.Context, w http.Respon
 }
 
 func (s *RouterService) executeFallbacks(ctx context.Context, w http.ResponseWriter, execution FallbackExecution) error {
+	if execution.OnSuccess == nil {
+		execution.OnSuccess = func(attempt modelAttempt) { s.recordAffinitySuccess(ctx, attempt) }
+	}
+	if execution.OnFailure == nil {
+		execution.OnFailure = func(attempt modelAttempt) { s.recordAffinityFailure(ctx, attempt) }
+	}
 	if execution.ReserveQuota == nil {
 		baseEstimate := estimateRequestQuota(execution.RequestBody)
 		execution.ReserveQuota = func(attempt modelAttempt) (QuotaTicket, bool) {

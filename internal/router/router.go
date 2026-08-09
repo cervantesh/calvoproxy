@@ -81,6 +81,7 @@ func NewRouterService() *RouterService {
 		config:           config,
 		policy:           providerPolicy,
 		providerProfiles: providerProfiles,
+		contextWindows:   loadContextWindows(),
 		modelPolicy:      modelPolicy,
 		modelWarnings:    modelRuntime.Warnings,
 		modelStrict:      modelRuntime.Strict,
@@ -92,8 +93,11 @@ func NewRouterService() *RouterService {
 		providerBalance:  make(map[providerID]int64),
 		quota:            NewQuotaLedger(),
 		quotaCooldowns:   make(map[string]time.Time),
-		admission:        newAdmissionControl(),
-		capabilities:     newCapabilityIndex(loadCapabilityOverrides()),
+		affinity: newAffinityStore(randomAffinitySecret(),
+			time.Duration(envInt("PROXY_AFFINITY_TTL_SECONDS", 86400))*time.Second,
+			envInt("PROXY_AFFINITY_MAX_ENTRIES", 8192)),
+		admission:    newAdmissionControl(),
+		capabilities: newCapabilityIndex(loadCapabilityOverrides()),
 	}
 	// Best-effort background auto-derive of model capabilities from OpenRouter;
 	// the manual overrides above already cover the chain models synchronously.
@@ -128,6 +132,9 @@ func (s *RouterService) RouteRequest(w http.ResponseWriter, r *http.Request, api
 
 func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.Request, apiKey string, provider string) {
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	if s.affinity != nil {
+		ctx = withAffinityKey(ctx, s.affinity.keyForRequest(r, apiKey))
+	}
 	tracer := otel.Tracer("calvoproxy/router")
 	ctx, span := tracer.Start(ctx, "RouteRequest_Proxy")
 	defer span.End()
@@ -325,12 +332,27 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	}
 	afterCaps := len(attemptsToTry)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
+	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
+		if cstat.applied() {
+			reqBody = compressed
+		}
+		traceFrom(ctx).recordCompression(cstat)
+	}
+	quotaEstimate := estimateRequestQuota(reqBody)
+	contextEstimate := estimateRequestContext(reqBody)
+	beforeContext := len(availableModels)
+	availableModels, contextExcluded := s.filterContextFit(availableModels, contextEstimate)
+	if beforeContext > 0 && len(availableModels) == 0 && contextExcluded == beforeContext {
+		failTrace(ctx, w, outcomeAllCooling)
+		writeJSONError(w, http.StatusUnprocessableEntity,
+			"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
+		return
+	}
 	beforeQuota := len(availableModels)
 	// Balance providers by their predicted normalized quota pressure. The
 	// primary reservation is atomic across request/token windows; models are
 	// interleaved across providers before MaxAttempts truncation so fallbacks
 	// cannot accidentally lose all provider diversity.
-	quotaEstimate := estimateRequestQuota(reqBody)
 	availableModels = s.quotaRankAndReserve(ctx, availableModels, apiKey, quotaEstimate)
 	traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
 	if len(availableModels) > 0 && availableModels[0].QuotaTicket.Valid() {
@@ -389,12 +411,6 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	perAttempt := s.config.RequestTimeout
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
-	}
-	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
-		if cstat.applied() {
-			reqBody = compressed
-		}
-		traceFrom(ctx).recordCompression(cstat)
 	}
 	err := s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody:       reqBody,
@@ -708,6 +724,7 @@ func (s *RouterService) ReloadModelPolicy() error {
 	s.setModelPolicyConfig(runtime.Config)
 	s.setProviderProfiles(loadProviderProfiles())
 	s.policyMu.Lock()
+	s.contextWindows = loadContextWindows()
 	s.modelWarnings = runtime.Warnings
 	s.modelStrict = runtime.Strict
 	s.policyMu.Unlock()

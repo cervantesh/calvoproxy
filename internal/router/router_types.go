@@ -149,6 +149,7 @@ type RouterService struct {
 	policyMu         sync.RWMutex // guards policy + modelPolicy for hot-reload
 	policy           policyConfig
 	providerProfiles providerProfiles
+	contextWindows   contextWindowIndex
 	modelPolicy      *cervomodelpolicy.Policy
 	modelWarnings    []cervomodelpolicy.ValidationIssue
 	modelStrict      bool
@@ -169,6 +170,7 @@ type RouterService struct {
 	quota           *QuotaLedger
 	quotaCooldownMu sync.RWMutex
 	quotaCooldowns  map[string]time.Time
+	affinity        *affinityStore
 	// scoreAttempts counts every scored outcome, proxy-wide. It is the "evidence
 	// clock" score decay is measured against (see router_scoring.go).
 	scoreAttempts atomic.Int64
@@ -239,6 +241,12 @@ type FallbackExecution struct {
 	// ReserveQuota atomically claims quota for a fallback at the instant a
 	// streaming attempt reaches its first-event fail-fast boundary.
 	ReserveQuota func(modelAttempt) (QuotaTicket, bool)
+	// OnSuccess observes the route that actually produced the response. It runs
+	// only after a complete non-stream response or a cleanly completed stream.
+	OnSuccess func(modelAttempt)
+	// OnFailure lets soft affinity release a route as soon as it fails. A later
+	// successful fallback then becomes the new preference.
+	OnFailure func(modelAttempt)
 }
 
 type AttemptTarget struct {
