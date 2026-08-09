@@ -71,7 +71,7 @@ func (s *darwinMasterKeySource) find() ([]byte, error) {
 	defer C.free(unsafe.Pointer(account))
 	var length C.UInt32
 	var data unsafe.Pointer
-	status := C.SecKeychainFindGenericPassword(C.SecKeychainRef(0),
+	status := C.SecKeychainFindGenericPassword(C.CFTypeRef(0),
 		C.UInt32(len(darwinKeychainService)), service,
 		C.UInt32(len(s.account)), account, &length, &data, nil)
 	if status == C.errSecItemNotFound {
@@ -80,7 +80,7 @@ func (s *darwinMasterKeySource) find() ([]byte, error) {
 	if status != C.errSecSuccess {
 		return nil, fmt.Errorf("read macOS Keychain master key: OSStatus %d", int32(status))
 	}
-	defer C.SecKeychainItemFreeContent(C.CFTypeRef(0), data)
+	defer C.SecKeychainItemFreeContent(nil, data)
 	if int(length) != darwinMasterKeySize {
 		return nil, fmt.Errorf("read macOS Keychain master key: %w", ErrInvalidKey)
 	}
@@ -92,7 +92,7 @@ func addDarwinKeychainItem(accountValue string, key []byte) C.OSStatus {
 	account := C.CString(accountValue)
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
-	return C.SecKeychainAddGenericPassword(C.SecKeychainRef(0),
+	return C.SecKeychainAddGenericPassword(C.CFTypeRef(0),
 		C.UInt32(len(darwinKeychainService)), service,
 		C.UInt32(len(accountValue)), account,
 		C.UInt32(len(key)), unsafe.Pointer(&key[0]), nil)
