@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-09
+
 ### Added
 - **Hermes-owned proactive compaction integration.** An optional Hermes context
   engine now compacts at a client-side operational threshold, guards against
