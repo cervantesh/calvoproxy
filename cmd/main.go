@@ -397,6 +397,8 @@ func main() {
 			os.Exit(runDoctor(os.Args[2:]))
 		case "chat":
 			os.Exit(runChat(os.Args[2:]))
+		case "compact-tools":
+			os.Exit(runCompactTools(os.Args[2:]))
 		case "setup":
 			os.Exit(runSetup(os.Args[2:]))
 		case "version", "--version", "-v":
