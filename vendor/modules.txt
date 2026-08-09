@@ -1,3 +1,6 @@
+# github.com/cervantesh/cervo-compress v0.0.0-20260805105237-61a3f522f7e8
+## explicit; go 1.26
+github.com/cervantesh/cervo-compress
 # github.com/cervantesh/cervo-config v0.3.0 => ./third_party/cervo-config
 ## explicit; go 1.25.6
 github.com/cervantesh/cervo-config
