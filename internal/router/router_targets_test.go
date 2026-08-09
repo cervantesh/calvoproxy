@@ -13,6 +13,8 @@ func TestDefaultAttemptTargetResolver(t *testing.T) {
 		{"anthropic", modelAttempt{Provider: providerAnthropic}, defaultAnthropicBaseURL + chatCompletionsPath, false},
 		{"openai", modelAttempt{Provider: providerOpenAI}, defaultOpenAIBaseURL + chatCompletionsPath, false},
 		{"ollama", modelAttempt{Provider: providerOllama}, defaultOllamaBaseURL + chatCompletionsPath, false},
+		{"cerebras", modelAttempt{Provider: providerCerebras}, defaultCerebrasChatURL, false},
+		{"groq", modelAttempt{Provider: providerGroq}, defaultGroqChatURL, false},
 		{"openrouter default", modelAttempt{Provider: providerOpenRouter}, defaultOpenRouterChatURL, false},
 		// With no PROXY_AGENTIC_URL configured, an agent profile falls through to
 		// normal provider routing (OpenRouter default) instead of a sidecar.

@@ -11,6 +11,38 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-09
+
+CalvoProxy can now spend multiple free-provider allowances as one coordinated
+pool without treating every provider as if it followed OpenRouter's rules. It
+also gains a secure, browser-based key console so a provider outage is visible
+and recoverable without editing process credentials by hand.
+
+### Added
+- **Independent OpenRouter, Cerebras, and Groq routing with global selection.**
+  Each provider keeps its own quota dimensions and reset observations, while the
+  scheduler balances normalized pressure, latency, and reliability. Real calls
+  are counted per provider and a failing provider cannot receive another
+  provider's credential.
+- **Encrypted provider vault and responsive admin console.** One managed key per
+  provider, AES-256-GCM at rest, immediate hot rotation, environment override
+  visibility, sanitized connectivity tests, and English operational messages at
+  `/admin/providers`.
+- **Native master-key custody.** Windows uses DPAPI CurrentUser, native macOS
+  builds use Security.framework Keychain, and headless Linux accepts a systemd
+  credential or an explicitly mounted private 32-byte key file.
+
+### Security
+- Provider-key administration requires a non-empty admin token, refuses remote
+  plaintext HTTP by default, uses opaque HttpOnly SameSite sessions plus
+  Origin/CSRF checks, and never returns secret-derived suffixes or hashes.
+- Legacy OpenRouter login keys migrate only after a verified vault round trip;
+  conflicts and locked vaults preserve the original file.
+
+### Fixed
+- Linux CI builds no longer compile Windows console-detachment calls or fail on
+  dead declarations in the auxiliary load-balancer command.
+
 ## [0.15.0] — 2026-08-07
 
 The policy stopped keeping its own numbers in Go. What decides is now written

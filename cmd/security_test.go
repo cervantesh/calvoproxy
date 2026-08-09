@@ -67,6 +67,44 @@ func TestResolveAPIKey_PublicBindRefusesEnvKeyWithoutOptIn(t *testing.T) {
 	}
 }
 
+func TestRequirePostAPIKeyAcceptsConfiguredDirectProviderOnLoopback(t *testing.T) {
+	oldBind := bindHost
+	defer func() { bindHost = oldBind }()
+	bindHost = "127.0.0.1"
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("CEREBRAS_API_KEY", "cerebras-key")
+	t.Setenv("GROQ_API_KEY", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	key, ok := requirePostAPIKey(rec, req)
+	if !ok || key != "" {
+		t.Fatalf("a configured direct provider should authorize local routing without an OpenRouter key: ok=%v key=%q status=%d", ok, key, rec.Code)
+	}
+}
+
+func TestRequirePostAPIKeyRefusesAmbientDirectProviderOnPublicBind(t *testing.T) {
+	oldBind := bindHost
+	defer func() { bindHost = oldBind }()
+	bindHost = "0.0.0.0"
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("CEREBRAS_API_KEY", "cerebras-key")
+	t.Setenv("GROQ_API_KEY", "groq-key")
+	t.Setenv("PROXY_ALLOW_ENV_KEY_PUBLIC", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	if _, ok := requirePostAPIKey(rec, req); ok || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("public bind must not spend ambient direct-provider keys without opt-in: ok=%v status=%d", ok, rec.Code)
+	}
+
+	t.Setenv("PROXY_ALLOW_ENV_KEY_PUBLIC", "true")
+	rec = httptest.NewRecorder()
+	if _, ok := requirePostAPIKey(rec, req); !ok {
+		t.Fatalf("explicit public-bind opt-in should authorize configured direct providers, status=%d", rec.Code)
+	}
+}
+
 func TestMetricsAuth_SeparateToken(t *testing.T) {
 	handler := metricsAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

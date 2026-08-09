@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -97,6 +98,35 @@ func TestHealthIncludesGeneratedPolicyMetadata(t *testing.T) {
 	}
 	if health.PolicyHash == "" || health.PolicyVocabHash == "" {
 		t.Fatalf("expected generated policy hashes in health, got %+v", health)
+	}
+}
+
+func TestHealthReportsProviderConfigurationAndBreakerStateWithoutSecrets(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("CEREBRAS_API_KEY", "cerebras-secret-value")
+	t.Setenv("GROQ_API_KEY", "")
+	svc := NewRouterService()
+	svc.recordProviderAttempt(providerCerebras, false)
+	svc.recordProviderFailure(modelAttempt{Provider: providerCerebras}, http.StatusTooManyRequests, "rate limited", true, time.Minute)
+	health := svc.Health()
+	if len(health.Providers) != 3 {
+		t.Fatalf("expected three provider statuses, got %+v", health.Providers)
+	}
+	var cerebras ProviderSnapshot
+	for _, provider := range health.Providers {
+		if provider.Provider == string(providerCerebras) {
+			cerebras = provider
+		}
+	}
+	if !cerebras.Configured || cerebras.State != "open" || cerebras.LastFailureCode != http.StatusTooManyRequests || cerebras.Attempts != 1 || cerebras.ReliabilityScore <= 0 {
+		t.Fatalf("unexpected Cerebras health: %+v", cerebras)
+	}
+	body, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "cerebras-secret-value") {
+		t.Fatal("health response leaked a provider credential")
 	}
 }
 

@@ -5,16 +5,27 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 type fakeAttemptExecutor struct {
-	errs     []error
-	attempts []modelAttempt
-	bodies   [][]byte
+	errs                []error
+	attempts            []modelAttempt
+	bodies              [][]byte
+	invokeFallbackGuard bool
+	guardResults        []bool
 }
 
 func (e *fakeAttemptExecutor) ExecuteAttempt(_ context.Context, _ http.ResponseWriter, body []byte, _ string, attempt modelAttempt) error {
+	if e.invokeFallbackGuard && attempt.ReserveFallback != nil {
+		available := attempt.ReserveFallback()
+		e.guardResults = append(e.guardResults, available)
+		if !available {
+			attempt.LastInChain = true
+		}
+	}
 	e.attempts = append(e.attempts, attempt)
 	e.bodies = append(e.bodies, append([]byte(nil), body...))
 	if len(e.errs) == 0 {
@@ -121,6 +132,140 @@ func TestDefaultFallbackExecutorAdvancesOnModelUnavailable(t *testing.T) {
 	}
 }
 
+func TestDefaultFallbackExecutorMarksLastActuallyExecutableAttemptAfterProviderExclusion(t *testing.T) {
+	executor := &fakeAttemptExecutor{
+		errs: []error{
+			&attemptError{
+				StatusCode:          http.StatusTooManyRequests,
+				Message:             openRouterDailyFreeQuotaPrefix,
+				Retryable:           true,
+				ProviderUnavailable: true,
+			},
+			nil,
+		},
+	}
+	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}
+
+	err := fallback.Execute(context.Background(), httptest.NewRecorder(), FallbackExecution{
+		RequestBody: map[string]interface{}{"messages": []interface{}{}},
+		APIKey:      "test-key",
+		Attempts: []modelAttempt{
+			{Profile: "coding", Provider: providerOpenRouter, Model: "or-primary:free"},
+			{Profile: "coding", Provider: providerCerebras, Model: "gpt-oss-120b"},
+			// This is the raw slice tail, but the first result excluded its
+			// provider globally, so it must not prevent Cerebras from being
+			// treated as the final executable attempt.
+			{Profile: "coding", Provider: providerOpenRouter, Model: "or-sibling:free"},
+		},
+		RetryPolicy: RetryPolicy{RetryHTTPStatuses: []int{http.StatusTooManyRequests}},
+	})
+
+	if err != nil {
+		t.Fatalf("expected Cerebras fallback success, got %v", err)
+	}
+	if len(executor.attempts) != 2 {
+		t.Fatalf("expected OpenRouter and Cerebras only, got %+v", executor.attempts)
+	}
+	if executor.attempts[0].LastInChain {
+		t.Fatal("OpenRouter primary must not be last while Cerebras remains executable")
+	}
+	if got := executor.attempts[1]; got.Provider != providerCerebras || !got.LastInChain {
+		t.Fatalf("expected Cerebras to be the last executable attempt, got %+v", got)
+	}
+}
+
+func TestDefaultFallbackExecutorMarksCurrentLastWhenFutureQuotaReservationLosesRace(t *testing.T) {
+	executor := &fakeAttemptExecutor{errs: []error{nil}, invokeFallbackGuard: true}
+	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}
+	reservationCalls := 0
+
+	err := fallback.Execute(context.Background(), httptest.NewRecorder(), FallbackExecution{
+		RequestBody: map[string]interface{}{"messages": []interface{}{}},
+		APIKey:      "test-key",
+		Attempts: []modelAttempt{
+			{Profile: "coding", Provider: providerOpenRouter, Model: "current:free"},
+			{Profile: "coding", Provider: providerCerebras, Model: "raced-out"},
+		},
+		ReserveQuota: func(modelAttempt) (QuotaTicket, bool) {
+			reservationCalls++
+			return QuotaTicket{}, false
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected current attempt success, got %v", err)
+	}
+	if reservationCalls != 1 {
+		t.Fatalf("expected one atomic look-ahead reservation, got %d", reservationCalls)
+	}
+	if len(executor.guardResults) != 1 || executor.guardResults[0] {
+		t.Fatalf("fail-fast guard must reject abandonment without reserved fallback: %v", executor.guardResults)
+	}
+	if len(executor.attempts) != 1 || !executor.attempts[0].LastInChain {
+		t.Fatalf("current attempt must be protected as last after the fallback loses quota: %+v", executor.attempts)
+	}
+}
+
+func TestDefaultFallbackExecutorDoesNotReserveFallbackDuringHealthyPrimary(t *testing.T) {
+	executor := &fakeAttemptExecutor{errs: []error{nil}}
+	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}
+	reservationCalls := 0
+
+	err := fallback.Execute(context.Background(), httptest.NewRecorder(), FallbackExecution{
+		RequestBody: map[string]interface{}{"messages": []interface{}{}},
+		APIKey:      "test-key",
+		Attempts: []modelAttempt{
+			{Profile: "coding", Provider: providerOpenRouter, Model: "healthy:free"},
+			{Profile: "coding", Provider: providerCerebras, Model: "unused"},
+		},
+		ReserveQuota: func(modelAttempt) (QuotaTicket, bool) {
+			reservationCalls++
+			return QuotaTicket{}, false
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected primary success, got %v", err)
+	}
+	if reservationCalls != 0 {
+		t.Fatalf("healthy primary must not reserve unused fallback quota, got %d calls", reservationCalls)
+	}
+}
+
+func TestDefaultFallbackExecutorDoesNotBackoffBeforeAvailableDifferentProvider(t *testing.T) {
+	executor := &fakeAttemptExecutor{
+		errs: []error{
+			&attemptError{StatusCode: http.StatusBadGateway, Message: "first failed", Retryable: true},
+			&attemptError{StatusCode: http.StatusBadGateway, Message: "second failed", Retryable: true},
+			nil,
+		},
+	}
+	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}
+	started := time.Now()
+
+	err := fallback.Execute(context.Background(), httptest.NewRecorder(), FallbackExecution{
+		RequestBody: map[string]interface{}{"messages": []interface{}{}},
+		APIKey:      "test-key",
+		Attempts: []modelAttempt{
+			{Profile: "coding", Provider: providerOpenRouter, Model: "or-one:free"},
+			{Profile: "coding", Provider: providerOpenRouter, Model: "or-two:free"},
+			{Profile: "coding", Provider: providerCerebras, Model: "gpt-oss-120b"},
+		},
+		RetryPolicy: RetryPolicy{
+			RetryHTTPStatuses: []int{http.StatusBadGateway},
+			BackoffMin:        500 * time.Millisecond,
+			BackoffMax:        500 * time.Millisecond,
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected different-provider fallback success, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("different provider was delayed by retry backoff: %v", elapsed)
+	}
+}
+
 func TestIsModelUnavailableClassification(t *testing.T) {
 	cases := []struct {
 		name string
@@ -159,5 +304,31 @@ func TestFallbackErrorResponseDefaultsToBadGateway(t *testing.T) {
 	}
 	if message != "boom" {
 		t.Fatalf("expected original error message, got %q", message)
+	}
+}
+
+func TestFallbackErrorResponseSummarizesMultipleProvidersWithoutRawDetails(t *testing.T) {
+	err := &chainError{
+		reason: chainExhausted,
+		err:    errors.New("raw final provider response containing secret-token"),
+		providerFailures: []providerFailure{
+			{Provider: providerOpenRouter, Error: &attemptError{StatusCode: http.StatusTooManyRequests, Message: openRouterDailyFreeQuotaPrefix + " (50/50). Resets: 2026-08-09 00:00 UTC.", ProviderUnavailable: true}},
+			{Provider: providerCerebras, Error: &attemptError{StatusCode: http.StatusTooManyRequests, Message: "raw-cerebras-secret", ProviderUnavailable: true}},
+			{Provider: providerGroq, Error: &attemptError{StatusCode: http.StatusUnauthorized, Message: "raw-groq-secret", ProviderUnavailable: true}},
+		},
+	}
+	status, message := fallbackErrorResponse(err)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", status)
+	}
+	for _, expected := range []string{"All configured model providers are temporarily rate-limited or unavailable", "OpenRouter: daily free-model quota exhausted", "Cerebras: rate limited", "Groq: authentication"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("missing %q in %q", expected, message)
+		}
+	}
+	for _, forbidden := range []string{"secret-token", "raw-cerebras-secret", "raw-groq-secret"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("aggregate message leaked raw provider details %q: %q", forbidden, message)
+		}
 	}
 }

@@ -63,6 +63,7 @@ func NewRouterService() *RouterService {
 
 	policyEngine, runtimeConfig := loadPolicyFlow(config.RequestTimeout, config.FailureThreshold, config.Cooldown)
 	modelRuntime := loadModelPolicyRuntime()
+	providerProfiles := loadProviderProfiles()
 	if modelRuntime.Strict && len(modelRuntime.Warnings) > 0 {
 		policyEngine = denyAllPolicyEngine("model policy strict validation failed")
 	}
@@ -73,21 +74,26 @@ func NewRouterService() *RouterService {
 		// whole-request deadline. Header arrival is bounded by the transport's
 		// ResponseHeaderTimeout; non-stream attempts get a per-attempt context
 		// deadline in the fallback loop; streams get an idle timeout instead.
-		Client:         &http.Client{Transport: transport},
-		SideEffects:    sideEffectsFromEnv(),
-		TargetResolver: DefaultAttemptTargetResolver{},
-		PolicyEngine:   policyEngine,
-		config:         config,
-		policy:         providerPolicy,
-		modelPolicy:    modelPolicy,
-		modelWarnings:  modelRuntime.Warnings,
-		modelStrict:    modelRuntime.Strict,
-		runtimeConfig:  runtimeConfig,
-		policyMetadata: generatedPolicyMetadata(),
-		modelBreakers:  make(map[string]*modelBreakerState),
-		admission:      newAdmissionControl(),
-		capabilities:   newCapabilityIndex(loadCapabilityOverrides()),
-		quota:          newQuotaLedger(quotaLimitsFromEnv()),
+		Client:           &http.Client{Transport: transport},
+		SideEffects:      sideEffectsFromEnv(),
+		TargetResolver:   DefaultAttemptTargetResolver{},
+		PolicyEngine:     policyEngine,
+		config:           config,
+		policy:           providerPolicy,
+		providerProfiles: providerProfiles,
+		modelPolicy:      modelPolicy,
+		modelWarnings:    modelRuntime.Warnings,
+		modelStrict:      modelRuntime.Strict,
+		runtimeConfig:    runtimeConfig,
+		policyMetadata:   generatedPolicyMetadata(),
+		modelBreakers:    make(map[string]*modelBreakerState),
+		providerBreakers: make(map[providerID]*modelBreakerState),
+		providerAttempts: make(map[providerID]int64),
+		providerBalance:  make(map[providerID]int64),
+		quota:            NewQuotaLedger(),
+		quotaCooldowns:   make(map[string]time.Time),
+		admission:        newAdmissionControl(),
+		capabilities:     newCapabilityIndex(loadCapabilityOverrides()),
 	}
 	// Best-effort background auto-derive of model capabilities from OpenRouter;
 	// the manual overrides above already cover the chain models synchronously.
@@ -110,11 +116,6 @@ func (s *RouterService) Close() {
 	if s.persistScores.Load() {
 		if err := s.SaveScores(); err != nil {
 			slog.Warn("[CalvoProxy] could not persist model scores on shutdown", slog.String("error", err.Error()))
-		}
-	}
-	if s.persistQuotas.Load() {
-		if err := s.SaveQuotas(); err != nil {
-			slog.Warn("[CalvoProxy] could not persist quotas on shutdown", slog.String("error", err.Error()))
 		}
 	}
 }
@@ -223,6 +224,8 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		if !ok {
 			return
 		}
+		// Free models invent "sandbox" excuses on agent turns; pin reality first.
+		injectLocalAgentGuardrail(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
 		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
 		return
@@ -260,6 +263,8 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	// Free models invent "sandbox" excuses on agent turns; pin reality first.
+	injectLocalAgentGuardrail(reqBody)
 	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
 }
 
@@ -268,16 +273,8 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
 func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
-	// The route trace rides the context, not FallbackExecution: the header is
-	// materialised inside executeAttempt (setServedModelHeaders), and
-	// AttemptExecutor.ExecuteAttempt does not receive the execution struct.
 	ctx = withTrace(ctx, newRouteTrace(category))
-	// The authorisation decision is already made by the time we get here — it is
-	// what chose the chain — so it is replayed onto the trace rather than written
-	// by the policy path itself. See routeTrace.recordPolicy.
 	traceFrom(ctx).recordPolicy(decision.RuleID, decision.Reason, requestedModel, decision.PolicySteps)
-	// One publish per request, on every exit: the ring is what /decisions/{id}
-	// reads, and an unserved request is exactly the one worth looking up.
 	defer s.finishTrace(ctx)
 	// Non-streaming requests get an overall wall-clock budget across the whole
 	// fallback chain (each attempt is additionally capped per-attempt in the
@@ -309,11 +306,16 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 			attemptsToTry[i].Path = opPath
 		}
 	}
+	attemptsToTry = s.filterConfiguredAttempts(ctx, attemptsToTry, apiKey, opPath)
 	// Keep only models that support the required capabilities (fail-closed:
 	// unknown models don't qualify). Empties → capability rescue across profiles;
 	// still empty → a clear capability 503 (distinct from the breaker one).
 	if len(required) > 0 {
 		attemptsToTry = s.applyCapabilityFilter(attemptsToTry, category, opPath, required)
+		// Capability rescue can introduce provider-model pairs from profiles
+		// outside the original chain. Re-apply credential and wire-format gates
+		// so an unconfigured direct provider never consumes an attempt slot.
+		attemptsToTry = s.filterConfiguredAttempts(ctx, attemptsToTry, apiKey, opPath)
 		if len(attemptsToTry) == 0 {
 			s.counters.capabilityRefused.Add(1)
 			failTrace(ctx, w, outcomeCapsNone)
@@ -322,23 +324,21 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		}
 	}
 	afterCaps := len(attemptsToTry)
-	// Count budget exclusions before the generic filter runs, so the trace can
-	// say "out of allowance" instead of mislabelling it as an open circuit.
-	quotaExcluded := 0
-	for _, a := range attemptsToTry {
-		if s.quota.exhausted(a) {
-			quotaExcluded++
-		}
-	}
-	traceFrom(ctx).recordQuotaExclusions(quotaExcluded)
 	availableModels := s.filterAvailableAttempts(attemptsToTry)
-	// Reorder the breaker-eligible chain by reliability score (most reliable
-	// first) before truncating to MaxAttempts, so flaky models sink to the back.
-	availableModels = s.rankAttemptsByScoreTraced(traceFrom(ctx), availableModels)
+	beforeQuota := len(availableModels)
+	// Balance providers by their predicted normalized quota pressure. The
+	// primary reservation is atomic across request/token windows; models are
+	// interleaved across providers before MaxAttempts truncation so fallbacks
+	// cannot accidentally lose all provider diversity.
+	quotaEstimate := estimateRequestQuota(reqBody)
+	availableModels = s.quotaRankAndReserve(ctx, availableModels, apiKey, quotaEstimate)
+	traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
+	if len(availableModels) > 0 && availableModels[0].QuotaTicket.Valid() {
+		defer s.quotaLedger().Release(availableModels[0].QuotaTicket, time.Now())
+	}
 	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
 		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
 	}
-
 	traceFrom(ctx).recordChain(planned, afterCaps, len(availableModels), required)
 
 	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
@@ -362,15 +362,27 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		// never saw, and hide the one condition an operator can act on directly —
 		// every model open or cooling at once.
 		s.counters.allModelsCooling.Add(1)
-		if wait := s.retryAfterForAttempts(attemptsToTry); wait > 0 {
+		breakerWait := s.retryAfterForAttempts(attemptsToTry)
+		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
+		wait := breakerWait
+		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
+			wait = quotaWait
+		}
+		if wait > 0 {
 			secs := int(wait.Seconds())
 			if secs < 1 {
 				secs = 1
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 		}
+		message := "All models are temporarily rate-limited or unhealthy. Cooling down before retry."
+		if quotaMessage := s.dailyFreeQuotaReasonForAttempts(attemptsToTry); quotaMessage != "" {
+			message = quotaMessage
+		} else if quotaWait > 0 {
+			message = "All configured model providers are temporarily rate-limited. Retrying after the earliest quota reset; your request was not sent upstream."
+		}
 		failTrace(ctx, w, outcomeAllCooling)
-		writeJSONError(w, http.StatusServiceUnavailable, "All models are temporarily rate-limited or unhealthy. Cooling down before retry.")
+		writeJSONError(w, http.StatusServiceUnavailable, message)
 		return
 	}
 
@@ -378,21 +390,12 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
 	}
-	// The tool-result size guard runs ONCE here, never inside the fallback loop:
-	// that loop re-serialises the body per attempt, so doing it there would
-	// multiply the cost by the number of models for no extra benefit.
-	//
-	// Any failure forwards the original body untouched. This is the only place
-	// the proxy alters what the caller sent, and it is a transport limit — not a
-	// judgement about what the model needs. Deciding what a CONVERSATION may lose
-	// belongs to whoever owns it; see cervo-compress.
 	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
 		if cstat.applied() {
 			reqBody = compressed
 		}
 		traceFrom(ctx).recordCompression(cstat)
 	}
-
 	err := s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody:       reqBody,
 		APIKey:            apiKey,
@@ -410,6 +413,13 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	s.recordChainFailure(reason)
 
 	statusCode, message := fallbackErrorResponse(err)
+	if wait := fallbackRetryAfter(err); wait > 0 {
+		seconds := int(wait.Seconds())
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
 	slog.ErrorContext(ctx, "[CalvoProxy] 🚨 CRITICAL: All fallback models failed",
 		slog.String("profile", category), slog.String("reason", string(reason)))
 	failTrace(ctx, w, outcomeChainFailed)
@@ -437,9 +447,33 @@ func (s *RouterService) applyCapabilityFilter(attempts []modelAttempt, category,
 // capabilityRescue builds a candidate list from the models in the CONFIGURED
 // profiles (the curated free chains) that satisfy the required caps — never the
 // full OpenRouter catalog, so rescue can't escape to paid/unvetted models.
-// Deduped by model, stable (sorted) order, stamped with the request's profile so
-// breaker/scoring/audit keep the caller's intent.
+// Explicit provider-model pairs are preserved so rescue cannot route a model to
+// a provider that does not serve it. Its deterministic seed order is
+// OpenRouter, Cerebras, Groq; the global scheduler applies balance afterward.
 func (s *RouterService) capabilityRescue(category, opPath string, required []string) []modelAttempt {
+	if profiles := s.getProviderProfiles(); len(profiles) > 0 {
+		profileNames := make([]string, 0, len(profiles))
+		for profile := range profiles {
+			profileNames = append(profileNames, profile)
+		}
+		sort.Strings(profileNames)
+		seen := map[string]bool{}
+		breaker := s.defaultBreakerPolicy()
+		out := make([]modelAttempt, 0)
+		for _, provider := range []providerID{providerOpenRouter, providerCerebras, providerGroq} {
+			for _, profile := range profileNames {
+				for _, target := range profiles[profile] {
+					key := string(target.Provider) + "\x00" + target.Model
+					if target.Provider != provider || seen[key] || !s.capabilities.satisfies(target.Model, required) {
+						continue
+					}
+					seen[key] = true
+					out = append(out, modelAttempt{Profile: category, Model: target.Model, Provider: target.Provider, BreakerPolicy: breaker, Path: opPath})
+				}
+			}
+		}
+		return out
+	}
 	seen := map[string]bool{}
 	models := make([]string, 0)
 	for _, chain := range s.getPolicy().Profiles {
@@ -616,7 +650,7 @@ func (s *RouterService) resolveModelAlias(category string, requestedModel string
 func (s *RouterService) planModelAttempts(decision policyDecision, category string, requestedModel string) []modelAttempt {
 	planner := s.AttemptPlanner
 	if planner == nil {
-		planner = PolicyModelAttemptPlanner{Policy: s.getPolicy(), model: s.activeModelPolicy()}
+		planner = PolicyModelAttemptPlanner{Policy: s.getPolicy(), ProviderProfiles: s.getProviderProfiles(), model: s.activeModelPolicy()}
 	}
 	return planner.Plan(decision, category, requestedModel)
 }
@@ -646,7 +680,20 @@ func (s *RouterService) setModelPolicyConfig(policy policyConfig) {
 	mp := cervomodelpolicy.NewPolicy(normalized)
 	s.policyMu.Lock()
 	s.policy = normalized
+	s.providerProfiles = nil
 	s.modelPolicy = mp
+	s.policyMu.Unlock()
+}
+
+func (s *RouterService) getProviderProfiles() providerProfiles {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return cloneProviderProfiles(s.providerProfiles)
+}
+
+func (s *RouterService) setProviderProfiles(profiles providerProfiles) {
+	s.policyMu.Lock()
+	s.providerProfiles = cloneProviderProfiles(profiles)
 	s.policyMu.Unlock()
 }
 
@@ -659,6 +706,7 @@ func (s *RouterService) ReloadModelPolicy() error {
 		return fmt.Errorf("model policy strict validation failed (%d warnings); keeping current policy", len(runtime.Warnings))
 	}
 	s.setModelPolicyConfig(runtime.Config)
+	s.setProviderProfiles(loadProviderProfiles())
 	s.policyMu.Lock()
 	s.modelWarnings = runtime.Warnings
 	s.modelStrict = runtime.Strict

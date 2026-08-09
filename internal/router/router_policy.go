@@ -29,6 +29,8 @@ const (
 	providerAnthropic  cervorules.Executor = policyvocab.ExecutorAnthropic
 	providerOllama     cervorules.Executor = policyvocab.ExecutorOllama
 	providerLocal      cervorules.Executor = policyvocab.ExecutorLocal
+	providerCerebras   cervorules.Executor = "cerebras"
+	providerGroq       cervorules.Executor = "groq"
 )
 
 type envRouteOverride struct {

@@ -223,47 +223,160 @@ func (s *RouterService) scoreForAttempt(attempt modelAttempt, env scoreEnv) floa
 	return decayedScore(s.modelBreakers[s.breakerKey(attempt)], env)
 }
 
-// rankAttemptsByScore stable-sorts already breaker-filtered attempts by
-// reliability score, highest first. Stable, so equal scores keep the
-// policy-defined order (a fresh chain is tried exactly as configured). Returns
-// the input unchanged when scoring is disabled or there's nothing to reorder.
-func (s *RouterService) rankAttemptsByScore(attempts []modelAttempt) []modelAttempt {
-	return s.rankAttemptsByScoreTraced(nil, attempts)
+type providerAttemptGroup struct {
+	provider    providerID
+	attempts    []modelAttempt
+	reliability float64
+	policyOrder int
 }
 
-// rankAttemptsByScoreTraced is rankAttemptsByScore plus the trace annotation.
-// The scores are captured here rather than recomputed by the caller: this is the
-// one place they already exist, and a second pass would double the locking on
-// the hot path.
-func (s *RouterService) rankAttemptsByScoreTraced(trace *routeTrace, attempts []modelAttempt) []modelAttempt {
-	if !scoringEnabled() || len(attempts) < 2 {
+func (s *RouterService) normalizedProvider(attempt modelAttempt) providerID {
+	if attempt.Provider != "" {
+		return attempt.Provider
+	}
+	return s.defaultPolicyProvider()
+}
+
+// rankAttemptsLocked combines two layers while breakerMu is held:
+// independent model reliability inside each provider, then global provider
+// balance. The global effective-use value is attempts - reliability: usage
+// dominates after a one-attempt difference, while reliability decides which
+// equally consumed provider goes first. This keeps healthy providers within
+// one real call of each other without randomising toward the least reliable.
+func (s *RouterService) rankAttemptsLocked(attempts []modelAttempt, env scoreEnv) []modelAttempt {
+	groups := make([]providerAttemptGroup, 0, 3)
+	groupIndex := map[providerID]int{}
+	for _, attempt := range attempts {
+		provider := s.normalizedProvider(attempt)
+		attempt.Provider = provider
+		idx, ok := groupIndex[provider]
+		if !ok {
+			idx = len(groups)
+			groupIndex[provider] = idx
+			groups = append(groups, providerAttemptGroup{provider: provider, policyOrder: idx})
+		}
+		groups[idx].attempts = append(groups[idx].attempts, attempt)
+	}
+	for i := range groups {
+		if scoringEnabled() {
+			sort.SliceStable(groups[i].attempts, func(a, b int) bool {
+				left := decayedScore(s.modelBreakers[s.breakerKey(groups[i].attempts[a])], env)
+				right := decayedScore(s.modelBreakers[s.breakerKey(groups[i].attempts[b])], env)
+				return left > right
+			})
+		}
+		groups[i].reliability = scoreInitial
+		if len(groups[i].attempts) > 0 && scoringEnabled() {
+			groups[i].reliability = decayedScore(s.modelBreakers[s.breakerKey(groups[i].attempts[0])], env)
+		}
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		left := float64(s.providerBalance[groups[i].provider]) - groups[i].reliability
+		right := float64(s.providerBalance[groups[j].provider]) - groups[j].reliability
+		if left == right {
+			return groups[i].policyOrder < groups[j].policyOrder
+		}
+		return left < right
+	})
+	ranked := make([]modelAttempt, 0, len(attempts))
+	for _, group := range groups {
+		ranked = append(ranked, group.attempts...)
+	}
+	return ranked
+}
+
+// rankAttemptsByScore is the read-only view used by tests and diagnostics.
+func (s *RouterService) rankAttemptsByScore(attempts []modelAttempt) []modelAttempt {
+	if len(attempts) < 2 {
 		return attempts
 	}
 	env := s.scoreEnv()
-	score := make([]float64, len(attempts))
-	for i, a := range attempts {
-		// Soft quota degradation lives HERE and nowhere else: multiplying the
-		// rank key sinks a model whose window is nearly spent without touching
-		// the persisted score. The score measures reliability, not budget, and
-		// contaminating it would poison its two-clock decay — a model would look
-		// broken because it was popular.
-		score[i] = s.scoreForAttempt(a, env) * s.quota.headroom(a)
+	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+	return s.rankAttemptsLocked(attempts, env)
+}
+
+// rankAndReserveAttempts atomically chooses and counts the request's primary
+// provider. Concurrent requests therefore spread across providers instead of
+// all observing the same least-used value and stampeding one upstream.
+func (s *RouterService) rankAndReserveAttempts(attempts []modelAttempt) []modelAttempt {
+	if len(attempts) == 0 {
+		return attempts
 	}
-	if trace != nil {
-		models := make([]string, len(attempts))
-		for i, a := range attempts {
-			models[i] = a.Model
-		}
-		trace.recordScores(models, score)
+	env := s.scoreEnv()
+	s.breakerMu.Lock()
+	if s.providerBalance == nil {
+		s.providerBalance = make(map[providerID]int64)
 	}
-	idx := make([]int, len(attempts))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool { return score[idx[a]] > score[idx[b]] })
-	ranked := make([]modelAttempt, len(attempts))
-	for i, j := range idx {
-		ranked[i] = attempts[j]
-	}
+	s.rebaseProviderBalanceLocked(attempts)
+	ranked := s.rankAttemptsLocked(attempts, env)
+	provider := s.normalizedProvider(ranked[0])
+	s.providerBalance[provider]++
+	ranked[0].BalanceReserved = true
+	s.breakerMu.Unlock()
+	s.markScoresDirty()
 	return ranked
+}
+
+// rebaseProviderBalanceLocked prevents catch-up bursts. A provider that was
+// unconfigured, cooling, or absent for a long time rejoins at most one virtual
+// attempt behind the active leaders; it shares traffic from NOW rather than
+// monopolising requests to repay historical usage it could not receive.
+func (s *RouterService) rebaseProviderBalanceLocked(attempts []modelAttempt) {
+	providers := map[providerID]struct{}{}
+	maxBalance := int64(0)
+	for _, attempt := range attempts {
+		provider := s.normalizedProvider(attempt)
+		providers[provider] = struct{}{}
+		if s.providerBalance[provider] > maxBalance {
+			maxBalance = s.providerBalance[provider]
+		}
+	}
+	floor := maxBalance - 1
+	if floor < 0 {
+		floor = 0
+	}
+	for provider := range providers {
+		if s.providerBalance[provider] < floor {
+			s.providerBalance[provider] = floor
+		}
+	}
+}
+
+func (s *RouterService) reserveProviderBalance(provider providerID) {
+	s.breakerMu.Lock()
+	if s.providerBalance == nil {
+		s.providerBalance = make(map[providerID]int64)
+	}
+	s.providerBalance[provider]++
+	s.breakerMu.Unlock()
+	s.markScoresDirty()
+}
+
+func (s *RouterService) recordProviderAttempt(provider providerID, balanceReserved bool) {
+	s.breakerMu.Lock()
+	if s.providerAttempts == nil {
+		s.providerAttempts = make(map[providerID]int64)
+	}
+	if s.providerBalance == nil {
+		s.providerBalance = make(map[providerID]int64)
+	}
+	s.providerAttempts[provider]++
+	if !balanceReserved {
+		s.providerBalance[provider]++
+	}
+	s.breakerMu.Unlock()
+	s.markScoresDirty()
+}
+
+func (s *RouterService) providerAttemptCount(provider providerID) int64 {
+	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+	return s.providerAttempts[provider]
+}
+
+func (s *RouterService) providerBalanceCount(provider providerID) int64 {
+	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+	return s.providerBalance[provider]
 }

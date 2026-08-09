@@ -397,6 +397,32 @@ func TestFirstTokenLatency_AbandonedAttemptContributesNoSample(t *testing.T) {
 	}
 }
 
+func TestFirstEventTimeoutContinuesCurrentStreamWhenFallbackCannotBeReserved(t *testing.T) {
+	t.Setenv("PROXY_STREAM_FIRST_BYTE_TIMEOUT", "1")
+	svc := newChainTestService(t, &http.Client{Transport: &queuedStreamTransport{
+		body: &slowBody{chunks: []string{"data: {\"choices\":[]}\n\ndata: [DONE]\n\n"}, delay: 1100 * time.Millisecond},
+	}}, []string{"a/one:free"})
+
+	reservationCalls := 0
+	attempt := modelAttempt{
+		Profile: "coding",
+		Model:   "a/one:free",
+		ReserveFallback: func() bool {
+			reservationCalls++
+			return false
+		},
+	}
+	if err := svc.executeAttempt(context.Background(), httptest.NewRecorder(), []byte(`{}`), "k", attempt); err != nil {
+		t.Fatalf("current stream should continue when no fallback quota can be claimed: %v", err)
+	}
+	if reservationCalls != 1 {
+		t.Fatalf("expected one just-in-time fallback reservation attempt, got %d", reservationCalls)
+	}
+	if svc.Counters().StreamFirstEventTimeout != 0 {
+		t.Fatal("a protected current stream must not be counted as abandoned")
+	}
+}
+
 // The label space must match calvoproxy_model_score's, so the two metrics join
 // on the same key and cardinality stays bounded by the policy.
 func TestFirstEventLatency_UsesTheModelScoreKeySpace(t *testing.T) {

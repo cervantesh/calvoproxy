@@ -1,7 +1,9 @@
 package router
 
 import (
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -19,7 +21,73 @@ const (
 	// OpenRouter refusing the caller's own key looks nothing like the above:
 	// no "Provider returned error", no provider_name.
 	realAccountAuth401 = `{"error":{"message":"No auth credentials found","code":401}}`
+
+	realDailyFreeQuota429 = `{"error":{"message":"Rate limit exceeded: free-models-per-day-high-balance. ","code":429,` +
+		`"metadata":{"headers":{"X-RateLimit-Limit":"1000","X-RateLimit-Remaining":"0",` +
+		`"X-RateLimit-Reset":"1786233600000"},"limit_source":"openrouter_free_tier_daily",` +
+		`"remedy_hint":"Wait for the daily reset"}}}`
 )
+
+func TestOpenRouterDailyFreeQuotaMessage_Actionable(t *testing.T) {
+	message, ok := openRouterDailyFreeQuotaMessage(realDailyFreeQuota429)
+	if !ok {
+		t.Fatal("expected the captured OpenRouter daily free quota error to be recognized")
+	}
+	for _, want := range []string{
+		"1000/1000",
+		"2026-08-09 00:00 UTC",
+		"another :free model will not help",
+		"direct provider/paid model",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestOpenRouterDailyFreeQuotaMessage_DoesNotRewriteOther429s(t *testing.T) {
+	if message, ok := openRouterDailyFreeQuotaMessage(`{"error":{"message":"rate limited","code":429}}`); ok || message != "" {
+		t.Fatalf("generic 429 must keep the normal classifier message, got ok=%v message=%q", ok, message)
+	}
+}
+
+type dailyFreeQuotaTransport struct {
+	calls int
+}
+
+func (t *dailyFreeQuotaTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(realDailyFreeQuota429)),
+	}, nil
+}
+
+func TestOpenRouterDailyFreeQuotaMessage_ReachesClientAfterChainFailure(t *testing.T) {
+	upstream := &dailyFreeQuotaTransport{}
+	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"first:free", "second:free"}},
+		Aliases:        map[string]string{"default": "coding", "coding": "coding"},
+	})
+
+	rec := newHeaderSnapshotRecorder()
+	svc.RouteRequest(rec, trustedRequest(http.MethodPost, "/v1/chat/completions",
+		`{"messages":[{"role":"user","content":"hi"}]}`), "k")
+
+	if upstream.calls != 1 {
+		t.Fatalf("account-wide quota should stop sibling OpenRouter attempts, got %d calls", upstream.calls)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected client-visible 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"OpenRouter daily free-model quota exhausted", "1000/1000", "another :free model will not help"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("client body %q does not contain %q", rec.Body.String(), want)
+		}
+	}
+}
 
 func TestProviderRelayedError_Recognition(t *testing.T) {
 	cases := []struct {

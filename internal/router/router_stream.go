@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -226,20 +227,41 @@ func (f firstEventReader) Close() error { return f.closer.Close() }
 // Returns a reader positioned as if nothing had been consumed, whether a real
 // event arrived, and whether the wait timed out (as opposed to the stream
 // simply ending).
+type firstEventResult struct {
+	consumed []byte
+	ok       bool
+	reader   *bufio.Reader
+}
+
+type pendingFirstEventReader struct {
+	body   io.ReadCloser
+	result <-chan firstEventResult
+	once   sync.Once
+	reader io.Reader
+}
+
+func (r *pendingFirstEventReader) Read(p []byte) (int, error) {
+	r.once.Do(func() {
+		result := <-r.result
+		r.reader = io.MultiReader(bytes.NewReader(result.consumed), result.reader)
+	})
+	return r.reader.Read(p)
+}
+
+func (r *pendingFirstEventReader) Close() error {
+	return r.body.Close()
+}
+
 func awaitFirstStreamEvent(body io.ReadCloser, timeout time.Duration) (io.ReadCloser, bool, bool) {
-	type result struct {
-		consumed []byte
-		ok       bool
-	}
 	br := bufio.NewReader(body)
-	ch := make(chan result, 1) // buffered: a timed-out reader must not block forever
+	ch := make(chan firstEventResult, 1) // buffered: an abandoned reader must not block forever
 	go func() {
 		var seen bytes.Buffer
 		for {
 			line, err := br.ReadBytes('\n')
 			seen.Write(line)
 			if err != nil {
-				ch <- result{seen.Bytes(), false}
+				ch <- firstEventResult{consumed: seen.Bytes(), reader: br}
 				return
 			}
 			trimmed := bytes.TrimSpace(line)
@@ -247,7 +269,7 @@ func awaitFirstStreamEvent(body io.ReadCloser, timeout time.Duration) (io.ReadCl
 				continue // blank separator or keepalive comment: not progress
 			}
 			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				ch <- result{seen.Bytes(), true}
+				ch <- firstEventResult{consumed: seen.Bytes(), ok: true, reader: br}
 				return
 			}
 		}
@@ -257,10 +279,12 @@ func awaitFirstStreamEvent(body io.ReadCloser, timeout time.Duration) (io.ReadCl
 	defer timer.Stop()
 	select {
 	case r := <-ch:
-		return firstEventReader{Reader: io.MultiReader(bytes.NewReader(r.consumed), br), closer: body}, r.ok, false
+		return firstEventReader{Reader: io.MultiReader(bytes.NewReader(r.consumed), r.reader), closer: body}, r.ok, false
 	case <-timer.C:
-		// The goroutine is still blocked in Read. The caller closes the body,
-		// which unblocks it; its send lands in the buffered channel and it exits.
-		return nil, false, true
+		// Keep ownership of the single in-flight reader. If the caller elects to
+		// continue because no fallback quota can be claimed, the wrapper waits
+		// for that read and replays everything consumed. If it abandons, closing
+		// the wrapper unblocks the read and the buffered send lets it exit.
+		return &pendingFirstEventReader{body: body, result: ch}, false, true
 	}
 }

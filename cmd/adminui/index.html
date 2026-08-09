@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Provider keys · CalvoProxy</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <a class="brand" href="/admin/providers" aria-label="CalvoProxy provider settings">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span>CalvoProxy</span>
+      </a>
+      <span class="eyebrow">Provider settings</span>
+    </header>
+
+    <section id="login-view" class="login panel" hidden>
+      <p class="kicker">Protected console</p>
+      <h1>Unlock provider settings</h1>
+      <p class="lede">Use the admin token configured on this CalvoProxy instance.</p>
+      <form id="login-form" autocomplete="off">
+        <label for="admin-token">Admin token</label>
+        <div class="field-row">
+          <input id="admin-token" name="token" type="password" required autocomplete="current-password" spellcheck="false">
+          <button class="primary" type="submit">Unlock</button>
+        </div>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="providers-view" hidden>
+      <div class="intro">
+        <div>
+          <p class="kicker">Secrets vault</p>
+          <h1>Provider API keys</h1>
+          <p class="lede">One protected key per provider. Existing secrets are never sent back to this browser.</p>
+        </div>
+        <button id="lock-button" class="quiet" type="button">Lock session</button>
+      </div>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <div id="provider-list" class="provider-list" aria-busy="true"></div>
+      <p class="footnote">Keys are encrypted at rest by the CalvoProxy vault. Tests make a minimal request directly to the selected provider.</p>
+    </section>
+  </main>
+
+  <dialog id="key-dialog" aria-labelledby="dialog-title">
+    <form id="key-form" method="dialog">
+      <div class="dialog-head">
+        <div>
+          <p id="dialog-kicker" class="kicker">Provider</p>
+          <h2 id="dialog-title">Add API key</h2>
+        </div>
+        <button id="dialog-close" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <label for="provider-key">API key</label>
+      <input id="provider-key" name="key" type="password" required autocomplete="new-password" spellcheck="false" maxlength="8192">
+      <p class="hint">The key is sent once over this connection and will not be shown again.</p>
+      <p id="dialog-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="dialog-cancel" class="quiet" type="button">Cancel</button>
+        <button id="dialog-save" class="primary" type="submit">Save key</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <p class="kicker">Permanent action</p>
+      <h2 id="confirm-title">Remove this key?</h2>
+      <p id="confirm-copy" class="lede"></p>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" class="quiet" value="cancel">Cancel</button>
+        <button id="confirm-delete" class="danger" value="confirm">Remove key</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="provider-template">
+    <article class="provider-card">
+      <div class="provider-identity">
+        <span class="provider-icon" aria-hidden="true"></span>
+        <div>
+          <h2 class="provider-name"></h2>
+          <p class="provider-detail"></p>
+        </div>
+      </div>
+      <div class="provider-status"><span class="status-dot"></span><span class="status-text"></span></div>
+      <div class="provider-actions">
+        <button class="test-button quiet" type="button">Test</button>
+        <button class="key-button primary" type="button"></button>
+        <button class="delete-button icon-button" type="button" aria-label="Remove key">×</button>
+      </div>
+    </article>
+  </template>
+  <script src="/admin/assets/app.js" defer></script>
+</body>
+</html>

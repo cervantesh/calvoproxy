@@ -36,7 +36,7 @@ const (
 	stateFile      = "calvoproxy-backends.json"
 	maxBackends    = 3
 	healthTimeout  = 10 * time.Second
-	maxFailures    = 3           // consecutive health check failures before replacement
+	maxFailures    = 3 // consecutive health check failures before replacement
 	healthInterval = 5 * time.Second
 )
 
@@ -46,7 +46,7 @@ func daemonize(root, logDir string) error {
 	if logDir == "" {
 		logDir = root
 	}
-	
+
 	outLog := filepath.Join(logDir, "lb-out.log")
 	errLog := filepath.Join(logDir, "lb-err.log")
 
@@ -65,12 +65,7 @@ func daemonize(root, logDir string) error {
 	os.Stderr = errFile
 	log.SetOutput(errFile)
 
-	// Detach from console on Windows
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	freeConsole := kernel32.NewProc("FreeConsole")
-	freeConsole.Call()
-
-	return nil
+	return detachConsole()
 }
 
 func main() {
@@ -271,9 +266,9 @@ func waitForHealth(ctx context.Context, port int) bool {
 			KeepAlive: 5 * time.Second,
 			DualStack: true,
 		}).DialContext,
-		MaxIdleConns:          50,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   2 * time.Second,
+		MaxIdleConns:        50,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 2 * time.Second,
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -301,15 +296,15 @@ func waitForHealth(ctx context.Context, port int) bool {
 // Load Balancer implementation
 
 type Backend struct {
-	URL           *url.URL
-	Proxy         *httputil.ReverseProxy
-	mu            sync.RWMutex
-	healthy       bool
-	connections   int32
-	lastCheck     time.Time
-	failures      int       // consecutive health check failures
-	port          int       // backend port for replacement
-	replacing     bool      // prevents duplicate replacement attempts
+	URL         *url.URL
+	Proxy       *httputil.ReverseProxy
+	mu          sync.RWMutex
+	healthy     bool
+	connections int32
+	lastCheck   time.Time
+	failures    int  // consecutive health check failures
+	port        int  // backend port for replacement
+	replacing   bool // prevents duplicate replacement attempts
 }
 
 func (b *Backend) setHealthy(h bool) {
@@ -352,8 +347,8 @@ func (b *Backend) markReplacing() bool {
 	return true
 }
 
-func (b *Backend) incConn() { atomic.AddInt32(&b.connections, 1) }
-func (b *Backend) decConn() { atomic.AddInt32(&b.connections, -1) }
+func (b *Backend) incConn()   { atomic.AddInt32(&b.connections, 1) }
+func (b *Backend) decConn()   { atomic.AddInt32(&b.connections, -1) }
 func (b *Backend) conns() int { return int(atomic.LoadInt32(&b.connections)) }
 
 func (b *Backend) getPort() int {
@@ -460,9 +455,9 @@ func (lb *LoadBalancer) HealthCheck(ctx context.Context) {
 			KeepAlive: 5 * time.Second,
 			DualStack: true,
 		}).DialContext,
-		MaxIdleConns:          50,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   2 * time.Second,
+		MaxIdleConns:        50,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 2 * time.Second,
 	}
 	healthClient := &http.Client{
 		Transport: healthTransport,

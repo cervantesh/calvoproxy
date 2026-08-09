@@ -1,390 +1,276 @@
 package router
 
 import (
-	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func testLedger(t *testing.T) *quotaLedger {
-	t.Helper()
-	return newQuotaLedger(map[string]quotaLimit{
-		"model:org/alpha:free": {RPD: 10},
-		"account":              {RPD: 100},
-	})
-}
-
-// Invariant 1: quota is keyed by the BARE model, never by breakerKey. breakerKey
-// is profile+":"+model, and the same slug lives in several profiles today — two
-// partial counters of the same OpenRouter pocket would each see half the traffic
-// and never detect exhaustion.
-func TestQuota_KeyedByBareModelNotProfile(t *testing.T) {
-	l := testLedger(t)
-
-	l.record(modelAttempt{Profile: "coding", Model: "org/alpha:free"})
-	l.record(modelAttempt{Profile: "bulk", Model: "org/alpha:free"})
-	l.record(modelAttempt{Profile: "reasoning", Model: "org/alpha:free"})
-
-	if used := l.used("model:org/alpha:free"); used != 3 {
-		t.Errorf("used = %d, want 3: the same model under three profiles is one pocket", used)
+func quotaTestKey(dimension QuotaDimension) QuotaBucketKey {
+	return QuotaBucketKey{
+		Provider:    "groq",
+		Scope:       "organization",
+		ModelOrPool: "openai/gpt-oss-120b",
+		Dimension:   dimension,
+		Window:      QuotaWindowMinute,
 	}
 }
 
-// Invariant 2: the account scope counts every request whatever the model. The
-// free tier's dominant limit is per account, so a model-only ledger would model
-// the wrong thing.
-func TestQuota_AccountScopeCountsEveryModel(t *testing.T) {
-	l := testLedger(t)
-
-	l.record(modelAttempt{Profile: "coding", Model: "org/alpha:free"})
-	l.record(modelAttempt{Profile: "coding", Model: "org/beta:free"})
-
-	if used := l.used("account"); used != 2 {
-		t.Errorf("account used = %d, want 2", used)
+func quotaTestObservation(limit, remaining int64, reset time.Time) QuotaObservation {
+	return QuotaObservation{
+		Limit:      limit,
+		Remaining:  remaining,
+		ResetAt:    reset,
+		Source:     QuotaSourceProviderHeader,
+		Confidence: QuotaConfidenceAuthoritative,
 	}
 }
 
-// Invariant 3: a window whose reset has passed goes back to zero — it is not
-// discarded. Discarding would lose the limit along with the count.
-func TestQuota_ExpiredWindowResetsToZeroKeepingLimit(t *testing.T) {
-	l := testLedger(t)
-	l.record(modelAttempt{Model: "org/alpha:free"})
-
-	l.mu.Lock()
-	l.scopes["model:org/alpha:free"].ResetAt = time.Now().Add(-time.Minute)
-	l.mu.Unlock()
-
-	if used := l.used("model:org/alpha:free"); used != 0 {
-		t.Errorf("used = %d after the window expired, want 0", used)
+func TestQuotaLedgerReserveEstimateIsAtomicAcrossRequestsAndTokens(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	requests := quotaTestKey(QuotaDimensionRequests)
+	tokens := quotaTestKey(QuotaDimensionTokens)
+	reset := now.Add(time.Minute)
+	if !ledger.Observe(requests, quotaTestObservation(10, 1, reset), now) ||
+		!ledger.Observe(tokens, quotaTestObservation(1_000, 100, reset), now) {
+		t.Fatal("could not set up quota buckets")
 	}
-	if limit := l.limit("model:org/alpha:free"); limit != 10 {
-		t.Errorf("limit = %d, want the configured 10 to survive the roll", limit)
+
+	reservations := ReservationsForEstimate(requests, tokens, QuotaEstimate{Requests: 1, Tokens: 101})
+	if _, ok := ledger.ReserveAll(reservations, now); ok {
+		t.Fatal("reservation should fail when one dimension lacks capacity")
+	}
+	if snapshot, ok := ledger.Snapshot(requests, now); !ok || snapshot.Reserved != 0 || snapshot.Available != 1 {
+		t.Fatalf("request quota must remain untouched after atomic failure: %+v ok=%v", snapshot, ok)
+	}
+	if snapshot, ok := ledger.Snapshot(tokens, now); !ok || snapshot.Reserved != 0 || snapshot.Available != 100 {
+		t.Fatalf("token quota must remain untouched after atomic failure: %+v ok=%v", snapshot, ok)
+	}
+
+	reservations = ReservationsForEstimate(requests, tokens, QuotaEstimate{Requests: 1, Tokens: 100})
+	if _, ok := ledger.ReserveAll(reservations, now); !ok {
+		t.Fatal("reservation should succeed when all dimensions have capacity")
+	}
+	if snapshot, _ := ledger.Snapshot(requests, now); snapshot.Available != 0 || snapshot.Reserved != 1 {
+		t.Fatalf("unexpected request snapshot: %+v", snapshot)
+	}
+	if snapshot, _ := ledger.Snapshot(tokens, now); snapshot.Available != 0 || snapshot.Reserved != 100 {
+		t.Fatalf("unexpected token snapshot: %+v", snapshot)
 	}
 }
 
-// Invariant 6: with no known limit there is no gate. Inventing a ceiling would
-// be worse than having none — a 429 says "not now", not "how many fit".
-func TestQuota_UnknownLimitMeansFullHeadroom(t *testing.T) {
-	// No limits at all, model OR account: headroom is the minimum across every
-	// window that applies, and the account budget legitimately constrains a model
-	// that has no ceiling of its own. Isolating the case means configuring none.
-	l := newQuotaLedger(nil)
-	for i := 0; i < 50; i++ {
-		l.record(modelAttempt{Model: "org/sin-limite:free"})
+func TestQuotaLedgerReconcileUsesProviderHeadersAndNeverDropsBelowZero(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionTokens)
+	if !ledger.Observe(key, quotaTestObservation(100, 100, now.Add(time.Minute)), now) {
+		t.Fatal("could not observe quota")
 	}
-	if h := l.headroom(modelAttempt{Model: "org/sin-limite:free"}); h != 1 {
-		t.Errorf("headroom = %v, want 1 with no configured limit", h)
+	ticket, ok := ledger.Reserve(key, 25, now)
+	if !ok {
+		t.Fatal("could not reserve quota")
+	}
+
+	// The provider's remaining value already includes this completed request.
+	if !ledger.Reconcile(ticket, []QuotaSettlement{{
+		Key:    key,
+		Actual: 20,
+		Observation: &QuotaObservation{
+			Limit:      100,
+			Remaining:  80,
+			ResetAt:    now.Add(time.Minute),
+			Source:     QuotaSourceProviderHeader,
+			Confidence: QuotaConfidenceAuthoritative,
+		},
+	}}, now) {
+		t.Fatal("reconcile with provider header failed")
+	}
+	if snapshot, _ := ledger.Snapshot(key, now); snapshot.Reserved != 0 || snapshot.Remaining != 80 || snapshot.Available != 80 {
+		t.Fatalf("authoritative observation should win: %+v", snapshot)
+	}
+
+	ticket, ok = ledger.Reserve(key, 80, now)
+	if !ok {
+		t.Fatal("could not reserve remaining quota")
+	}
+	if !ledger.Reconcile(ticket, []QuotaSettlement{{Key: key, Actual: 999}}, now) {
+		t.Fatal("reconcile without header failed")
+	}
+	if snapshot, _ := ledger.Snapshot(key, now); snapshot.Remaining != 0 || snapshot.Available != 0 || snapshot.Reserved != 0 {
+		t.Fatalf("remaining must clamp at zero: %+v", snapshot)
 	}
 }
 
-// The account budget constrains a model that has no ceiling of its own — that is
-// the whole point of tracking it as a separate scope.
-func TestQuota_AccountLimitConstrainsUncappedModel(t *testing.T) {
-	l := newQuotaLedger(map[string]quotaLimit{"account": {RPD: 100}})
-	for i := 0; i < 50; i++ {
-		l.record(modelAttempt{Model: "org/sin-limite:free"})
+func TestQuotaLedgerExpiredBucketsAreIgnoredAndRemoved(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionRequests)
+	if !ledger.Observe(key, quotaTestObservation(10, 0, now.Add(time.Second)), now) {
+		t.Fatal("could not observe quota")
 	}
-	if h := l.headroom(modelAttempt{Model: "org/sin-limite:free"}); h != 0.5 {
-		t.Errorf("headroom = %v, want 0.5 from the account window alone", h)
+	if _, ok := ledger.Reserve(key, 1, now); ok {
+		t.Fatal("known exhausted quota must deny reservation")
 	}
-}
-
-// Headroom falls as the window fills, which is what turns "degrade before
-// exhausting" into a ranking decision instead of an exclusion.
-func TestQuota_HeadroomFallsAsWindowFills(t *testing.T) {
-	l := testLedger(t)
-	attempt := modelAttempt{Model: "org/alpha:free"}
-
-	full := l.headroom(attempt)
-	for i := 0; i < 5; i++ {
-		l.record(attempt)
+	later := now.Add(2 * time.Second)
+	if _, ok := ledger.Snapshot(key, later); ok {
+		t.Fatal("expired bucket should be removed")
 	}
-	half := l.headroom(attempt)
-	for i := 0; i < 5; i++ {
-		l.record(attempt)
+	if _, ok := ledger.Reserve(key, 1, later); !ok {
+		t.Fatal("expired observation must not permanently deny a new window")
 	}
-	empty := l.headroom(attempt)
-
-	if full != 1 {
-		t.Errorf("fresh headroom = %v, want 1", full)
-	}
-	if !(half < full && half > 0) {
-		t.Errorf("half-used headroom = %v, want between 0 and %v", half, full)
-	}
-	if empty != 0 {
-		t.Errorf("exhausted headroom = %v, want 0", empty)
+	if keys := ledger.Keys(later); len(keys) != 0 {
+		t.Fatalf("an unknown reservation must not recreate an expired bucket: %+v", keys)
 	}
 }
 
-// Invariant 7: hard exclusion only under PROXY_QUOTA_HARD_SKIP. The default is
-// soft because a hard skip widens the "all models cooling" surface on the
-// strength of limits that may have been learned, and therefore may be wrong.
-func TestQuota_HardSkipIsOptIn(t *testing.T) {
-	l := testLedger(t)
-	attempt := modelAttempt{Model: "org/alpha:free"}
-	for i := 0; i < 10; i++ {
-		l.record(attempt)
+func TestQuotaLedgerConcurrentReservationsCannotOverspend(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionRequests)
+	if !ledger.Observe(key, quotaTestObservation(40, 40, now.Add(time.Minute)), now) {
+		t.Fatal("could not observe quota")
 	}
 
-	t.Setenv("PROXY_QUOTA_HARD_SKIP", "")
-	if l.exhausted(attempt) {
-		t.Error("exhausted() = true by default; soft degradation must be the default")
-	}
-
-	t.Setenv("PROXY_QUOTA_HARD_SKIP", "true")
-	if !l.exhausted(attempt) {
-		t.Error("exhausted() = false with PROXY_QUOTA_HARD_SKIP=true")
-	}
-}
-
-// Invariant 10: learning from a 429 sets when to come back, never how many fit.
-func TestQuota_LearnsResetButNeverInventsLimit(t *testing.T) {
-	l := newQuotaLedger(nil)
-	attempt := modelAttempt{Model: "org/gamma:free"}
-
-	l.learnFrom429(attempt, 90*time.Second)
-
-	if limit := l.limit("model:org/gamma:free"); limit != 0 {
-		t.Errorf("limit = %d, want 0: a 429 says 'not now', not 'how many'", limit)
-	}
-	l.mu.RLock()
-	reset := l.scopes["model:org/gamma:free"].ResetAt
-	l.mu.RUnlock()
-	if time.Until(reset) < 30*time.Second {
-		t.Errorf("ResetAt = %v, want roughly 90s out", reset)
-	}
-	// With no limit there is still no gate: a learned reset must not silently
-	// become a hard exclusion.
-	if h := l.headroom(attempt); h != 1 {
-		t.Errorf("headroom = %v after learning, want 1 with no known limit", h)
-	}
-}
-
-// Upstream rate-limit headers are the best source when they arrive.
-func TestQuota_IngestsRateLimitHeaders(t *testing.T) {
-	l := newQuotaLedger(nil)
-	attempt := modelAttempt{Model: "org/delta:free"}
-
-	l.ingestHeaders(attempt, "50", "12", time.Now().Add(time.Hour))
-
-	if got := l.limit("model:org/delta:free"); got != 50 {
-		t.Errorf("limit = %d, want 50 from the header", got)
-	}
-	if got := l.used("model:org/delta:free"); got != 38 {
-		t.Errorf("used = %d, want 38 (limit 50 - remaining 12)", got)
-	}
-}
-
-// Invariant 4: quotas survive a restart, and a window that already rolled while
-// the process was down loads as zero. The upstream's day does not restart
-// because the proxy did.
-func TestQuota_PersistsAndRestores(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "quotas.json")
-
-	l := testLedger(t)
-	l.record(modelAttempt{Model: "org/alpha:free"})
-	l.record(modelAttempt{Model: "org/alpha:free"})
-	// A scope whose window already closed.
-	l.mu.Lock()
-	l.scopes["account"].ResetAt = time.Now().Add(-time.Hour)
-	l.mu.Unlock()
-
-	if err := writeQuotaFile(path, l.snapshot()); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	restored := newQuotaLedger(map[string]quotaLimit{"model:org/alpha:free": {RPD: 10}, "account": {RPD: 100}})
-	file, err := readQuotaFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	restored.restore(file)
-
-	if used := restored.used("model:org/alpha:free"); used != 2 {
-		t.Errorf("restored used = %d, want 2: a live window must survive a restart", used)
-	}
-	if used := restored.used("account"); used != 0 {
-		t.Errorf("restored account used = %d, want 0: its window had already rolled", used)
-	}
-}
-
-// Invariant 9: Health() holds breakerMu and reaches the ledger. The lock order
-// is breakerMu → quotaMu and the ledger must never call back into the breaker;
-// this exercises both directions concurrently under -race.
-func TestQuota_NoDeadlockUnderConcurrentHealthAndTraffic(t *testing.T) {
-	svc := &RouterService{modelBreakers: map[string]*modelBreakerState{}, quota: testLedger(t)}
-	svc.policy = policyConfig{
-		DefaultProfile: "coding",
-		Profiles:       map[string][]string{"coding": {"org/alpha:free", "org/beta:free"}},
-	}
-
+	const contenders = 200
 	var wg sync.WaitGroup
-	done := make(chan struct{})
-	for i := 0; i < 4; i++ {
+	results := make(chan bool, contenders)
+	for range contenders {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
-					_ = svc.Health()
-				}
-			}
+			_, ok := ledger.Reserve(key, 1, now)
+			results <- ok
 		}()
 	}
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				svc.quota.record(modelAttempt{Profile: "coding", Model: "org/alpha:free"})
-				_ = svc.quota.headroom(modelAttempt{Profile: "coding", Model: "org/alpha:free"})
-			}
-		}()
-	}
-	time.Sleep(50 * time.Millisecond)
-	close(done)
 	wg.Wait()
-}
-
-// A nil ledger is a no-op everywhere: quota is a feature that can be absent, and
-// every call site must tolerate that without a nil check of its own.
-func TestQuota_NilLedgerIsNoOp(t *testing.T) {
-	var l *quotaLedger
-	l.record(modelAttempt{Model: "x"})
-	l.learnFrom429(modelAttempt{Model: "x"}, time.Second)
-	l.ingestHeaders(modelAttempt{Model: "x"}, "1", "1", time.Now())
-	if h := l.headroom(modelAttempt{Model: "x"}); h != 1 {
-		t.Errorf("nil ledger headroom = %v, want 1", h)
+	close(results)
+	successes := 0
+	for success := range results {
+		if success {
+			successes++
+		}
 	}
-	if l.exhausted(modelAttempt{Model: "x"}) {
-		t.Error("nil ledger must never exhaust")
+	if successes != 40 {
+		t.Fatalf("got %d successful reservations, want exactly 40", successes)
 	}
-	if l.snapshot().Scopes != nil {
-		t.Error("nil ledger snapshot should be empty")
+	snapshot, ok := ledger.Snapshot(key, now)
+	if !ok || snapshot.Reserved != 40 || snapshot.Available != 0 || snapshot.Remaining < 0 {
+		t.Fatalf("concurrent reserve overspent quota: %+v ok=%v", snapshot, ok)
 	}
 }
 
-// Configuration comes from env, not from model-policy.json: that file's shape is
-// owned by the vendored policy package.
-func TestQuota_ParsesLimitsFromEnv(t *testing.T) {
-	t.Setenv("PROXY_QUOTA_LIMITS_JSON", `{"model:org/alpha:free":{"rpd":25},"account":{"rpd":500,"rpm":20}}`)
-
-	limits := quotaLimitsFromEnv()
-	if limits["model:org/alpha:free"].RPD != 25 {
-		t.Errorf("model rpd = %d, want 25", limits["model:org/alpha:free"].RPD)
+func TestQuotaLedgerTicketDoubleReleaseCannotReleaseAnotherOwner(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionRequests)
+	if !ledger.Observe(key, quotaTestObservation(2, 2, now.Add(time.Minute)), now) {
+		t.Fatal("could not observe quota")
 	}
-	if limits["account"].RPM != 20 {
-		t.Errorf("account rpm = %d, want 20", limits["account"].RPM)
+	ticketA, ok := ledger.Reserve(key, 1, now)
+	if !ok {
+		t.Fatal("could not reserve A")
 	}
-}
-
-// Malformed configuration must not take the proxy down: quota is an
-// optimisation, and a typo in an env var is not a reason to refuse traffic.
-func TestQuota_MalformedEnvIsIgnored(t *testing.T) {
-	t.Setenv("PROXY_QUOTA_LIMITS_JSON", `{not json`)
-	if limits := quotaLimitsFromEnv(); len(limits) != 0 {
-		t.Errorf("malformed env produced %v, want empty", limits)
-	}
-}
-
-// Invariant 5: soft degradation reorders the chain without touching the
-// persisted score. The score measures reliability; a model that is merely
-// popular must not come back looking broken.
-func TestQuota_SoftDegradationLeavesScoreUntouched(t *testing.T) {
-	svc := &RouterService{modelBreakers: map[string]*modelBreakerState{}}
-	svc.policy = policyConfig{DefaultProfile: "coding", Profiles: map[string][]string{"coding": {"org/alpha:free", "org/beta:free"}}}
-	svc.quota = newQuotaLedger(map[string]quotaLimit{"model:org/alpha:free": {RPD: 4}})
-
-	alpha := modelAttempt{Profile: "coding", Model: "org/alpha:free"}
-	beta := modelAttempt{Profile: "coding", Model: "org/beta:free"}
-	// Give both a real, equal score so ranking has something to reorder.
-	svc.recordSuccess(alpha)
-	svc.recordSuccess(beta)
-	// Read the STORED score, not the decayed one. scoreForAttempt applies
-	// time-based decay on every call, so comparing two of its results for exact
-	// equality is flaky by construction — it drifts by ~1e-10 per millisecond of
-	// wall clock, which CI (slower than a dev laptop) reliably exposed. The
-	// invariant is about what quota writes, and quota must write nothing here.
-	storedScore := func() float64 {
-		svc.breakerMu.RLock()
-		defer svc.breakerMu.RUnlock()
-		return svc.modelBreakers[svc.breakerKey(alpha)].Score
-	}
-	before := storedScore()
-
-	// Spend alpha's window down to nothing.
-	for i := 0; i < 4; i++ {
-		svc.quota.record(alpha)
+	ticketB, ok := ledger.Reserve(key, 1, now)
+	if !ok {
+		t.Fatal("could not reserve B")
 	}
 
-	ranked := svc.rankAttemptsByScore([]modelAttempt{alpha, beta})
-	if ranked[0].Model != "org/beta:free" {
-		t.Errorf("ranked first = %s, want the model with headroom left", ranked[0].Model)
+	if !ledger.Release(ticketA, now) {
+		t.Fatal("first release of A should succeed")
 	}
-	if after := storedScore(); after != before {
-		t.Errorf("persisted score moved from %v to %v; quota must not touch it", before, after)
+	if ledger.Release(ticketA, now) {
+		t.Fatal("second release of A must be rejected")
+	}
+	snapshot, _ := ledger.Snapshot(key, now)
+	if snapshot.Reserved != 1 || snapshot.Available != 1 {
+		t.Fatalf("duplicate release of A affected B: %+v", snapshot)
+	}
+	if !ledger.Reconcile(ticketB, []QuotaSettlement{{Key: key, Actual: 1}}, now) {
+		t.Fatal("B should remain independently settleable")
+	}
+	snapshot, _ = ledger.Snapshot(key, now)
+	if snapshot.Reserved != 0 || snapshot.Remaining != 1 || snapshot.Available != 1 {
+		t.Fatalf("unexpected snapshot after settling B: %+v", snapshot)
 	}
 }
 
-// Invariant 7b: with hard skip off, an exhausted model is still eligible — it
-// just ranks last. Soft degradation must never silently become exclusion.
-func TestQuota_ExhaustedModelStaysEligibleWhenSoft(t *testing.T) {
-	t.Setenv("PROXY_QUOTA_HARD_SKIP", "")
-	svc := &RouterService{modelBreakers: map[string]*modelBreakerState{}}
-	svc.policy = policyConfig{DefaultProfile: "coding", Profiles: map[string][]string{"coding": {"org/alpha:free"}}}
-	svc.quota = newQuotaLedger(map[string]quotaLimit{"model:org/alpha:free": {RPD: 1}})
-
-	alpha := modelAttempt{Profile: "coding", Model: "org/alpha:free"}
-	svc.quota.record(alpha)
-
-	if got := svc.filterAvailableAttempts([]modelAttempt{alpha}); len(got) != 1 {
-		t.Errorf("exhausted model was excluded with hard skip off: %v", got)
+func TestQuotaLedgerRejectsUnknownAndForeignTickets(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	other := NewQuotaLedger()
+	unknown := QuotaTicket{ledger: ledger, id: 999}
+	if ledger.Release(QuotaTicket{}, now) || ledger.Release(unknown, now) {
+		t.Fatal("zero and unknown tickets must be rejected")
 	}
-
-	t.Setenv("PROXY_QUOTA_HARD_SKIP", "true")
-	if got := svc.filterAvailableAttempts([]modelAttempt{alpha}); len(got) != 0 {
-		t.Errorf("exhausted model survived hard skip: %v", got)
+	if ledger.Reconcile(unknown, nil, now) {
+		t.Fatal("unknown ticket reconciliation must be rejected")
 	}
-}
-
-// A quota-emptied chain still tells the client when to come back.
-func TestQuota_RetryAfterCoversQuotaOnlyExhaustion(t *testing.T) {
-	svc := &RouterService{modelBreakers: map[string]*modelBreakerState{}}
-	svc.policy = policyConfig{DefaultProfile: "coding", Profiles: map[string][]string{"coding": {"org/alpha:free"}}}
-	svc.quota = newQuotaLedger(map[string]quotaLimit{"model:org/alpha:free": {RPM: 1}})
-
-	alpha := modelAttempt{Profile: "coding", Model: "org/alpha:free"}
-	svc.quota.record(alpha)
-
-	if wait := svc.retryAfterForAttempts([]modelAttempt{alpha}); wait <= 0 {
-		t.Error("Retry-After = 0 for a chain emptied by quota; the client is told nothing")
+	foreign, ok := other.Reserve(quotaTestKey(QuotaDimensionRequests), 1, now)
+	if !ok {
+		t.Fatal("could not create foreign ticket")
+	}
+	if ledger.Release(foreign, now) || ledger.Reconcile(foreign, nil, now) {
+		t.Fatal("ticket from another ledger must be rejected")
 	}
 }
 
-// The trace must not report a spent budget as an open circuit: "broken now" and
-// "out of allowance until midnight" call for different actions.
-func TestQuota_TraceSeparatesQuotaFromBreaker(t *testing.T) {
-	tr := &routeTrace{Profile: "coding"}
-	tr.recordQuotaExclusions(2)
-	tr.recordChain(4, 4, 1, nil)
+func TestQuotaLedgerTicketSettlementIsExactlyOnceUnderConcurrency(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionRequests)
+	if !ledger.Observe(key, quotaTestObservation(10, 10, now.Add(time.Minute)), now) {
+		t.Fatal("could not observe quota")
+	}
+	ticket, ok := ledger.Reserve(key, 1, now)
+	if !ok {
+		t.Fatal("could not reserve quota")
+	}
 
-	if tr.ExcludedByQuota != 2 {
-		t.Errorf("ExcludedByQuota = %d, want 2", tr.ExcludedByQuota)
+	const contenders = 50
+	results := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- ledger.Release(ticket, now)
+		}()
 	}
-	if tr.ExcludedByBreaker != 1 {
-		t.Errorf("ExcludedByBreaker = %d, want 1 (4 planned - 1 eligible - 2 quota)", tr.ExcludedByBreaker)
+	wg.Wait()
+	close(results)
+	successes := 0
+	for success := range results {
+		if success {
+			successes++
+		}
 	}
-	header := tr.header()
-	if !strings.Contains(header, "q=2") {
-		t.Errorf("header does not report the quota exclusions: %s", header)
+	if successes != 1 {
+		t.Fatalf("ticket settled %d times, want exactly once", successes)
 	}
-	if !strings.Contains(header, "brk=1") {
-		t.Errorf("header lost the breaker exclusions: %s", header)
+	if snapshot, _ := ledger.Snapshot(key, now); snapshot.Reserved != 0 {
+		t.Fatalf("reservation remained after settlement: %+v", snapshot)
+	}
+}
+
+func TestQuotaLedgerObservationClampsMalformedRemainingAndUsesObservedAt(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	ledger := NewQuotaLedger()
+	key := quotaTestKey(QuotaDimensionRequests)
+	if !ledger.Observe(key, QuotaObservation{
+		Limit:      10,
+		Remaining:  99,
+		ResetAt:    now.Add(time.Minute),
+		Source:     QuotaSourceConfig,
+		Confidence: QuotaConfidenceEstimated,
+	}, now) {
+		t.Fatal("could not observe quota")
+	}
+	snapshot, ok := ledger.Snapshot(key, now)
+	if !ok || snapshot.Remaining != 10 || !snapshot.ObservedAt.Equal(now) {
+		t.Fatalf("observation was not normalised: %+v ok=%v", snapshot, ok)
+	}
+	if ledger.Observe(key, quotaTestObservation(-1, 0, now.Add(time.Minute)), now) {
+		t.Fatal("negative limit must be rejected")
 	}
 }

@@ -36,8 +36,15 @@ func TestLoad_NoDeadlockUnderConcurrency(t *testing.T) {
 
 	bindHost = "127.0.0.1"
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	// This is a proxy concurrency/deadlock test against a local mock, not an
+	// upstream free-tier quota test. Keep the quota guard out of its artificial
+	// 1,500-request burst while the dedicated router tests exercise RPM/RPD.
+	t.Setenv("PROXY_OPENROUTER_FREE_RPM", "200000")
+	t.Setenv("PROXY_OPENROUTER_FREE_RPD", "200000")
 
-	// Mock upstream: mostly 200 (JSON or SSE), failPct% 429/500.
+	// Mock upstream: mostly 200 (JSON or SSE), failPct% model-local 500. Quota
+	// behavior has dedicated deterministic tests; random 429s would correctly
+	// cool all four models and turn this into a quota test instead of a lock test.
 	var rngMu sync.Mutex
 	rng := rand.New(rand.NewSource(1))
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,9 +53,8 @@ func TestLoad_NoDeadlockUnderConcurrency(t *testing.T) {
 		roll := rng.Intn(100)
 		rngMu.Unlock()
 		if roll < failPct {
-			w.Header().Set("Retry-After", "1") // must precede WriteHeader
-			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":{"message":"synthetic model failure"}}`)
 			return
 		}
 		if strings.Contains(string(body), `"stream":true`) {

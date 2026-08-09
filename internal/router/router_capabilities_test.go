@@ -157,6 +157,36 @@ func TestCapabilityRescue_StaysWithinProfiles(t *testing.T) {
 	}
 }
 
+func TestCapabilityRescuePreservesExplicitProviderModelPairs(t *testing.T) {
+	s := &RouterService{
+		config:        breakerConfig{FailureThreshold: 3},
+		modelBreakers: map[string]*modelBreakerState{},
+		providerProfiles: providerProfiles{
+			"coding": {
+				{Provider: providerOpenRouter, Model: "shared-model"},
+				{Provider: providerCerebras, Model: "shared-model"},
+				{Provider: providerGroq, Model: "groq-tools"},
+			},
+		},
+		capabilities: newCapabilityIndex(map[string][]string{
+			"shared-model": {"tools"},
+			"groq-tools":   {"tools"},
+		}),
+	}
+	got := s.capabilityRescue("reasoning", "/chat/completions", []string{capTools})
+	if len(got) != 3 {
+		t.Fatalf("expected every explicit provider-model pair, got %v", got)
+	}
+	if got[0].Provider != providerOpenRouter || got[1].Provider != providerCerebras || got[2].Provider != providerGroq {
+		t.Fatalf("provider priority/pairs were lost: %v", got)
+	}
+	for _, attempt := range got {
+		if attempt.Profile != "reasoning" || attempt.Path != "/chat/completions" {
+			t.Fatalf("rescue should stamp request metadata: %v", got)
+		}
+	}
+}
+
 func TestCapabilityIndex_ConcurrentRefreshNoRace(t *testing.T) {
 	idx := newCapabilityIndex(map[string][]string{"m": {"tools"}})
 	done := make(chan struct{})

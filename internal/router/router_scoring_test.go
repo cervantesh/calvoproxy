@@ -1,6 +1,7 @@
 package router
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -154,6 +155,101 @@ func TestRankReordersByScoreStable(t *testing.T) {
 	got := ranked[0].Model + ranked[1].Model + ranked[2].Model
 	if got != "BCA" {
 		t.Fatalf("expected order B,C,A by score, got %s", got)
+	}
+}
+
+func TestGlobalProviderRankingBalancesConsumptionAndUsesReliability(t *testing.T) {
+	t.Setenv("PROXY_SCORING_ENABLED", "true")
+	now := time.Now()
+	s := &RouterService{modelBreakers: map[string]*modelBreakerState{}, providerAttempts: map[providerID]int64{}, providerBalance: map[providerID]int64{}}
+	s.modelBreakers["coding:or-a"] = &modelBreakerState{Score: 0.1, ScoreUpdatedAt: now, Successes: 1}
+	s.modelBreakers["coding:cerebras:cb-a"] = &modelBreakerState{Score: 0.9, ScoreUpdatedAt: now, Successes: 10}
+	s.modelBreakers["coding:groq:g-a"] = &modelBreakerState{Score: 0.7, ScoreUpdatedAt: now, Successes: 10}
+	attempts := []modelAttempt{
+		{Profile: "coding", Provider: providerOpenRouter, Model: "or-a"},
+		{Profile: "coding", Provider: providerCerebras, Model: "cb-a"},
+		{Profile: "coding", Provider: providerGroq, Model: "g-a"},
+	}
+
+	want := []providerID{providerCerebras, providerGroq, providerOpenRouter, providerCerebras, providerGroq, providerOpenRouter}
+	for round, expected := range want {
+		ranked := s.rankAndReserveAttempts(attempts)
+		if ranked[0].Provider != expected {
+			t.Fatalf("round %d: got primary %s, want %s; balance=%v", round+1, ranked[0].Provider, expected, s.providerBalance)
+		}
+	}
+	if s.providerBalance[providerOpenRouter] != 2 || s.providerBalance[providerCerebras] != 2 || s.providerBalance[providerGroq] != 2 {
+		t.Fatalf("providers should be scheduled evenly, got %v", s.providerBalance)
+	}
+}
+
+func TestGlobalProviderRankingKeepsIndependentModelScoreOrder(t *testing.T) {
+	t.Setenv("PROXY_SCORING_ENABLED", "true")
+	now := time.Now()
+	s := &RouterService{modelBreakers: map[string]*modelBreakerState{}, providerAttempts: map[providerID]int64{}, providerBalance: map[providerID]int64{}}
+	s.modelBreakers["coding:cerebras:slow"] = &modelBreakerState{Score: 0.2, ScoreUpdatedAt: now, Successes: 1}
+	s.modelBreakers["coding:cerebras:reliable"] = &modelBreakerState{Score: 0.9, ScoreUpdatedAt: now, Successes: 10}
+	attempts := []modelAttempt{
+		{Profile: "coding", Provider: providerCerebras, Model: "slow"},
+		{Profile: "coding", Provider: providerCerebras, Model: "reliable"},
+		{Profile: "coding", Provider: providerGroq, Model: "other"},
+	}
+	ranked := s.rankAndReserveAttempts(attempts)
+	if ranked[0].Provider != providerGroq {
+		t.Fatalf("unseen Groq should win the global reliability tie-break, got %v", ranked)
+	}
+	if ranked[1].Provider != providerCerebras || ranked[1].Model != "reliable" || ranked[2].Model != "slow" {
+		t.Fatalf("Cerebras models should retain their independent score order: %v", ranked)
+	}
+}
+
+func TestRecoveredProviderDoesNotCreateHistoricalCatchupBurst(t *testing.T) {
+	t.Setenv("PROXY_SCORING_ENABLED", "true")
+	s := &RouterService{
+		modelBreakers:    map[string]*modelBreakerState{},
+		providerAttempts: map[providerID]int64{providerOpenRouter: 100, providerCerebras: 100, providerGroq: 0},
+		providerBalance:  map[providerID]int64{providerOpenRouter: 100, providerCerebras: 100, providerGroq: 0},
+	}
+	attempts := []modelAttempt{
+		{Profile: "coding", Provider: providerOpenRouter, Model: "or"},
+		{Profile: "coding", Provider: providerCerebras, Model: "cb"},
+		{Profile: "coding", Provider: providerGroq, Model: "g"},
+	}
+	first := s.rankAndReserveAttempts(attempts)
+	if first[0].Provider != providerGroq {
+		t.Fatalf("recovered provider should receive one balancing opportunity, got %v", first)
+	}
+	if s.providerBalance[providerGroq] != 100 {
+		t.Fatalf("recovered provider should rebase instead of repaying 100 historical calls: %v", s.providerBalance)
+	}
+	second := s.rankAndReserveAttempts(attempts)
+	if second[0].Provider != providerOpenRouter {
+		t.Fatalf("after one recovery opportunity normal reliable/policy ordering should resume, got %v", second)
+	}
+}
+
+func TestConcurrentGlobalReservationsStayBalanced(t *testing.T) {
+	s := &RouterService{
+		modelBreakers:    map[string]*modelBreakerState{},
+		providerAttempts: map[providerID]int64{},
+		providerBalance:  map[providerID]int64{},
+	}
+	attempts := []modelAttempt{
+		{Profile: "coding", Provider: providerOpenRouter, Model: "or"},
+		{Profile: "coding", Provider: providerCerebras, Model: "cb"},
+		{Profile: "coding", Provider: providerGroq, Model: "g"},
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 300; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.rankAndReserveAttempts(attempts)
+		}()
+	}
+	wg.Wait()
+	if s.providerBalanceCount(providerOpenRouter) != 100 || s.providerBalanceCount(providerCerebras) != 100 || s.providerBalanceCount(providerGroq) != 100 {
+		t.Fatalf("atomic reservations should distribute a burst evenly, got %v", s.providerBalance)
 	}
 }
 

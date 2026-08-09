@@ -35,13 +35,7 @@ func (s *RouterService) isModelAvailable(attempt modelAttempt) bool {
 // availability is never computed via a second, re-entrant RLock — Go's RWMutex
 // is not recursive and a nested RLock deadlocks whenever a writer is waiting.
 func (s *RouterService) isModelAvailableLocked(attempt modelAttempt) bool {
-	// Quota is consulted here so hard exclusion inherits the breaker's own choke
-	// points (filterAvailableAttempts, Health readiness) without sharing its
-	// STATE — writing a quota window into OpenUntil would be erased by the next
-	// recordSuccess and would report a spent budget as a broken circuit.
-	// Lock order: the caller already holds breakerMu, and the ledger never calls
-	// back into the breaker, so breakerMu -> quota.mu is the only direction.
-	if s.quota.exhausted(attempt) {
+	if !s.isProviderAvailableLocked(attempt.Provider) {
 		return false
 	}
 	state := s.modelBreakers[s.breakerKey(attempt)]
@@ -200,12 +194,35 @@ func (s *RouterService) breakerKey(attempt modelAttempt) string {
 	if profile == "" {
 		profile = s.getPolicy().DefaultProfile
 	}
-	return profile + ":" + strings.TrimSpace(attempt.Model)
+	provider := strings.TrimSpace(string(attempt.Provider))
+	if provider == "" {
+		provider = string(s.defaultPolicyProvider())
+	}
+	// Preserve the historical OpenRouter key space so existing score files and
+	// metrics remain continuous across the multi-provider upgrade.
+	if provider == string(providerOpenRouter) {
+		return profile + ":" + strings.TrimSpace(attempt.Model)
+	}
+	return profile + ":" + provider + ":" + strings.TrimSpace(attempt.Model)
 }
 
 func (s *RouterService) allKnownAttempts() []modelAttempt {
 	seen := map[string]struct{}{}
 	attempts := make([]modelAttempt, 0)
+	if profiles := s.getProviderProfiles(); len(profiles) > 0 {
+		for profile, targets := range profiles {
+			for _, target := range targets {
+				candidate := modelAttempt{Profile: profile, Model: target.Model, Provider: target.Provider, BreakerPolicy: s.defaultBreakerPolicy()}
+				if _, ok := seen[s.breakerKey(candidate)]; ok {
+					continue
+				}
+				seen[s.breakerKey(candidate)] = struct{}{}
+				attempts = append(attempts, candidate)
+			}
+		}
+		sort.Slice(attempts, func(i, j int) bool { return s.breakerKey(attempts[i]) < s.breakerKey(attempts[j]) })
+		return attempts
+	}
 	for profile, chain := range s.getPolicy().Profiles {
 		for _, model := range chain {
 			candidate := modelAttempt{Profile: profile, Model: model, Provider: s.defaultPolicyProvider(), BreakerPolicy: s.defaultBreakerPolicy()}
@@ -244,14 +261,32 @@ func (s *RouterService) retryAfterForAttempts(attempts []modelAttempt) time.Dura
 			soonest = d
 		}
 	}
-	// A chain emptied by quota rather than by breakers still owes the client a
-	// Retry-After; without this the 503 says "come back sometime".
+	return soonest
+}
+
+// dailyFreeQuotaReasonForAttempts preserves the actionable upstream reason
+// while every model is cooling down. Without it, the first request explains the
+// daily quota, but every automatic client retry falls into the no-attempts path
+// and replaces that explanation with an ambiguous generic 503.
+func (s *RouterService) dailyFreeQuotaReasonForAttempts(attempts []modelAttempt) string {
+	s.breakerMu.RLock()
+	defer s.breakerMu.RUnlock()
+
+	now := time.Now()
+	message := ""
 	for _, attempt := range attempts {
-		if d := s.quota.retryAfter(attempt); d > 0 && (soonest == 0 || d < soonest) {
-			soonest = d
+		state := s.modelBreakers[s.breakerKey(attempt)]
+		if state == nil || !state.OpenUntil.After(now) {
+			return ""
+		}
+		if !strings.HasPrefix(state.LastFailureReason, openRouterDailyFreeQuotaPrefix) {
+			return ""
+		}
+		if message == "" {
+			message = state.LastFailureReason
 		}
 	}
-	return soonest
+	return message
 }
 
 func (s *RouterService) filterAvailableAttempts(attempts []modelAttempt) []modelAttempt {
@@ -277,6 +312,11 @@ func (s *RouterService) healthFacts() ProxyHealth {
 	now := time.Now()
 	openCount := 0
 	for _, state := range s.modelBreakers {
+		if state.OpenUntil.After(now) {
+			openCount++
+		}
+	}
+	for _, state := range s.providerBreakers {
 		if state.OpenUntil.After(now) {
 			openCount++
 		}
@@ -314,6 +354,27 @@ func (s *RouterService) ambientKeyConfigured() bool {
 	return envValue("OPENROUTER_API_KEY") != ""
 }
 
+func (s *RouterService) providerConfigured(provider providerID) bool {
+	switch provider {
+	case providerCerebras:
+		return envValue("CEREBRAS_API_KEY") != "" || s.ambientProviderCredentialConfigured(provider)
+	case providerGroq:
+		return envValue("GROQ_API_KEY") != "" || s.ambientProviderCredentialConfigured(provider)
+	default:
+		return s.ambientKeyConfigured()
+	}
+}
+
+func (s *RouterService) ambientProviderCredentialConfigured(provider providerID) bool {
+	if s == nil || s.AmbientProviderCredential == nil {
+		return false
+	}
+	secret, ok := s.AmbientProviderCredential(string(provider))
+	configured := ok && len(secret) > 0
+	clear(secret)
+	return configured
+}
+
 // Health returns a ProxyHealth snapshot of all circuit breakers.
 func (s *RouterService) Health() ProxyHealth {
 	s.breakerMu.RLock()
@@ -345,11 +406,41 @@ func (s *RouterService) Health() ProxyHealth {
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Model < snapshots[j].Model })
 
-	// Budget is reported beside health, never mixed into it: an exhausted window
-	// is not a degraded circuit, and Status must not say "unavailable" because
-	// the day's allowance ran out.
-	quotas := s.quota.observe()
-	sort.Slice(quotas, func(i, j int) bool { return quotas[i].Scope < quotas[j].Scope })
+	providers := make([]ProviderSnapshot, 0, 3)
+	knownAttempts := s.allKnownAttempts()
+	for _, provider := range []providerID{providerOpenRouter, providerCerebras, providerGroq} {
+		providerSnapshot := ProviderSnapshot{
+			Provider:         string(provider),
+			Configured:       s.providerConfigured(provider),
+			State:            "closed",
+			Attempts:         s.providerAttempts[provider],
+			ReliabilityScore: s.providerReliabilityLocked(provider, knownAttempts, env),
+			Quota:            s.quotaHealth(provider, now),
+		}
+		if state := s.providerBreakers[provider]; state != nil {
+			providerSnapshot.ConsecutiveFailures = state.ConsecutiveFailures
+			providerSnapshot.LastFailureCode = state.LastFailureCode
+			providerSnapshot.LastFailureReason = state.LastFailureReason
+			providerSnapshot.LastFailureAt = state.LastFailureAt
+			providerSnapshot.OpenUntil = state.OpenUntil
+			if state.OpenUntil.After(now) {
+				providerSnapshot.State = "open"
+				openCount++
+			} else if !state.OpenUntil.IsZero() {
+				providerSnapshot.State = "half-open"
+			}
+		}
+		providers = append(providers, providerSnapshot)
+	}
+	quotas := make([]QuotaSnapshot, 0)
+	if ledger := s.quotaLedger(); ledger != nil {
+		for _, key := range ledger.Keys(now) {
+			if snapshot, ok := ledger.Snapshot(key, now); ok {
+				quotas = append(quotas, snapshot)
+			}
+		}
+		sort.Slice(quotas, func(i, j int) bool { return quotaKeyString(quotas[i].Key) < quotaKeyString(quotas[j].Key) })
+	}
 
 	status := "ok"
 	ready := true
@@ -382,7 +473,7 @@ func (s *RouterService) Health() ProxyHealth {
 		Status:             status,
 		Ready:              ready,
 		OpenCircuitCount:   openCount,
-		ConfiguredAPIKey:   s.ambientKeyConfigured(),
+		ConfiguredAPIKey:   s.providerConfigured(providerOpenRouter) || s.providerConfigured(providerCerebras) || s.providerConfigured(providerGroq),
 		DefaultExecutor:    string(s.defaultPolicyProvider()),
 		Profiles:           profileNames(s.getPolicy().Profiles),
 		FailureThreshold:   s.config.FailureThreshold,
@@ -393,10 +484,28 @@ func (s *RouterService) Health() ProxyHealth {
 		PolicyHash:         s.policyMetadata.PolicyHash,
 		PolicyVocabHash:    s.policyMetadata.VocabularyHash,
 		ModelPolicy:        s.ModelPolicyHealth(),
+		Providers:          providers,
 		Circuits:           snapshots,
 		Quotas:             quotas,
 		Timestamp:          now,
 	}
+}
+
+func (s *RouterService) providerReliabilityLocked(provider providerID, attempts []modelAttempt, env scoreEnv) float64 {
+	best := -1.0
+	for _, attempt := range attempts {
+		if s.normalizedProvider(attempt) != provider {
+			continue
+		}
+		score := decayedScore(s.modelBreakers[s.breakerKey(attempt)], env)
+		if score > best {
+			best = score
+		}
+	}
+	if best < 0 {
+		return 0
+	}
+	return best
 }
 
 func (s *RouterService) defaultPolicyProvider() cervorules.Executor {
@@ -466,6 +575,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 	t.mu.Lock()
 	hb := t.hostState(host)
 	now := time.Now()
+	probing := false
 	switch {
 	case now.Before(hb.openUntil):
 		t.mu.Unlock()
@@ -484,6 +594,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 			ttl = hdr
 		}
 		hb.probeUntil = now.Add(ttl)
+		probing = true
 	}
 	t.mu.Unlock()
 
@@ -508,7 +619,7 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 		//
 		// Neutral, exactly like the 429 case below: neither a failure nor a
 		// success, so it cannot erase real accumulated host faults either.
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || req.Context().Err() != nil {
 			return resp, err
 		}
 		hb.failures++
@@ -520,22 +631,17 @@ func (t *GlobalBreakerTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}
 
 	switch {
-	case resp.StatusCode == http.StatusBadGateway ||
-		resp.StatusCode == http.StatusServiceUnavailable ||
-		resp.StatusCode == http.StatusGatewayTimeout:
-		// Genuine host-level faults.
-		hb.failures++
-		if hb.failures >= t.FailureThreshold {
-			hb.openUntil = time.Now().Add(t.Cooldown)
-			slog.Error("[CalvoProxy] 🚨 HOST CIRCUIT OPEN: host is returning errors", slog.String("host", host), slog.Int("http_code", resp.StatusCode), slog.String("open_until", hb.openUntil.Format(time.RFC3339)))
-		}
-	case resp.StatusCode == http.StatusTooManyRequests:
-		// Rate limiting is NEUTRAL at the host level: it is a per-model/per-key
-		// quota signal, already handled by the model breaker (with Retry-After).
-		// Counting it here would open the circuit for EVERY model on the host;
-		// treating it as success would erase real accumulated host failures.
-	case resp.StatusCode < 500:
-		// A real answer from the host: it is healthy again.
+	case resp.StatusCode >= 500 && probing:
+		// The transport recovered enough to answer, but the half-open probe did
+		// not establish a healthy host. Re-open without converting ordinary 5xx
+		// responses into shared-host failures.
+		hb.openUntil = time.Now().Add(t.Cooldown)
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		// Neutral: these can be quota or one downstream model behind an
+		// aggregator. They neither open the shared host circuit nor erase prior
+		// transport-level evidence.
+	default:
+		// A non-server response proves the shared host recovered.
 		hb.failures = 0
 		hb.openUntil = time.Time{}
 	}
@@ -565,9 +671,15 @@ func classifyTransportError(err error) *attemptError {
 
 func classifyHTTPError(statusCode int, responseBody string) *attemptError {
 	classification := cervoretry.ClassifyHTTPStatus(statusCode, responseBody)
+	message := classification.Message
+	if statusCode == http.StatusTooManyRequests {
+		if quotaMessage, ok := openRouterDailyFreeQuotaMessage(responseBody); ok {
+			message = quotaMessage
+		}
+	}
 	return &attemptError{
 		StatusCode:      classification.StatusCode,
-		Message:         classification.Message,
+		Message:         message,
 		BreakerEligible: classification.BreakerEligible,
 		Retryable:       classification.Retryable,
 	}

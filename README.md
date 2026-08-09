@@ -103,6 +103,8 @@ before exit.
 | `PORT`               | `8080`  | HTTP listen port                     |
 | `GRPC_PORT`          | `9090`  | gRPC listen port (see [gRPC](#grpc-transport)); a bind failure is non-fatal |
 | `OPENROUTER_API_KEY` | —       | Upstream key for the default executor|
+| `CEREBRAS_API_KEY`   | —       | Direct Cerebras fallback key (`gpt-oss-120b`) |
+| `GROQ_API_KEY`       | —       | Direct Groq fallback key (`openai/gpt-oss-120b`, or the bulk model) |
 | `PROXY_IDLE_TIMEOUT` | off     | Exit after this idle period (Go duration, e.g. `20m`) — enables on-demand use |
 | `PROXY_MAX_BODY_BYTES` | `10485760` | Max request body (10 MiB) — guards against oversized payloads |
 | `PROXY_MAX_RESPONSE_BYTES` | `26214400` | Max buffered non-streaming upstream response (25 MiB) — guards against OOM |
@@ -116,16 +118,27 @@ before exit.
 | `PROXY_SCORING_ENABLED` | `true` | Reorder the chain by per-model reliability score (see below) |
 | `PROXY_SCORING_RECOVERY_SECONDS` | `21600` (6 h) | Wall-clock half of the score decay window: how long a demoted model takes to be fully forgiven |
 | `PROXY_SCORING_RECOVERY_ATTEMPTS` | `50` | Evidence half of the same window: how many further scored attempts, proxy-wide, it takes. Decay advances at the **slower** of the two, so an idle proxy does not forget |
+| `PROXY_OPENROUTER_FREE_RPD` / `PROXY_OPENROUTER_FREE_RPM` | `50` / `20` | Conservative bootstrap for the shared OpenRouter `:free` pool; authoritative provider metadata replaces it |
+| `PROXY_CEREBRAS_RPD` / `PROXY_CEREBRAS_RPM` | `14400` / `30` | Cerebras request-window bootstrap; provider headers take precedence |
+| `PROXY_CEREBRAS_TPM` / `PROXY_CEREBRAS_TPD` | `64000` / `1000000` | Cerebras token-window bootstrap |
+| `PROXY_GROQ_RPD` / `PROXY_GROQ_RPM` | model default / `30` | Groq request-window bootstrap (`1000` RPD for gpt-oss, `14400` for llama-3.1-8b) |
+| `PROXY_GROQ_TPM` / `PROXY_GROQ_TPD` | model default | Groq token-window bootstrap; documented model defaults are used until headers arrive |
+| `PROXY_QUOTA_LATENCY_BUDGET_MS` | `1000` | Within the 5-point quota-pressure band, demote a target whose established first-token mean exceeds the faster target by this amount |
 | `PROXY_SCORE_FILE` | `<user-config-dir>/calvoproxy/scores.json` | Where learned scores are persisted across restarts. Set to `off` to disable persistence |
 | `PROXY_SCORE_MAX_AGE_SECONDS` | `86400` (24 h) | Discard a persisted score file (and individual entries) older than this |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
 | `PROXY_BREAKER_COOLDOWN_SECONDS` | `60` | How long an open circuit skips a model |
 | `PROXY_OPENROUTER_URL` | OpenRouter | Override the OpenRouter chat endpoint (e.g. a mock) |
+| `PROXY_CEREBRAS_URL` | Cerebras | Override the Cerebras OpenAI-compatible chat endpoint |
+| `PROXY_GROQ_URL` | Groq | Override the Groq OpenAI-compatible chat endpoint |
 | `PROXY_AGENTIC_URL`  | off     | If set, `agent`/`plan` profiles route here; unset → normal OpenRouter routing |
 | `PROXY_WORKSPACE_SIDE_EFFECTS` | `false` | Opt-in monorepo git/sqlite extractor (off by default) |
 | `PROXY_ADMIN_TOKEN`  | off     | If set, gates `/health`, `/metrics`, `/health/model-policy`, `/admin/reload` behind a Bearer token (constant-time) |
+| `PROXY_VAULT_FILE` | `<user-config-dir>/calvoproxy/providers.vault` | Encrypted provider-key vault path |
+| `PROXY_VAULT_MASTER_KEY_FILE` | off | Explicit 32-byte master-key file for Linux containers/non-systemd only; symlinks and group/world permissions are rejected |
+| `PROXY_ADMIN_ALLOW_INSECURE_REMOTE` | `false` | Allow the provider-key UI over remote plain HTTP. Unsafe; prefer TLS or loopback |
 | `PROXY_METRICS_TOKEN` | off    | If set, `/metrics` accepts this token OR the admin token — decouples the scraper credential from admin |
-| `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending the env `OPENROUTER_API_KEY` for keyless requests on a **public** bind (loopback always allows it) |
+| `PROXY_ALLOW_ENV_KEY_PUBLIC` | `false` | Allow spending ambient OpenRouter, Cerebras, or Groq keys for keyless requests on a **public** bind (loopback always allows it) |
 | `PROXY_OAUTH_REQUIRE_STATE` | `true` | Require a matching CSRF `state` on the `calvoproxy login` callback. OpenRouter echoes it, so this is on by default; set `false` only for a provider that doesn't (the secret callback path + PKCE still apply) |
 | `PROXY_UPDATE_CHECK` | `true`  | Startup check for a newer release (logs a recommendation). Set `false` to disable |
 | `PROXY_ALLOW_PAID_EMBEDDINGS` | `false` | Allow `/v1/embeddings`, which bills real credit — OpenRouter has no free embedding model, and that path has no chain/breaker/fallback |
@@ -146,6 +159,32 @@ readiness only.
 > refuses to spend the env `OPENROUTER_API_KEY` for keyless requests unless
 > `PROXY_ALLOW_ENV_KEY_PUBLIC=true`, so an exposed instance can't become an open
 > relay on your dime. A startup warning fires if you expose it without a token.
+
+### Multi-provider fallback
+
+`model-policy.json` may define `ProviderProfiles`, an ordered list of explicit
+`Provider` + `Model` pairs for each profile. The shipped text chains seed the
+deterministic tie order as OpenRouter, Cerebras, then Groq. Authentication and
+shared transport failures remain circuit-breaker concerns. Quota is tracked
+separately: a model/window 429 suppresses only that bucket, while OpenRouter's
+account-wide `:free` pool suppresses sibling free models without blocking a
+paid OpenRouter model.
+
+Providers are consumed at an approximately equal **normalized quota pressure**,
+not at a raw 1:1:1 request count. The scheduler reserves every applicable
+request/token minute/day bucket atomically before dispatch and reconciles the
+estimate with response headers or usage. Differences under five percentage
+points form a fairness band; inside it, reliability and established first-token
+latency decide. Provider groups are interleaved before `MaxAttempts` truncation,
+so a short fallback chain still contains another provider. Active quota facts
+survive restart; in-flight reservations do not.
+
+Credentials are isolated: an OpenRouter key is never sent to Cerebras or Groq,
+and vice versa. `/health` reports each provider's `configured`, `state`, actual
+`attempts`, `reliability_score`, `open_until`, and normalized `quota` buckets
+without returning key values or credential fingerprints. Direct Cerebras/Groq routing
+is used for OpenAI-compatible chat completions; Anthropic `/messages` and the
+current vision chain remain on OpenRouter.
 
 **Hot-reload** the model chains without a restart: edit `model-policy.json`, then
 `kill -HUP <pid>` (Unix) or `POST /admin/reload` (any platform, admin-gated).
@@ -191,15 +230,22 @@ Two layers keep flaky models out of the way:
 - **Circuit breaker** (hard gate): after `PROXY_BREAKER_FAILURE_THRESHOLD`
   consecutive failures a model's circuit **opens** and it is skipped entirely
   for `PROXY_BREAKER_COOLDOWN_SECONDS`; a success closes it.
-- **Reliability score** (soft ranking): every model carries a score in `[0,1]`
-  that rises on success and falls on failure — harder for rate-limits (429),
-  server errors (5xx) and timeouts, and it also drops for "model unavailable"
-  404s. The eligible chain is **reordered by score** (most reliable first)
-  before each request, so a struggling model sinks to the back without being
-  removed, and recovers toward a neutral baseline so it gets retried later.
+- **Reliability score** (soft ranking): every provider/model pair carries an
+  independent score in `[0,1]`
+  that rises on success and falls on model failures such as server errors,
+  timeouts, and "model unavailable"
+  404s. Models are reordered inside their provider; the global scheduler then
+  balances provider consumption and uses the best provider score as its
+  reliability tie-break. A struggling model sinks without contaminating the
+  score of the same model at another provider, and recovers toward a neutral
+  baseline so it gets retried later.
   Scores are visible under `circuits[].score` in `/health` and as
   `calvoproxy_model_score` in `/metrics`. Set `PROXY_SCORING_ENABLED=false` to
-  keep the static chain order.
+  disable reliability reordering; provider consumption balancing remains active.
+
+Quota 429s and provider authentication failures never change a model's
+reliability score or its evidence clock. They update the independent quota or
+provider-auth state instead.
 
 **How a score recovers.** Decay is measured against two clocks and advances at
 the **slower** of them: elapsed wall time (`PROXY_SCORING_RECOVERY_SECONDS`,
@@ -231,7 +277,7 @@ build — discarded everything the proxy had learned. Deliberate limits:
 
 - **Breaker state is not persisted.** A cooldown is a statement about right now,
   and a restart is a good reason to re-probe. Only the score, its two clock
-  readings, and the success count survive.
+  readings, success count, and provider consumption clocks survive.
 - **Stale files are discarded** whole, along with individual entries older than
   `PROXY_SCORE_MAX_AGE_SECONDS` (default 24 h). Free-tier slugs get retired and
   re-provisioned on that timescale.
@@ -572,6 +618,34 @@ Quick check:
 curl -s http://127.0.0.1:8080/health
 ```
 
+## Provider key console
+
+Set a strong `PROXY_ADMIN_TOKEN`, start CalvoProxy, and open
+`http://127.0.0.1:8080/admin/providers`. The responsive web console manages one
+encrypted key each for OpenRouter, Cerebras, and Groq, and can test a key without
+returning it to the browser. Remote access requires HTTPS unless the explicit
+unsafe override is enabled. The console uses an HttpOnly, SameSite=Strict session
+cookie, same-origin and CSRF checks, strict response headers, and never places a
+provider key in browser storage.
+
+The vault format is shared across platforms, while only its random 256-bit master
+key is delegated to the host: Windows DPAPI CurrentUser, macOS Keychain in native
+CGO-enabled builds, and a systemd credential or explicit protected file on
+headless Linux. Linux provisioning is documented in
+[`docs/linux-headless-vault.md`](docs/linux-headless-vault.md). There is no
+implicit plaintext fallback; when the master key is unavailable the vault stays
+locked and environment credentials continue working.
+
+Runtime precedence is:
+
+- OpenRouter: request `Authorization` → `OPENROUTER_API_KEY` → managed vault → legacy login file.
+- Cerebras: `CEREBRAS_API_KEY` → managed vault.
+- Groq: `GROQ_API_KEY` → managed vault.
+
+An environment credential therefore remains authoritative even if a managed key
+is saved in the console. Ambient credentials from either source are refused for
+keyless traffic on a public bind unless `PROXY_ALLOW_ENV_KEY_PUBLIC=true`.
+
 ## Sign in to OpenRouter (`calvoproxy login`)
 
 Instead of copy-pasting an API key from the dashboard, authorize CalvoProxy via
@@ -601,15 +675,17 @@ On top of that, a matching CSRF `state` is **required by default**
 (`PROXY_OAUTH_REQUIRE_STATE`) — an interactive login confirmed OpenRouter echoes
 it, so demanding it closes the login-CSRF hole outright instead of leaning on the
 secret path alone. Set it to `false` only if your provider doesn't echo `state`;
-the login then still works, protected by the secret path and PKCE. The key is written to
+the login then still works, protected by the secret path and PKCE. The key is initially written to
 `<user-config-dir>/calvoproxy/openrouter.key` (`%AppData%` on Windows,
-`~/.config` on Linux, `~/Library/Application Support` on macOS), `0600`.
+`~/.config` on Linux, `~/Library/Application Support` on macOS), `0600`. On the
+next server start, an unlocked vault imports and verifies it before deleting the
+legacy file. A failed or locked migration leaves the original file intact.
 
 - `--no-browser` prints the URL to open manually.
 - `--key-stdin` stores a key piped in, no browser (`echo sk-or-v1-… | calvoproxy login --key-stdin`) — for headless/CI.
 
 **Key precedence** for a keyless request is: request `Authorization` header →
-`OPENROUTER_API_KEY` env → the stored login key. The stored key is **ambient**
+`OPENROUTER_API_KEY` env → the managed vault → the stored login key. Stored keys are **ambient**
 like the env key, so on a public bind it is refused unless
 `PROXY_ALLOW_ENV_KEY_PUBLIC=true` (a header key always wins and bypasses the gate).
 For public/Docker deployments, inject `OPENROUTER_API_KEY` or pass a per-request
