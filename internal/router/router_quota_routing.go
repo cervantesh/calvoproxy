@@ -435,6 +435,9 @@ func (s *RouterService) observeAndSettleQuota(ticket QuotaTicket, attempt modelA
 			continue
 		}
 		key.Scope = credentialQuotaScope(string(observation.Scope), credential)
+		if fact.ResetAt.IsZero() && key.Window == QuotaWindowMinute {
+			fact.ResetAt = nextMinuteReset(now)
+		}
 		facts[key] = fact
 		s.quotaLedger().Observe(key, fact, now)
 	}

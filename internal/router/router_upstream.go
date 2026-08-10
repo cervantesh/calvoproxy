@@ -209,6 +209,15 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 				slog.Int("status", resp.StatusCode),
 				slog.Bool("provider_relayed", isProviderRelayedError(string(respBytes))))
 		}
+		if adapterForProvider(attempt.Provider).IsCompatibilityError(resp.StatusCode, string(respBytes)) {
+			// A provider-wide schema mismatch should not burn every sibling model
+			// in that provider. Move directly to the next provider's contract.
+			attErr.ProviderUnavailable = true
+			attErr.SkipModel = true
+			slog.WarnContext(ctx, "[CalvoProxy] provider rejected an unsupported request field; trying another provider",
+				slog.String("provider", providerDisplayName(attempt.Provider)),
+				slog.String("model", attempt.Model))
+		}
 		recordTraceFailure(ctx, attempt, resp.StatusCode, traceKindFor(attErr), attErr.Message)
 		nonModelFailure := quotaLimited || providerAuthFailure
 		if !nonModelFailure {

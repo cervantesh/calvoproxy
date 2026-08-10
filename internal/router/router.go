@@ -231,8 +231,6 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		if !ok {
 			return
 		}
-		// Free models invent "sandbox" excuses on agent turns; pin reality first.
-		injectLocalAgentGuardrail(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
 		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
 		return
@@ -244,6 +242,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+	clampRequestMaxTokens(reqBody, envInt("PROXY_MAX_COMPLETION_TOKENS", 0))
 
 	messagesRaw, _ := reqBody["messages"].([]interface{})
 	hasTools := hasRequestTools(reqBody)
@@ -270,8 +269,6 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	// Free models invent "sandbox" excuses on agent turns; pin reality first.
-	injectLocalAgentGuardrail(reqBody)
 	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
 }
 

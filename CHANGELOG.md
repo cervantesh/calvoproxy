@@ -11,6 +11,13 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+- **Provider-specific OpenAI-compatible adapters.** Cerebras and Groq now
+  receive normalized payloads for their supported fields, including safe
+  handling of OpenCode reasoning history. An unsupported provider field now
+  advances the fallback chain to another provider instead of stopping the
+  request.
+
 ## [0.18.0] — 2026-08-09
 
 ### Added

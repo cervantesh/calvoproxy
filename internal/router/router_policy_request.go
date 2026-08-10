@@ -21,6 +21,30 @@ func hasRequestTools(reqBody map[string]interface{}) bool {
 	return false
 }
 
+func clampRequestMaxTokens(reqBody map[string]interface{}, maximum int) {
+	if reqBody == nil || maximum <= 0 {
+		return
+	}
+	for _, key := range []string{"max_completion_tokens", "max_tokens"} {
+		if value, ok := requestedMaxTokens(reqBody[key]); ok && value > maximum {
+			reqBody[key] = maximum
+		}
+	}
+	if _, hasCompletion := reqBody["max_completion_tokens"]; !hasCompletion {
+		if _, hasMax := reqBody["max_tokens"]; !hasMax {
+			reqBody["max_tokens"] = maximum
+		}
+	}
+}
+
+// requestBodyForAttempt creates the provider-specific wire body without
+// mutating the shared request used by later fallbacks. OpenAI-compatible APIs
+// are deliberately treated as contracts, not as one identical schema: Groq
+// and Cerebras each reject a different subset of optional OpenCode fields.
+func requestBodyForAttempt(reqBody map[string]interface{}, attempt modelAttempt) map[string]interface{} {
+	return adapterForProvider(attempt.Provider).NormalizeRequest(reqBody)
+}
+
 // localAgentGuardrailMarker is the unique prefix of the system message we inject
 // on tool-calling requests. Free models (OpenRouter :free) often invent
 // "I'm in a sandbox and cannot operate on your computer" even after successful
