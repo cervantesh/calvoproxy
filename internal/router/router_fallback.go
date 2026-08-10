@@ -133,8 +133,9 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 			continue
 		}
 		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
-		execution.RequestBody["model"] = attempt.Model
-		upBytes, _ := json.Marshal(execution.RequestBody)
+		requestBody := requestBodyForAttempt(execution.RequestBody, attempt)
+		requestBody["model"] = attempt.Model
+		upBytes, _ := json.Marshal(requestBody)
 		attempt.AttemptIndex = attemptIndex + 1
 		_, hasNextExecutable := nextExecutableAttempt(execution.Attempts, attemptIndex, unavailableProviders, unavailablePools, unavailableAttempts)
 		attempt.LastInChain = !hasNextExecutable

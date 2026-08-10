@@ -232,6 +232,14 @@ func (l *QuotaLedger) Snapshot(key QuotaBucketKey, now time.Time) (QuotaSnapshot
 	if bucket == nil {
 		return QuotaSnapshot{}, false
 	}
+	// A provider may report a minute bucket without a reset timestamp. Such a
+	// value cannot remain authoritative past its observed minute: keeping it
+	// would turn one old 429 into a permanent all-cooling state.
+	if key.Window == QuotaWindowMinute && bucket.observation.ResetAt.IsZero() &&
+		!bucket.observation.ObservedAt.IsZero() && now.Truncate(time.Minute).After(bucket.observation.ObservedAt.Truncate(time.Minute)) {
+		delete(l.buckets, key)
+		return QuotaSnapshot{}, false
+	}
 	available := bucket.observation.Remaining - bucket.reserved
 	if available < 0 {
 		available = 0

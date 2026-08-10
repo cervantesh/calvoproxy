@@ -2,10 +2,8 @@
   "DefaultProfile": "coding",
   "Profiles": {
     "coding": [
-      "nvidia/nemotron-3-super-120b-a12b:free",
-      "openai/gpt-oss-20b:free",
-      "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "google/gemma-4-31b-it:free"
+      "gpt-oss-120b",
+      "openai/gpt-oss-120b"
     ],
     "reasoning": [
       "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -35,10 +33,6 @@
   },
   "ProviderProfiles": {
     "coding": [
-      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-super-120b-a12b:free" },
-      { "Provider": "openrouter", "Model": "openai/gpt-oss-20b:free" },
-      { "Provider": "openrouter", "Model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
-      { "Provider": "openrouter", "Model": "google/gemma-4-31b-it:free" },
       { "Provider": "cerebras", "Model": "gpt-oss-120b" },
       { "Provider": "groq", "Model": "openai/gpt-oss-120b" }
     ],
