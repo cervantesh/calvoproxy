@@ -80,6 +80,10 @@ func runChatWith(args []string, in io.Reader, out io.Writer) int {
 	for {
 		fmt.Fprintf(out, "\n[%s] > ", s.profile)
 		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				fmt.Fprintf(out, "\ninput error: %v\n", err)
+				return 1
+			}
 			// EOF (Ctrl-D) is the ordinary way to leave a REPL, not a failure.
 			fmt.Fprintln(out)
 			return 0
@@ -234,6 +238,9 @@ func (s *chatSession) printStream(body io.Reader) string {
 			reply.WriteString(c.Delta.Content)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(s.out, "\nstream read error: %v\n", err)
+	}
 	return reply.String()
 }
 
@@ -320,9 +327,11 @@ func renderTrace(h http.Header) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("· " + strings.Join(segments, " · "))
+	b.WriteString("· ")
+	b.WriteString(strings.Join(segments, " · "))
 	if prev := fields["prev"]; prev != "" {
-		b.WriteString("\n  previously failed: " + renderPrev(prev))
+		b.WriteString("\n  previously failed: ")
+		b.WriteString(renderPrev(prev))
 	}
 	if fields["trunc"] == "1" {
 		b.WriteString("\n  (trace truncated)")

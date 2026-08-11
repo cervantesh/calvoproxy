@@ -122,6 +122,10 @@ type attemptError struct {
 	// in flight): the fallback loop advances to the next model immediately with no
 	// backoff and no score/breaker penalty, exactly like a model-unavailable 404.
 	SkipModel bool
+	// SkipProvider excludes sibling attempts for this request only. It is for a
+	// provider-specific payload/schema mismatch, which says nothing about the
+	// provider's health and must never open the global provider breaker.
+	SkipProvider bool
 	// ProviderUnavailable means the failure applies to the provider/account,
 	// not just this model. The fallback loop skips sibling models from the same
 	// provider while preserving this original actionable error.

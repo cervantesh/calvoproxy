@@ -21,6 +21,30 @@ func hasRequestTools(reqBody map[string]interface{}) bool {
 	return false
 }
 
+func clampRequestMaxTokens(reqBody map[string]interface{}, maximum int) {
+	if reqBody == nil || maximum <= 0 {
+		return
+	}
+	for _, key := range []string{"max_completion_tokens", "max_tokens"} {
+		if value, ok := requestedMaxTokens(reqBody[key]); ok && value > maximum {
+			reqBody[key] = maximum
+		}
+	}
+	if _, hasCompletion := reqBody["max_completion_tokens"]; !hasCompletion {
+		if _, hasMax := reqBody["max_tokens"]; !hasMax {
+			reqBody["max_tokens"] = maximum
+		}
+	}
+}
+
+// requestBodyForAttempt creates the provider-specific wire body without
+// mutating the shared request used by later fallbacks. OpenAI-compatible APIs
+// are deliberately treated as contracts, not as one identical schema: Groq
+// and Cerebras each reject a different subset of optional OpenCode fields.
+func requestBodyForAttempt(reqBody map[string]interface{}, attempt modelAttempt) map[string]interface{} {
+	return adapterForProvider(attempt.Provider).NormalizeRequest(reqBody)
+}
+
 // localAgentGuardrailMarker is the unique prefix of the system message we inject
 // on tool-calling requests. Free models (OpenRouter :free) often invent
 // "I'm in a sandbox and cannot operate on your computer" even after successful
@@ -71,10 +95,64 @@ func injectLocalAgentGuardrail(reqBody map[string]interface{}) {
 	out = append(out, guard)
 	out = append(out, cleaned...)
 	out = append(out, guard)
-	// Also tag the last user turn — free models weight the latest user text
-	// more than distant system prompts.
-	for i := len(out) - 1; i >= 0; i-- {
-		msg, ok := out[i].(map[string]interface{})
+	tagLastUserRuntime(out)
+	reqBody["messages"] = out
+}
+
+// injectLocalAgentGuardrailForMessages applies the same local-runtime
+// instruction to Anthropic Messages requests without introducing an invalid
+// role:"system" entry. Anthropic's schema carries system content in the
+// top-level system field, while messages may only contain user/assistant
+// turns. The last user turn remains safe to tag and improves recency.
+func injectLocalAgentGuardrailForMessages(reqBody map[string]interface{}) {
+	if reqBody == nil || !hasRequestTools(reqBody) {
+		return
+	}
+	switch system := reqBody["system"].(type) {
+	case string:
+		if !strings.Contains(system, localAgentGuardrailMarker) {
+			if strings.TrimSpace(system) != "" {
+				reqBody["system"] = localAgentGuardrail + "\n\n" + system
+			} else {
+				reqBody["system"] = localAgentGuardrail
+			}
+		}
+	case []interface{}:
+		// Anthropic also accepts a sequence of content blocks. Preserve every
+		// caller-supplied block and add one valid text block rather than replacing
+		// the system prompt with a string.
+		for _, block := range system {
+			if textBlockContains(block, localAgentGuardrailMarker) {
+				goto systemReady
+			}
+		}
+		blocks := make([]interface{}, 0, len(system)+1)
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": localAgentGuardrail})
+		blocks = append(blocks, system...)
+		reqBody["system"] = blocks
+	default:
+		reqBody["system"] = localAgentGuardrail
+	}
+systemReady:
+	messages, _ := reqBody["messages"].([]interface{})
+	tagLastUserRuntime(messages)
+}
+
+func textBlockContains(raw interface{}, needle string) bool {
+	block, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	text, _ := block["text"].(string)
+	return strings.Contains(text, needle)
+}
+
+// tagLastUserRuntime adds the recency hint without changing the message wire
+// shape. It works for both OpenAI chat and Anthropic Messages requests.
+func tagLastUserRuntime(messages []interface{}) {
+	// Free models weight the latest user text more than distant system prompts.
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -85,13 +163,12 @@ func injectLocalAgentGuardrail(reqBody map[string]interface{}) {
 		if messageTextContains(msg["content"], localAgentGuardrailMarker) {
 			break
 		}
-		out[i] = map[string]interface{}{
+		messages[i] = map[string]interface{}{
 			"role":    "user",
 			"content": appendUserRuntimeTag(msg["content"]),
 		}
 		break
 	}
-	reqBody["messages"] = out
 }
 
 const userRuntimeTag = "\n\n[" + localAgentGuardrailMarker + ": REAL local PC. Tool output = user's machine. Never say sandbox / mi entorno / my environment / no tu máquina.]"

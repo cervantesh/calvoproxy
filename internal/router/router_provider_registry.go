@@ -31,6 +31,7 @@ var supportedDirectProviders = map[providerID]struct{}{
 	providerOpenRouter: {},
 	providerCerebras:   {},
 	providerGroq:       {},
+	providerOllama:     {},
 }
 
 func parseProviderProfiles(data []byte) (providerProfiles, bool) {
@@ -125,6 +126,14 @@ func (s *RouterService) providerCredential(ctx context.Context, attempt modelAtt
 			if key == "" {
 				key = s.resolvedAmbientProviderCredential(attempt.Provider)
 			}
+		}
+	case providerOllama, providerLocal:
+		// Ollama is a local, keyless resource. Do not route a public request to
+		// the host machine merely because it supplied an unrelated API key.
+		// Operators may opt in on a public bind through the same ambient-resource
+		// gate that protects locally configured provider credentials.
+		if ambientProviderCredentialsAllowed(ctx) {
+			key = "local"
 		}
 	default:
 		// Existing OpenRouter/OpenAI/Anthropic/Ollama routes retain their

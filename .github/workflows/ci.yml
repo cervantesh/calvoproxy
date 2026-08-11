@@ -31,6 +31,13 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Dependency vulnerability scan
+        # Keep the scanner outside the vendored application graph, then inspect
+        # the exact source and versions that the build uses. Pin the tool so a
+        # future scanner release cannot change CI policy without review.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
       - name: Vendored dependency integrity
         # The cervo-* modules have NO go.sum entries and no reachable upstream
         # (third_party/ is not in this repo). This manifest is the only thing

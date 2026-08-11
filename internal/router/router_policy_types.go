@@ -116,10 +116,6 @@ func (d policyDecision) coreDecision() cervorules.Decision {
 	}
 }
 
-func defaultDeniedDecision(reason string) policyDecision {
-	return policyDecision{Allow: false, Reason: reason, Timeout: defaultPolicyTimeout}
-}
-
 func defaultAllowedDecision() policyDecision {
 	return policyDecision{
 		Allow:         true,
@@ -163,19 +159,6 @@ type ruleRuntimeConfig struct {
 	RetryPolicy    RetryPolicy
 	BreakerPolicy  BreakerPolicy
 	Limits         Limits
-}
-
-func (cfg ruleRuntimeConfig) isTrustedUser(user string) bool {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		return false
-	}
-	for _, trusted := range cfg.TrustedUsers {
-		if strings.EqualFold(strings.TrimSpace(trusted), user) {
-			return true
-		}
-	}
-	return false
 }
 
 func limitsForOperation(operation cervorules.Operation, override Limits) Limits {

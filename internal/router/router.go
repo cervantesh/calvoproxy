@@ -231,8 +231,12 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		if !ok {
 			return
 		}
-		// Free models invent "sandbox" excuses on agent turns; pin reality first.
-		injectLocalAgentGuardrail(msgBody)
+		// Keep the local-runtime framing on the shared request before each
+		// provider-specific attempt is normalized. This is intentionally after
+		// authorization: the guard is a prompt addition, not a policy fact.
+		// Anthropic Messages forbids role:"system" entries in messages; its
+		// system instruction belongs in the top-level system field.
+		injectLocalAgentGuardrailForMessages(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
 		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
 		return
@@ -244,6 +248,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+	clampRequestMaxTokens(reqBody, envInt("PROXY_MAX_COMPLETION_TOKENS", 0))
 
 	messagesRaw, _ := reqBody["messages"].([]interface{})
 	hasTools := hasRequestTools(reqBody)
@@ -270,7 +275,8 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	// Free models invent "sandbox" excuses on agent turns; pin reality first.
+	// Tool-calling agents need the same local-machine guardrail on the normal
+	// chat wire as on the Anthropic messages wire.
 	injectLocalAgentGuardrail(reqBody)
 	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
 }
@@ -401,7 +407,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		if quotaMessage := s.dailyFreeQuotaReasonForAttempts(attemptsToTry); quotaMessage != "" {
 			message = quotaMessage
 		} else if quotaWait > 0 {
-			message = "All configured model providers are temporarily rate-limited. Retrying after the earliest quota reset; your request was not sent upstream."
+			message = "All configured model providers are temporarily rate-limited for this request size. Retrying after the earliest quota reset; your request was not sent upstream. Compact the conversation or start a new session if this repeats."
 		}
 		failTrace(ctx, w, outcomeAllCooling)
 		writeJSONError(w, http.StatusServiceUnavailable, message)
