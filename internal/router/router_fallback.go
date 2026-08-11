@@ -180,6 +180,13 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 					}
 					continue
 				}
+				if attErr.SkipProvider {
+					// A request-schema mismatch can be provider-specific (for
+					// example an optional field unsupported by Cerebras). Skip its
+					// siblings only for this chain; it is not a provider outage.
+					unavailableProviders[attempt.Provider] = struct{}{}
+					continue
+				}
 				if attErr.QuotaLimited {
 					if _, reported := reportedProviderFailure[attempt.Provider]; !reported {
 						providerFailures = append(providerFailures, providerFailure{Provider: attempt.Provider, Error: attErr})

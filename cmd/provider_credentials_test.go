@@ -100,7 +100,7 @@ func TestManagedVaultCredentialsRefusedOnPublicBind(t *testing.T) {
 	if got := resolveAPIKey(credentialRequest(t, "")); got != "" {
 		t.Fatalf("managed OpenRouter key exposed on public bind: %q", got)
 	}
-	if ambientDirectProviderConfigured(context.Background()) {
+	if ambientDirectProviderConfigured() {
 		t.Fatal("managed direct-provider key exposed on public bind")
 	}
 }

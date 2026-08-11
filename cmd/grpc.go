@@ -83,7 +83,7 @@ func (s *proxyTransportGRPCServer) ChatCompletion(ctx context.Context, req *prox
 
 	recorder := httptest.NewRecorder()
 	apiKey := resolveAPIKey(httpReq)
-	if apiKey == "" && !ambientDirectProviderConfigured(ctx) {
+	if apiKey == "" && !ambientDirectProviderConfigured() {
 		metrics.observe(http.StatusUnauthorized, time.Since(start).Nanoseconds())
 		metrics.grpcRequests.Add(1)
 		return &proxyv1.ChatCompletionResponse{

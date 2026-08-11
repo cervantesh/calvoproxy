@@ -174,6 +174,33 @@ func TestDefaultFallbackExecutorMarksLastActuallyExecutableAttemptAfterProviderE
 	}
 }
 
+func TestDefaultFallbackExecutorSkipsProviderOnlyForSchemaMismatch(t *testing.T) {
+	executor := &fakeAttemptExecutor{errs: []error{
+		&attemptError{StatusCode: http.StatusBadRequest, Message: "unsupported field", SkipModel: true, SkipProvider: true},
+		nil,
+	}}
+	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}
+
+	err := fallback.Execute(context.Background(), httptest.NewRecorder(), FallbackExecution{
+		RequestBody: map[string]interface{}{"messages": []interface{}{}},
+		APIKey:      "test-key",
+		Attempts: []modelAttempt{
+			{Profile: "coding", Provider: providerCerebras, Model: "first-cerebras"},
+			{Profile: "coding", Provider: providerCerebras, Model: "second-cerebras"},
+			{Profile: "coding", Provider: providerGroq, Model: "groq-fallback"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected another provider to serve the request, got %v", err)
+	}
+	if len(executor.attempts) != 2 {
+		t.Fatalf("expected Cerebras then Groq only, got %+v", executor.attempts)
+	}
+	if got := executor.attempts[1]; got.Provider != providerGroq || got.Model != "groq-fallback" {
+		t.Fatalf("schema mismatch should skip Cerebras siblings, got %+v", got)
+	}
+}
+
 func TestDefaultFallbackExecutorMarksCurrentLastWhenFutureQuotaReservationLosesRace(t *testing.T) {
 	executor := &fakeAttemptExecutor{errs: []error{nil}, invokeFallbackGuard: true}
 	fallback := DefaultFallbackExecutor{AttemptExecutor: executor}

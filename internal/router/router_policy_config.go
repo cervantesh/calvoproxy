@@ -117,15 +117,6 @@ func mergePolicyRuntimeConfig(base, override cervoruntime.PolicyRuntimeConfig) c
 	return out
 }
 
-func hasCustomRetry(policy RetryPolicy) bool {
-	return policy.MaxAttempts != 0 ||
-		len(policy.RetryHTTPStatuses) != 0 ||
-		policy.RetryOnEOF ||
-		policy.RetryOnTimeout ||
-		policy.BackoffMin != 0 ||
-		policy.BackoffMax != 0
-}
-
 func hasCustomLimits(limits Limits) bool {
 	return limits.AllowStream ||
 		limits.AllowTools ||

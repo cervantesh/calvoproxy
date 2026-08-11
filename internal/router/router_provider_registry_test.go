@@ -3,9 +3,12 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,6 +49,48 @@ func TestProviderProfilePlannerUsesExplicitProviderModelPairs(t *testing.T) {
 	}
 }
 
+func TestShippedCodingProfileKeepsOpenRouterFallbackForMessages(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "model-policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, ok := parseProviderProfiles(data)
+	if !ok {
+		t.Fatal("shipped model policy has no valid provider profiles")
+	}
+	coding := profiles["coding"]
+	foundOpenRouter := false
+	for _, target := range coding {
+		if target.Provider == providerOpenRouter {
+			foundOpenRouter = true
+			break
+		}
+	}
+	if !foundOpenRouter {
+		t.Fatalf("shipped coding profile must retain an OpenRouter fallback: %+v", coding)
+	}
+
+	svc := NewRouterService()
+	t.Cleanup(svc.Close)
+	attempts := make([]modelAttempt, 0, len(coding))
+	for _, target := range coding {
+		attempts = append(attempts, modelAttempt{Profile: "coding", Provider: target.Provider, Model: target.Model})
+	}
+	filtered := svc.filterConfiguredAttempts(context.Background(), attempts, "openrouter-key", messagesPath)
+	foundOpenRouter = false
+	for _, attempt := range filtered {
+		if attempt.Provider == providerOpenRouter {
+			foundOpenRouter = true
+		}
+		if attempt.Provider == providerCerebras || attempt.Provider == providerGroq {
+			t.Fatalf("Anthropic messages must reject incompatible direct-provider attempts, got %+v", filtered)
+		}
+	}
+	if !foundOpenRouter {
+		t.Fatalf("Anthropic messages must retain the configured OpenRouter coding fallback, got %+v", filtered)
+	}
+}
+
 func TestProviderCredentialIsolation(t *testing.T) {
 	t.Setenv("CEREBRAS_API_KEY", "cerebras-secret")
 	t.Setenv("GROQ_API_KEY", "groq-secret")
@@ -69,6 +114,12 @@ func TestProviderCredentialIsolation(t *testing.T) {
 	publicCtx := WithAmbientProviderCredentials(context.Background(), false)
 	if got, ok := providerCredential(publicCtx, modelAttempt{Provider: providerCerebras}, "caller-openrouter-key"); ok || got != "" {
 		t.Fatalf("ambient Cerebras key escaped onto a disallowed request: %q, ok=%v", got, ok)
+	}
+	if got, ok := providerCredential(publicCtx, modelAttempt{Provider: providerOllama}, "caller-openrouter-key"); ok || got != "" {
+		t.Fatalf("local Ollama escaped onto a disallowed public request: %q, ok=%v", got, ok)
+	}
+	if got, ok := providerCredential(ctx, modelAttempt{Provider: providerOllama}, "caller-openrouter-key"); !ok || got != "local" {
+		t.Fatalf("local Ollama should remain available for an allowed local request: %q, ok=%v", got, ok)
 	}
 }
 
@@ -120,6 +171,42 @@ type providerCall struct {
 
 type successfulProviderTransport struct {
 	calls []providerCall
+}
+
+type providerSchemaErrorTransport struct{}
+
+func (providerSchemaErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"error":"property 'messages.3.assistant.reasoning_content' is unsupported"}`)),
+	}, nil
+}
+
+func TestProviderSchemaErrorSkipsOnlyCurrentChainAndLeavesBreakerClosed(t *testing.T) {
+	t.Setenv("PROXY_CEREBRAS_URL", "https://api.cerebras.ai/v1/chat/completions")
+	t.Setenv("CEREBRAS_API_KEY", "cerebras-key")
+	svc := NewRouterService()
+	t.Cleanup(svc.Close)
+	svc.Client = &http.Client{Transport: providerSchemaErrorTransport{}}
+
+	err := svc.executeAttempt(
+		WithAmbientProviderCredentials(context.Background(), true),
+		httptest.NewRecorder(),
+		[]byte(`{"messages":[]}`),
+		"cerebras-key",
+		modelAttempt{Profile: "coding", Provider: providerCerebras, Model: "gpt-oss-120b"},
+	)
+	var attErr *attemptError
+	if !errors.As(err, &attErr) {
+		t.Fatalf("error = %v, want attemptError", err)
+	}
+	if !attErr.SkipProvider || attErr.ProviderUnavailable {
+		t.Fatalf("schema error flags = %+v, want request-only provider skip", attErr)
+	}
+	if state := svc.providerBreakerSnapshot(providerCerebras); state.State != "closed" || state.ConsecutiveFailures != 0 {
+		t.Fatalf("schema error must not poison provider breaker: %+v", state)
+	}
 }
 
 func (t *successfulProviderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
