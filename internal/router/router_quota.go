@@ -74,11 +74,16 @@ type QuotaObservation struct {
 
 // QuotaSnapshot combines a provider observation with proxy-local in-flight
 // reservations. Available is the only balance a scheduler should spend.
+//
+// ProbeSettled reports whether a reservation against this bucket has already
+// been reconciled. It is the guard that keeps the unconfirmed-estimate
+// carve-out (see quotaCanFit) bounded to a single bootstrap probe.
 type QuotaSnapshot struct {
 	QuotaObservation
-	Key       QuotaBucketKey
-	Reserved  int64
-	Available int64
+	Key          QuotaBucketKey
+	Reserved     int64
+	Available    int64
+	ProbeSettled bool
 }
 
 // QuotaReservation is an atomic unit to reserve, release, or reconcile. A
@@ -144,6 +149,10 @@ func (l *QuotaLedger) Reservations(ticket QuotaTicket) []QuotaReservation {
 type quotaBucket struct {
 	observation QuotaObservation
 	reserved    int64
+	// probeSettled records that a reservation against this bucket has already
+	// been reconciled, so the bootstrap-probe carve-out is spent. A reset purges
+	// the bucket, which grants the next window a fresh probe.
+	probeSettled bool
 }
 
 type quotaHold struct {
@@ -249,6 +258,7 @@ func (l *QuotaLedger) Snapshot(key QuotaBucketKey, now time.Time) (QuotaSnapshot
 		Key:              key,
 		Reserved:         bucket.reserved,
 		Available:        available,
+		ProbeSettled:     bucket.probeSettled,
 	}, true
 }
 
@@ -278,7 +288,14 @@ func (l *QuotaLedger) ReserveAll(reservations []QuotaReservation, now time.Time)
 		// unconfirmed shortfall through, so the candidate would still never
 		// receive the real response that could confirm or correct the estimate.
 		// Only a confirmed (authoritative) shortfall is a hard gate.
-		if bucket.observation.Confidence == QuotaConfidenceEstimated {
+		//
+		// The carve-out is one single probe: dimensions the provider never
+		// reports (Groq/Cerebras RPM and TPD) stay estimated forever, so an
+		// unbounded exception would disable those configured limits for the whole
+		// window. Once a probe is in flight or has settled, the estimate is the
+		// best evidence available and is enforced.
+		if bucket.observation.Confidence == QuotaConfidenceEstimated &&
+			bucket.reserved == 0 && !bucket.probeSettled {
 			continue
 		}
 		return QuotaTicket{}, false
@@ -358,6 +375,10 @@ func (l *QuotaLedger) Reconcile(ticket QuotaTicket, settlements []QuotaSettlemen
 	for key, hold := range state.holds {
 		if hold.bucket != nil {
 			hold.bucket.reserved -= minInt64(hold.bucket.reserved, hold.cost)
+			// A settled reservation proves a real request reached the provider,
+			// which spends this bucket's bootstrap probe. Release deliberately
+			// does not: a request that never completed cannot confirm anything.
+			hold.bucket.probeSettled = true
 		}
 		settlement, supplied := byKey[key]
 		if supplied && settlement.Observation != nil {
