@@ -37,7 +37,14 @@ func TestResolveAPIKey_SchemeOnlyHeaderFallsBackToAmbient(t *testing.T) {
 	bindHost = "127.0.0.1"
 	t.Setenv("OPENROUTER_API_KEY", "env-key")
 
-	for _, header := range []string{"Bearer ", "Bearer", "bearer", "  Bearer  ", "dummy", ""} {
+	for _, header := range []string{
+		"Bearer ", "Bearer", "bearer", "  Bearer  ", "dummy", "",
+		// Naming the proxy in the credential field states the opposite of a
+		// credential. `calvoproxy-local` is the exact value a desktop client
+		// was configured with in the field, and forwarding it produced an
+		// upstream 401 that read as if the proxy itself were broken.
+		"Bearer calvoproxy-local", "calvoproxy-local", "CalvoProxy-Local", "Bearer calvoproxy",
+	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		if header != "" {
 			req.Header.Set("Authorization", header)
@@ -53,6 +60,9 @@ func TestResolveAPIKey_SchemeOnlyHeaderFallsBackToAmbient(t *testing.T) {
 		{"Bearer sk-or-v1-real", "sk-or-v1-real"},
 		{"Bearer bearer-shaped-token", "bearer-shaped-token"},
 		{"sk-or-v1-no-scheme", "sk-or-v1-no-scheme"},
+		// The proxy-name rule anchors at the start, so a real token that merely
+		// mentions it further along is still a credential and must be honoured.
+		{"Bearer sk-or-v1-calvoproxy", "sk-or-v1-calvoproxy"},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.Header.Set("Authorization", tc.header)
