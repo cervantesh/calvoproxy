@@ -282,7 +282,14 @@ func (s *RouterService) quotaCanFit(attempt modelAttempt, credential string, est
 		// limits would have allowed it. Only a confirmed shortfall is a hard gate;
 		// an estimated shortfall still yields the worst quotaPressure so it stays
 		// last in line behind any provider with headroom.
-		if snapshot.Confidence == QuotaConfidenceEstimated {
+		//
+		// One probe only: dimensions the provider never reports back (Groq and
+		// Cerebras RPM/TPD are never parsed by observeGroqQuota/
+		// observeCerebrasQuota) would otherwise keep passing after ordinary
+		// consumption drove Remaining to zero, disabling the configured limit
+		// until reset and earning avoidable upstream 429s.
+		if snapshot.Confidence == QuotaConfidenceEstimated &&
+			snapshot.Reserved == 0 && !snapshot.ProbeSettled {
 			continue
 		}
 		return false
