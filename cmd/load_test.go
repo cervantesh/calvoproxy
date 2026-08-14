@@ -36,6 +36,9 @@ func TestLoad_NoDeadlockUnderConcurrency(t *testing.T) {
 
 	bindHost = "127.0.0.1"
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	// The host running the suite may have PROXY_ADMIN_TOKEN set for a local
+	// instance; an ambient token would gate /health and read as a deadlock.
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
 	// This is a proxy concurrency/deadlock test against a local mock, not an
 	// upstream free-tier quota test. Keep the quota guard out of its artificial
 	// 1,500-request burst while the dedicated router tests exercise RPM/RPD.

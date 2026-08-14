@@ -138,7 +138,7 @@ func normalizeRuleConfig(cfg ruleRuntimeConfig) ruleRuntimeConfig {
 	if cfg.BreakerPolicy.Cooldown <= 0 {
 		cfg.BreakerPolicy.Cooldown = 60 * time.Second
 	}
-	if cfg.BreakerPolicy.Eligible == false {
+	if !cfg.BreakerPolicy.Eligible {
 		cfg.BreakerPolicy.Eligible = true
 	}
 	return cfg

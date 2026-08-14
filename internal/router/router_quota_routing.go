@@ -270,9 +270,22 @@ func (s *RouterService) quotaPressure(attempt modelAttempt, credential string, e
 
 func (s *RouterService) quotaCanFit(attempt modelAttempt, credential string, estimate QuotaEstimate, now time.Time) bool {
 	for _, reservation := range s.quotaReservations(attempt, credential, estimate, now) {
-		if snapshot, ok := s.quotaLedger().Snapshot(reservation.Key, now); ok && snapshot.Available < reservation.Cost {
-			return false
+		snapshot, ok := s.quotaLedger().Snapshot(reservation.Key, now)
+		if !ok || snapshot.Available >= reservation.Cost {
+			continue
 		}
+		// An estimated bucket is an unconfirmed bootstrap default (see
+		// ensureBootstrapQuota): it can only be replaced by an authoritative
+		// provider observation once a real request reaches that provider. Hard
+		// vetoing on the estimate alone would prevent that request from ever
+		// being sent, permanently locking the provider out even if its real
+		// limits would have allowed it. Only a confirmed shortfall is a hard gate;
+		// an estimated shortfall still yields the worst quotaPressure so it stays
+		// last in line behind any provider with headroom.
+		if snapshot.Confidence == QuotaConfidenceEstimated {
+			continue
+		}
+		return false
 	}
 	return true
 }

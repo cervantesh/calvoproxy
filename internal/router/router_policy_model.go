@@ -105,11 +105,7 @@ func (s *RouterService) resolveProfileAlias(raw string) (string, bool) {
 
 func policyConfigFromModelConfig(cfg cervomodelpolicy.Config) policyConfig {
 	cfg = cervomodelpolicy.NormalizeConfig(cfg)
-	return policyConfig{
-		DefaultProfile: cfg.DefaultProfile,
-		Profiles:       cfg.Profiles,
-		Aliases:        cfg.Aliases,
-	}
+	return policyConfig(cfg)
 }
 
 func defaultModelConfig() cervomodelpolicy.Config {
