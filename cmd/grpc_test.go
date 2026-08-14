@@ -51,6 +51,7 @@ func TestProxyTransportGRPCServerChatCompletion(t *testing.T) {
 }
 
 func TestProxyTransportGRPCServerHealth(t *testing.T) {
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
 	server := &proxyTransportGRPCServer{
 		routerService: &routerServiceAdapter{
 			routeRequestWithProvider: func(http.ResponseWriter, *http.Request, string, string) {},

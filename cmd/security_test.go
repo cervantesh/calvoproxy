@@ -106,6 +106,8 @@ func TestRequirePostAPIKeyRefusesAmbientDirectProviderOnPublicBind(t *testing.T)
 }
 
 func TestMetricsAuth_SeparateToken(t *testing.T) {
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
+	t.Setenv("PROXY_METRICS_TOKEN", "")
 	handler := metricsAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
