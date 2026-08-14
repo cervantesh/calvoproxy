@@ -24,14 +24,13 @@ type Server interface {
 // assembled the application's dependencies.
 type Runtime struct {
 	Server          Server
-	StopGRPC        func()
 	ShutdownTimeout time.Duration
 	Logger          *slog.Logger
 }
 
 // New creates the process runtime. The caller supplies an already assembled
 // server so routing and provider policy remain outside process lifecycle code.
-func New(server Server, stopGRPC func(), shutdownTimeout time.Duration, logger *slog.Logger) *Runtime {
+func New(server Server, shutdownTimeout time.Duration, logger *slog.Logger) *Runtime {
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = 30 * time.Second
 	}
@@ -40,7 +39,6 @@ func New(server Server, stopGRPC func(), shutdownTimeout time.Duration, logger *
 	}
 	return &Runtime{
 		Server:          server,
-		StopGRPC:        stopGRPC,
 		ShutdownTimeout: shutdownTimeout,
 		Logger:          logger,
 	}
@@ -58,18 +56,12 @@ func (r *Runtime) Run(shutdown <-chan string) error {
 
 	select {
 	case err := <-serverErr:
-		if r.StopGRPC != nil {
-			r.StopGRPC()
-		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 		return nil
 	case reason := <-shutdown:
 		r.Logger.Info("CalvoProxy shutting down", "reason", reason)
-		if r.StopGRPC != nil {
-			r.StopGRPC()
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), r.ShutdownTimeout)
 		defer cancel()
 		if err := r.Server.Shutdown(ctx); err != nil {

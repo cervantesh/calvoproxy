@@ -74,7 +74,7 @@ func (t *dailyFreeQuotaTransport) RoundTrip(*http.Request) (*http.Response, erro
 	}, nil
 }
 
-func TestOpenRouterDailyFreeQuotaMessage_ReachesClientAfterChainFailure(t *testing.T) {
+func TestOpenRouterDailyFreeQuotaIsRedactedAfterChainFailure(t *testing.T) {
 	upstream := &dailyFreeQuotaTransport{}
 	svc := newTestService(t, &http.Client{Transport: upstream}, policyConfig{
 		DefaultProfile: "coding",
@@ -92,9 +92,12 @@ func TestOpenRouterDailyFreeQuotaMessage_ReachesClientAfterChainFailure(t *testi
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected client-visible 503, got %d: %s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{"OpenRouter daily free-model quota exhausted", "1000/1000", "another :free model will not help"} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("client body %q does not contain %q", rec.Body.String(), want)
+	if !strings.Contains(rec.Body.String(), "rate limited") {
+		t.Errorf("client body must expose only the safe classification, got %q", rec.Body.String())
+	}
+	for _, forbidden := range []string{"1000/1000", "another :free model", "OpenRouter daily"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Errorf("client body leaked provider detail %q: %q", forbidden, rec.Body.String())
 		}
 	}
 }

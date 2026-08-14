@@ -17,10 +17,6 @@ type proxyMetrics struct {
 	statusOther   atomic.Int64
 	latencyNanos  atomic.Int64 // sum of handler durations
 	latencyCount  atomic.Int64
-	// grpcRequests counts calls served over the gRPC transport. gRPC traffic used
-	// to be entirely invisible here (only the HTTP handler recorded), so a
-	// gRPC-heavy deployment looked idle.
-	grpcRequests atomic.Int64
 }
 
 var metrics = &proxyMetrics{}
