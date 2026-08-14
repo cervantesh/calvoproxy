@@ -60,6 +60,19 @@ out — see v0.7.1.
   Only a *confirmed* (provider-header) shortfall is now a hard gate; an
   unconfirmed estimate still ranks last so a provider with known headroom is
   preferred, but it gets one real attempt instead of a permanent lockout.
+
+  That exception is **exactly one probe per window**, and the distinction
+  matters: some dimensions never become authoritative at all. Groq and Cerebras
+  publish RPD and TPM headers but never RPM or TPD, so those two buckets stay
+  estimates for their whole window while ordinary consumption still draws them
+  down. An unbounded exception would therefore stop being a bootstrap
+  concession and become a permanent hole — every later request passing a limit
+  that was configured precisely to keep the proxy under the provider's ceiling,
+  until reset, trading a local decision for an upstream `429`. The probe is
+  spent when a reservation against the bucket settles, because that proves a
+  real request reached the provider; a released reservation does not spend it,
+  since a request that never completed confirms nothing. A window reset grants
+  a fresh probe.
 - **Provider-specific OpenAI-compatible adapters.** Cerebras and Groq now
   receive normalized payloads for their supported fields, including safe
   handling of OpenCode reasoning history. An unsupported provider field now
