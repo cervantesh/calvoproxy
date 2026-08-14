@@ -202,7 +202,23 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// provider_name) still terminates as it must — a bad key is bad for
 		// every model, and burning the chain would hide the one error that
 		// matters.
-		if resp.StatusCode == http.StatusBadRequest || isProviderRelayedError(string(respBytes)) {
+		// 413 belongs to the same family, and more obviously so: it is a
+		// statement about THIS provider's ceiling, never about the request.
+		// Measured on 2026-08-14, a daily cron briefing died on:
+		//   413 "Request too large for model `openai/gpt-oss-120b` ... on
+		//        tokens per minute (TPM): Limit 8000, Requested 18711"
+		// An ordinary agent request — tool schemas plus a short prompt — cannot
+		// fit an 8k-per-minute window at all, so that provider could never have
+		// served it, while the OpenRouter and Cerebras models in the same chain
+		// have windows several times larger. 413 was terminal, so the chain
+		// stopped there and the job had failed every day since.
+		//
+		// Advancing costs the same as the 400 case: at most K fast rejections
+		// when the request really is too big for everyone, and the client still
+		// ends up with the error.
+		if resp.StatusCode == http.StatusBadRequest ||
+			resp.StatusCode == http.StatusRequestEntityTooLarge ||
+			isProviderRelayedError(string(respBytes)) {
 			attErr.SkipModel = true
 			slog.WarnContext(ctx, "[CalvoProxy] upstream rejected the request; trying the next model",
 				slog.String("model", attempt.Model),
