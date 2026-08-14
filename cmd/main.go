@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -83,10 +84,6 @@ func resolveAPIKey(r *http.Request) string {
 			defer clear(vaultKey)
 			slog.Info("Using managed OpenRouter credential (header/environment were empty)")
 			return strings.TrimSpace(string(vaultKey))
-		}
-		if fileKey := storedAPIKey(); fileKey != "" {
-			slog.Info("Using API key from login file (header/env were empty)")
-			return fileKey
 		}
 		return ""
 	}
@@ -283,8 +280,12 @@ const dashboardDecisions = 25
 
 func admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := os.Getenv("PROXY_ADMIN_TOKEN")
-		if token != "" && !constantTimeEqual(presentedToken(r), token) {
+		policy := activeAdminPolicy()
+		if policy.disabled() {
+			http.Error(w, "Administrative interface disabled: configure PROXY_ADMIN_TOKEN", http.StatusServiceUnavailable)
+			return
+		}
+		if policy.token != "" && !constantTimeEqual(presentedToken(r), policy.token) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -303,7 +304,7 @@ func metricsAuth(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		got := presentedToken(r)
-		adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
+		adminToken := activeAdminPolicy().token
 		if constantTimeEqual(got, metricsToken) || (adminToken != "" && constantTimeEqual(got, adminToken)) {
 			h(w, r)
 			return
@@ -351,8 +352,6 @@ func writeMetrics(w http.ResponseWriter, h router.ProxyHealth) {
 	fmt.Fprintf(w, "calvoproxy_request_latency_seconds_sum %.6f\n", float64(metrics.latencyNanos.Load())/1e9)
 	fmt.Fprintln(w, "# HELP calvoproxy_request_latency_count Handler latency observations\n# TYPE calvoproxy_request_latency_count counter")
 	fmt.Fprintf(w, "calvoproxy_request_latency_count %d\n", metrics.latencyCount.Load())
-	fmt.Fprintln(w, "# HELP calvoproxy_grpc_requests_total Requests served over the gRPC transport\n# TYPE calvoproxy_grpc_requests_total counter")
-	fmt.Fprintf(w, "calvoproxy_grpc_requests_total %d\n", metrics.grpcRequests.Load())
 	fmt.Fprintln(w, "# HELP calvoproxy_build_info Build version (value always 1)\n# TYPE calvoproxy_build_info gauge")
 	fmt.Fprintf(w, "calvoproxy_build_info{version=%q} 1\n", version)
 }
@@ -466,27 +465,26 @@ func main() {
 	}
 
 	port := envOrDefault("PORT", "8080")
-	grpcPort := envOrDefault("GRPC_PORT", "9090")
 	// Bind address. Defaults to loopback (127.0.0.1) so a host install keeps the
 	// proxy — and the env OpenRouter key it spends — off the network by default.
 	// The Docker image sets HOST=0.0.0.0 so a container stays reachable via -p.
 	host := envOrDefault("HOST", "127.0.0.1")
-	bindHost = host
+	configureAdminPolicy(host)
 
 	// Loud warning when exposed on a public interface without an admin token:
 	// /health, /metrics and /admin/reload are open by default and leak internals.
-	if boundToPublicInterface() && os.Getenv("PROXY_ADMIN_TOKEN") == "" {
-		slog.Warn("CalvoProxy is bound to a PUBLIC interface with no PROXY_ADMIN_TOKEN — /health, /metrics and /admin/reload are open. Set PROXY_ADMIN_TOKEN, or bind HOST=127.0.0.1.",
+	if currentAdminPolicy.disabled() {
+		slog.Warn("CalvoProxy is bound to a PUBLIC interface with no PROXY_ADMIN_TOKEN — administrative endpoints are disabled. Set PROXY_ADMIN_TOKEN, or bind HOST=127.0.0.1.",
 			"host", host)
 	}
 
 	credentialStore := initializeManagedCredentials(context.Background())
 	routerService := router.NewRouterService()
 	defer routerService.Close()
-	// Let /health report a key configured via `calvoproxy login` too, not just the
-	// env var (the router alone can't see the login file).
+	// Let /health report a key configured via `calvoproxy login` too, not just
+	// the env var. Login writes only to the encrypted provider vault.
 	routerService.AmbientKeyPresent = func() bool {
-		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || managedProviderConfigured(secretstore.ProviderOpenRouter) || storedAPIKey() != ""
+		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || managedProviderConfigured(secretstore.ProviderOpenRouter)
 	}
 	routerService.AmbientProviderCredential = managedProviderCredentialByName
 	// Reliability scores are learned from real traffic and are worth keeping
@@ -507,14 +505,6 @@ func main() {
 	// PROXY_UPDATE_CHECK=false.
 	go announceUpdate()
 
-	// gRPC transport (unary ChatCompletion + GetHealth over the same router).
-	// A cancellable context lets shutdown GracefulStop it; a bind failure is
-	// non-fatal so the HTTP proxy keeps serving.
-	grpcCtx, cancelGRPC := context.WithCancel(context.Background())
-	if err := startGRPCServer(grpcCtx, routerService, host, grpcPort); err != nil {
-		slog.Warn("gRPC server not started; continuing with HTTP only", "grpc_port", grpcPort, "error", err)
-	}
-
 	// SIGHUP → hot-reload model-policy.json without a restart (Unix; the signal
 	// is never delivered on Windows, where /admin/reload is the way).
 	hupCh := make(chan os.Signal, 1)
@@ -531,11 +521,10 @@ func main() {
 
 	srv := httpx.NewServer(host+":"+port, mux)
 	// LLM responses can be long or streamed — a fixed write deadline would cut
-	// them off. Disable write/read timeouts here; ReadHeaderTimeout still
-	// guards against slow-header attacks, and request bodies are bounded by
-	// MaxBytesReader in the router.
+	// them off. Keep writes unlimited for streams, but bound request body reads
+	// so a slow client cannot hold a routing slot forever.
 	srv.WriteTimeout = 0
-	srv.ReadTimeout = 0
+	srv.ReadTimeout = time.Duration(envIntMain("PROXY_HTTP_READ_TIMEOUT_SECONDS", 30)) * time.Second
 
 	// SIGINT/SIGTERM (e.g. `docker stop`) and idle both trigger the same drain.
 	sigCh := make(chan os.Signal, 1)
@@ -548,7 +537,7 @@ func main() {
 		}
 	})
 
-	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
+	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port)
 
 	shutdown := make(chan string, 1)
 	go func() {
@@ -560,7 +549,7 @@ func main() {
 		}
 	}()
 
-	if err := app.New(srv, cancelGRPC, 30*time.Second, slog.Default()).Run(shutdown); err != nil {
+	if err := app.New(srv, 30*time.Second, slog.Default()).Run(shutdown); err != nil {
 		// Return (don't log.Fatal) so the deferred telemetry/OTel shutdown still
 		// runs and flushes before the process exits.
 		slog.Error("HTTP server exited with error", "error", err)
@@ -573,6 +562,14 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envIntMain(key string, fallback int) int {
+	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

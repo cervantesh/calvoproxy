@@ -56,11 +56,10 @@ func TestDockerfilePinsAnAbsoluteScorePath(t *testing.T) {
 	if !strings.Contains(dockerfile, "mkdir -p "+dir) {
 		t.Errorf("the image must create %s, or the first score flush fails", dir)
 	}
-	// …and be writable by a UID that isn't root. A mounted volume inherits the
-	// image directory's bits, so a root-owned 755 /data breaks `--user` with
-	// "open /data/.scores-*.tmp: permission denied" — measured, not theorised.
-	if !strings.Contains(dockerfile, "chmod 1777 "+dir) {
-		t.Errorf("%s must be world-writable (1777), or --user cannot persist scores", dir)
+	// The image runs as a dedicated fixed UID, so its state directory is private
+	// to that account rather than world writable.
+	if !strings.Contains(dockerfile, "chown -R 65532:65532") || !strings.Contains(dockerfile, "chmod 0700 "+dir) {
+		t.Errorf("%s must be private and owned by the non-root runtime user", dir)
 	}
 }
 

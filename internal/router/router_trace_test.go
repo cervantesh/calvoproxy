@@ -433,8 +433,11 @@ func TestTrace_DecisionLookupCarriesReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decision does not marshal: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(string(raw)), "upstream down") {
-		t.Errorf("the admin channel is the one place reason belongs, got %s", raw)
+	if !strings.Contains(strings.ToLower(string(raw)), "upstream unavailable") {
+		t.Errorf("the admin channel must retain a safe classified reason, got %s", raw)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "upstream down") {
+		t.Errorf("the admin channel must not retain raw upstream error bodies, got %s", raw)
 	}
 	if _, ok := svc.Decision("ffffffffffffffff"); ok {
 		t.Error("an unknown id must not resolve")

@@ -54,10 +54,9 @@ func TestMaskKeyAndShape(t *testing.T) {
 	}
 }
 
-// TestResolveAPIKey_FileFallback proves the login-file source is used when the
-// header and env are empty (on a loopback bind), and is refused on a public bind
-// without opt-in — same ambient-key gate as the env key.
-func TestResolveAPIKey_FileFallback(t *testing.T) {
+// TestResolveAPIKey_LegacyFileIsNotUsed proves the legacy plaintext login file
+// is migration-only and is never a routing credential after the vault rollout.
+func TestResolveAPIKey_LegacyFileIsNotUsed(t *testing.T) {
 	oldBind := bindHost
 	defer func() { bindHost = oldBind }()
 	t.Setenv("PROXY_KEY_FILE", filepath.Join(t.TempDir(), "openrouter.key"))
@@ -68,10 +67,10 @@ func TestResolveAPIKey_FileFallback(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	// Loopback → file key used.
+	// Loopback does not revive a plaintext fallback.
 	bindHost = "127.0.0.1"
-	if got := resolveAPIKey(req); got != "sk-or-v1-fromfile-xxxxxxxx" {
-		t.Fatalf("loopback should use file key, got %q", got)
+	if got := resolveAPIKey(req); got != "" {
+		t.Fatalf("loopback must not use legacy file key, got %q", got)
 	}
 
 	// Public bind, no opt-in → refused (empty).
@@ -80,10 +79,10 @@ func TestResolveAPIKey_FileFallback(t *testing.T) {
 		t.Fatalf("public bind should refuse the ambient file key, got %q", got)
 	}
 
-	// Public bind + opt-in → allowed.
+	// Public bind + ambient opt-in still does not permit the legacy source.
 	t.Setenv("PROXY_ALLOW_ENV_KEY_PUBLIC", "true")
-	if got := resolveAPIKey(req); got != "sk-or-v1-fromfile-xxxxxxxx" {
-		t.Fatalf("public bind + opt-in should use file key, got %q", got)
+	if got := resolveAPIKey(req); got != "" {
+		t.Fatalf("public bind + opt-in must not use legacy file key, got %q", got)
 	}
 
 	// A real Authorization header always wins and bypasses the ambient gate.

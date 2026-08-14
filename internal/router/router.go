@@ -140,19 +140,13 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	defer span.End()
 	ctx = withTraceOptIn(ctx, r)
 
-	// Bound the request body before reading it into memory, so an oversized or
-	// malicious payload can't OOM the process. Configurable via
-	// PROXY_MAX_BODY_BYTES (default 10 MiB).
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Request body too large or unreadable", http.StatusRequestEntityTooLarge)
-		return
-	}
-
 	// Admission control: cap concurrent in-flight requests (PROXY_MAX_CONCURRENT)
 	// so a burst waits briefly instead of stampeding the upstream past its rate
-	// limits and collapsing the whole chain to 503. Disabled by default.
+	// limits and collapsing the whole chain to 503.
+	//
+	// It happens before reading the body. This deliberately makes a slow client
+	// consume a bounded slot instead of allowing an unbounded number of readers
+	// to exhaust memory or file descriptors before admission applies.
 	//
 	// The held slot is passed into dispatchChain as an admissionHold: a quota
 	// hold there releases it for the duration of its sleep and reacquires it
@@ -167,6 +161,16 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		return
 	}
 	defer admission.release()
+
+	// Bound the request body before reading it into memory, so an oversized or
+	// malicious payload can't OOM the process. Configurable via
+	// PROXY_MAX_BODY_BYTES (default 10 MiB).
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Request body too large or unreadable", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	if strings.Contains(r.URL.Path, "embeddings") {
 		// This proxy exists to route FREE models, and /v1/embeddings cannot honor
