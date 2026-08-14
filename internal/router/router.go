@@ -153,14 +153,20 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	// Admission control: cap concurrent in-flight requests (PROXY_MAX_CONCURRENT)
 	// so a burst waits briefly instead of stampeding the upstream past its rate
 	// limits and collapsing the whole chain to 503. Disabled by default.
-	if release, ok := s.admission.acquire(ctx); ok {
-		defer release()
-	} else {
+	//
+	// The held slot is passed into dispatchChain as an admissionHold: a quota
+	// hold there releases it for the duration of its sleep and reacquires it
+	// before actually dispatching, so a large, merely-waiting request cannot
+	// pin a scarce slot for up to PROXY_QUOTA_HOLD_MAX_MS and starve smaller
+	// requests that would otherwise fit inside the same admission window.
+	admission := &admissionHold{ctrl: s.admission}
+	if !admission.acquire(ctx) {
 		s.counters.admissionRejected.Add(1)
 		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
 		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
 		return
 	}
+	defer admission.release()
 
 	if strings.Contains(r.URL.Path, "embeddings") {
 		// This proxy exists to route FREE models, and /v1/embeddings cannot honor
@@ -238,7 +244,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		// system instruction belongs in the top-level system field.
 		injectLocalAgentGuardrailForMessages(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
-		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
+		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools), admission)
 		return
 	}
 
@@ -278,14 +284,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	// Tool-calling agents need the same local-machine guardrail on the normal
 	// chat wire as on the Anthropic messages wire.
 	injectLocalAgentGuardrail(reqBody)
-	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
+	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools), admission)
 }
 
 // dispatchChain runs a request through the model chain: plan → filter (breaker) →
 // rank (score) → truncate → fallback. Shared by /chat/completions and /messages;
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
-func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
+func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string, admission *admissionHold) {
 	ctx = withTrace(ctx, newRouteTrace(category))
 	traceFrom(ctx).recordPolicy(decision.RuleID, decision.Reason, requestedModel, decision.PolicySteps)
 	defer s.finishTrace(ctx)
@@ -387,9 +393,28 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		// refuses immediately below.
 		if beforeQuota > 0 {
 			holdWait := s.quotaRetryAfterForAttempts(ctx, breakerAvailable, apiKey, quotaEstimate, time.Now())
-			if holdWait > 0 && holdWait <= holdBudget && s.holdForQuotaReset(ctx, holdWait) {
-				holdBudget -= holdWait + quotaHoldSettle
-				continue
+			if holdWait > 0 && holdWait <= holdBudget {
+				// Give up the admission slot for the sleep: PROXY_MAX_CONCURRENT
+				// (when enabled) is scarce, and a request that is merely waiting
+				// on a scheduled quota reset — not doing any work — must not pin
+				// one for up to holdBudget and starve smaller requests that would
+				// otherwise fit the same window right now.
+				admission.release()
+				held := s.holdForQuotaReset(ctx, holdWait)
+				if held && !admission.reacquire(ctx) {
+					// Held out the quota wait, but capacity is gone now that we
+					// no longer hold a priority slot for it — a distinct failure
+					// from the quota one, so report it as such.
+					s.counters.admissionRejected.Add(1)
+					w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
+					failTrace(ctx, w, outcomeAllCooling)
+					writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT) after waiting for quota. Retry shortly.")
+					return
+				}
+				if held {
+					holdBudget -= holdWait + quotaHoldSettle
+					continue
+				}
 			}
 		}
 		breakerWait := s.retryAfterForAttempts(attemptsToTry)

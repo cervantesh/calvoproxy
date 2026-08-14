@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -376,5 +378,89 @@ func TestQuotaHoldSkipsWhenBreakerNotQuotaIsTheBlocker(t *testing.T) {
 	}
 	if held := svc.Counters().QuotaHeld; held != 0 {
 		t.Fatalf("must not count a hold when breaker, not quota, is the blocker: QuotaHeld=%d", held)
+	}
+}
+
+// admissionProbeTransport answers "only:free" with a 429 on its first call and
+// 200 afterward (installing the default local quota cooldown, same as
+// countingBareQuotaTransport), and answers "healthy:free" with 200 always —
+// so a single shared http.Client can drive both the holding request and the
+// concurrent probe request used to check whether its admission slot froze.
+type admissionProbeTransport struct {
+	mu           sync.Mutex
+	onlyFreeCall int
+}
+
+func (t *admissionProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	if bytes.Contains(body, []byte(`"model":"only:free"`)) {
+		t.mu.Lock()
+		t.onlyFreeCall++
+		first := t.onlyFreeCall == 1
+		t.mu.Unlock()
+		if first {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"rate limited"}`))}, nil
+		}
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`))}, nil
+}
+
+// TestQuotaHoldReleasesAdmissionSlotDuringWait guards against a second bug an
+// automated review caught on top of the quota-hold feature: with
+// PROXY_MAX_CONCURRENT enabled, the admission slot is acquired once at the
+// top of RouteRequestWithProvider and held for the whole handler by default —
+// including, without this fix, the entire quota-hold sleep. A large request
+// that is merely waiting on a scheduled quota reset would then pin a scarce
+// slot for up to the hold budget and starve smaller requests that could be
+// served immediately. With only ONE admission slot configured, this test
+// starts a request that will hold for quota, and while it is asleep, fires a
+// second request on an unrelated healthy chain — which must be admitted and
+// served, proving the first request's hold released its slot.
+func TestQuotaHoldReleasesAdmissionSlotDuringWait(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	t.Setenv("PROXY_MAX_CONCURRENT", "1")
+	t.Setenv("PROXY_ADMISSION_TIMEOUT_SECONDS", "1")
+	transport := &admissionProbeTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}, "simple": {"healthy:free"}},
+		Aliases:        map[string]string{"coding": "coding", "simple": "simple"},
+	})
+
+	// The quota-hold loop only fires when NO attempt survives the routing gate
+	// up front — a fresh model with no prior quota observation always gets
+	// dispatched and fails on its own upstream 429 via executeFallbacks, which
+	// does not feed back into the hold loop within the same request. So a
+	// first, throwaway request is needed to install the local quota cooldown
+	// before the actual holder request can ever reach holdForQuotaReset.
+	first := newHeaderSnapshotRecorder()
+	svc.RouteRequest(first, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup request should fail and install the local quota cooldown, got %d", first.Code)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	holderCode := 0
+	go func() {
+		defer wg.Done()
+		rec := newHeaderSnapshotRecorder()
+		svc.RouteRequest(rec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+		holderCode = rec.Code
+	}()
+
+	// Give the holder time to find only:free already cooling down from the
+	// setup request and enter holdForQuotaReset's sleep — well before it wakes.
+	time.Sleep(400 * time.Millisecond)
+
+	probeRec := newHeaderSnapshotRecorder()
+	svc.RouteRequest(probeRec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"simple","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if probeRec.Code != http.StatusOK {
+		t.Fatalf("probe request on an unrelated healthy chain should be admitted while the first request is only sleeping for a quota reset, got %d body=%s", probeRec.Code, probeRec.Body.String())
+	}
+
+	wg.Wait()
+	if holderCode != http.StatusOK {
+		t.Fatalf("holder should reacquire its slot and complete successfully after the probe released it, got %d", holderCode)
 	}
 }
