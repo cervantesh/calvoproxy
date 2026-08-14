@@ -25,9 +25,34 @@ import (
 
 var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`)
 
+// placeholderAPIKey reports whether an extracted Authorization value carries no
+// usable credential, so the ambient/vault/login-file fallback should run.
+//
+// "" and "dummy" are the obvious cases. The third one is not obvious and cost a
+// live debugging session: a client that sends a scheme-only header —
+// `Authorization: Bearer` with an empty token, which desktop clients emit when
+// their API-key setting is blank — does NOT extract to "". Go's header parsing
+// trims the trailing space, so BearerToken sees exactly "Bearer", fails its own
+// "bearer " prefix test, and hands back the literal word "Bearer" as if it were
+// the key. That is non-empty, so the fallback was skipped and the proxy
+// forwarded `Authorization: Bearer Bearer` upstream — answering a request that
+// had a perfectly good stored credential with a 401 "Missing Authentication
+// header" from the provider.
+//
+// Matching the scheme word itself is safe: it is not a credential any provider
+// issues, and a real token that happened to be the word "bearer" would already
+// be indistinguishable from this at the wire level.
+func placeholderAPIKey(apiKey string) bool {
+	switch strings.ToLower(strings.TrimSpace(apiKey)) {
+	case "", "dummy", "bearer":
+		return true
+	}
+	return false
+}
+
 func resolveAPIKey(r *http.Request) string {
 	apiKey := requestmeta.AuthorizationFromRequest(r)
-	if apiKey == "" || apiKey == "dummy" {
+	if placeholderAPIKey(apiKey) {
 		// "Ambient" keys are the ones the proxy supplies itself for a keyless
 		// request: the env OPENROUTER_API_KEY and the `calvoproxy login` file.
 		// Don't silently spend either on a public bind — that turns an exposed
@@ -39,7 +64,7 @@ func resolveAPIKey(r *http.Request) string {
 			return ""
 		}
 		if envKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")); envKey != "" {
-			slog.Info("Using API key from environment (header was empty or dummy)")
+			slog.Info("Using API key from environment (header carried no usable key)")
 			return envKey
 		}
 		if vaultKey, ok := managedProviderCredential(secretstore.ProviderOpenRouter); ok {
