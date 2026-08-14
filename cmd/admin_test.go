@@ -9,6 +9,7 @@ import (
 )
 
 func TestAdminGate(t *testing.T) {
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
 	call := func(hdr string) (int, bool) {
 		got := false
 		h := admin(func(w http.ResponseWriter, r *http.Request) { got = true; w.WriteHeader(200) })
@@ -41,6 +42,7 @@ func TestAdminGate(t *testing.T) {
 // (spec §5). An id the ring no longer holds is a 404, not an error worth
 // distinguishing: the buffer is bounded on purpose.
 func TestDecisionsEndpointIsAdminGatedAnd404sUnknownIds(t *testing.T) {
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
 	svc := router.NewRouterService()
 	t.Cleanup(svc.Close)
 	mux := newMux(svc, nil)

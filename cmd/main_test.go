@@ -33,6 +33,7 @@ func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("CEREBRAS_API_KEY", "")
 	t.Setenv("GROQ_API_KEY", "")
+	t.Setenv("PROXY_ADMIN_TOKEN", "")
 	mux := newMux(router.NewRouterService(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
