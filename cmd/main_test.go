@@ -26,6 +26,42 @@ func TestResolveAPIKey_PrefersAuthorizationThenEnv(t *testing.T) {
 	}
 }
 
+// TestResolveAPIKey_SchemeOnlyHeaderFallsBackToAmbient covers the failure a
+// desktop client hit in the field: with its API-key setting left blank it sent
+// `Authorization: Bearer` (scheme, no token). That does NOT extract to "" —
+// Go trims the trailing space, so the bearer-prefix test fails and the literal
+// word "Bearer" comes back as the key. Being non-empty, it skipped the ambient
+// fallback and was forwarded upstream, which answered 401 "Missing
+// Authentication header" even though a valid stored credential existed.
+func TestResolveAPIKey_SchemeOnlyHeaderFallsBackToAmbient(t *testing.T) {
+	bindHost = "127.0.0.1"
+	t.Setenv("OPENROUTER_API_KEY", "env-key")
+
+	for _, header := range []string{"Bearer ", "Bearer", "bearer", "  Bearer  ", "dummy", ""} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		if got := resolveAPIKey(req); got != "env-key" {
+			t.Fatalf("Authorization %q carries no usable key and must fall back to the ambient one, got %q", header, got)
+		}
+	}
+
+	// A real token must still win over the ambient key — the fallback widening
+	// must not start swallowing credentials that merely contain the word.
+	for _, tc := range []struct{ header, want string }{
+		{"Bearer sk-or-v1-real", "sk-or-v1-real"},
+		{"Bearer bearer-shaped-token", "bearer-shaped-token"},
+		{"sk-or-v1-no-scheme", "sk-or-v1-no-scheme"},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("Authorization", tc.header)
+		if got := resolveAPIKey(req); got != tc.want {
+			t.Fatalf("Authorization %q should resolve to %q, got %q", tc.header, tc.want, got)
+		}
+	}
+}
+
 func TestNewMux_RejectsUnauthorizedAndServesHealth(t *testing.T) {
 	// Deterministic 401: no env key to fall back to (the host running the suite
 	// may have OPENROUTER_API_KEY set, and a prior test may have left bindHost on
