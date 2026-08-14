@@ -51,6 +51,11 @@ type routerCounters struct {
 	// requests the chain never saw. Its neighbours (admissionRejected,
 	// capabilityRefused) are counted; this client-visible 503 was not.
 	allModelsCooling atomic.Int64
+	// Requests parked in-proxy until the earliest quota/cooldown reset instead
+	// of being refused. Each hold that later serves the request is a 503 the
+	// client never saw; a rising rate says quota windows are chronically full
+	// and the fleet needs either bigger limits or smaller requests.
+	quotaHeld atomic.Int64
 
 	// Per-model latency, two DIFFERENT quantities that must never be summed
 	// together. Guarded by a mutex only for map lookup/insert; the accumulators
@@ -166,6 +171,7 @@ type RouterCounters struct {
 	ChainFailedExhausted     int64
 	ChainFailedExecutorError int64
 	AllModelsCooling         int64
+	QuotaHeld                int64
 
 	// FirstEventLatency is the post-header wait the fail-fast budget acts on;
 	// FirstTokenLatency is the end-to-end request → first token. Different
@@ -195,6 +201,7 @@ func (s *RouterService) Counters() RouterCounters {
 		ChainFailedExhausted:     s.counters.chainFailedExhausted.Load(),
 		ChainFailedExecutorError: s.counters.chainFailedExecutorError.Load(),
 		AllModelsCooling:         s.counters.allModelsCooling.Load(),
+		QuotaHeld:                s.counters.quotaHeld.Load(),
 
 		FirstEventLatency: s.counters.snapshotLatency(&s.counters.firstEventStats),
 		FirstTokenLatency: s.counters.snapshotLatency(&s.counters.firstTokenStats),

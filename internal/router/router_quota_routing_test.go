@@ -242,6 +242,9 @@ func (t *countingBareQuotaTransport) RoundTrip(*http.Request) (*http.Response, e
 }
 
 func TestBare429PublishesDefaultRetryAfterAndBlocksImmediateResend(t *testing.T) {
+	// This test verifies the fail-fast refusal itself, so the in-proxy hold
+	// (which would otherwise ride out the 2s cooldown and resend) is disabled.
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "0")
 	transport := &countingBareQuotaTransport{}
 	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
 		DefaultProfile: "coding",
@@ -265,5 +268,60 @@ func TestBare429PublishesDefaultRetryAfterAndBlocksImmediateResend(t *testing.T)
 	}
 	if transport.calls != 1 {
 		t.Fatalf("cooldown should prevent the immediate resend, got %d upstream calls", transport.calls)
+	}
+}
+
+// recoveringQuotaTransport fails the first call with a bare 429 (which installs
+// the default local cooldown) and serves the second call, so a held request can
+// prove it recovered without any client-side retry.
+type recoveringQuotaTransport struct{ calls int }
+
+func (t *recoveringQuotaTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	if t.calls == 1 {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)),
+	}, nil
+}
+
+func TestQuotaHoldRidesOutCooldownAndRecoversWithoutClientRetry(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	transport := &recoveringQuotaTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}},
+		Aliases:        map[string]string{"coding": "coding"},
+	})
+
+	first := newHeaderSnapshotRecorder()
+	svc.RouteRequest(first, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if transport.calls != 1 {
+		t.Fatalf("first request should reach upstream exactly once, got %d", transport.calls)
+	}
+
+	// The bare 429 installed a ~2s local cooldown. The second request must be
+	// parked in-proxy past that cooldown and then succeed on its own.
+	start := time.Now()
+	second := newHeaderSnapshotRecorder()
+	svc.RouteRequest(second, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if second.Code != http.StatusOK {
+		t.Fatalf("held request should recover with 200, got %d body=%s", second.Code, second.Body.String())
+	}
+	if transport.calls != 2 {
+		t.Fatalf("recovery needs exactly one more upstream call, got %d", transport.calls)
+	}
+	if waited := time.Since(start); waited < time.Second {
+		t.Fatalf("second request did not actually wait out the cooldown (took %v)", waited)
+	}
+	if held := svc.Counters().QuotaHeld; held < 1 {
+		t.Fatalf("hold was not counted: QuotaHeld=%d", held)
 	}
 }
