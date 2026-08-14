@@ -269,9 +269,19 @@ func (l *QuotaLedger) ReserveAll(reservations []QuotaReservation, now time.Time)
 	defer l.mu.Unlock()
 	l.purgeExpiredLocked(now)
 	for key, cost := range amounts {
-		if bucket := l.buckets[key]; bucket != nil && bucket.observation.Remaining-bucket.reserved < cost {
-			return QuotaTicket{}, false
+		bucket := l.buckets[key]
+		if bucket == nil || bucket.observation.Remaining-bucket.reserved >= cost {
+			continue
 		}
+		// An estimated bucket is an unconfirmed bootstrap default: refusing the
+		// reservation here would silently undo quotaCanFit's decision to let an
+		// unconfirmed shortfall through, so the candidate would still never
+		// receive the real response that could confirm or correct the estimate.
+		// Only a confirmed (authoritative) shortfall is a hard gate.
+		if bucket.observation.Confidence == QuotaConfidenceEstimated {
+			continue
+		}
+		return QuotaTicket{}, false
 	}
 	holds := make(map[QuotaBucketKey]quotaHold, len(amounts))
 	for key, cost := range amounts {

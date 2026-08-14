@@ -225,6 +225,34 @@ func TestQuotaCanFitDoesNotHardBlockOnUnconfirmedEstimate(t *testing.T) {
 	}
 }
 
+// TestQuotaRankAndReserveDoesNotDropUnconfirmedEstimateShortfall exercises the
+// full candidate-selection path (quotaRankAndReserve -> ReserveAll), not just
+// quotaCanFit's filter decision. quotaCanFit alone is not enough: ReserveAll
+// enforces the same Remaining/reserved check independently, so without the
+// matching Confidence carve-out there, an unconfirmed-estimate candidate that
+// quotaCanFit lets through the filter would still be silently dropped by the
+// reservation step immediately after, and the permanent lockout this fix
+// intends to close would remain in practice.
+func TestQuotaRankAndReserveDoesNotDropUnconfirmedEstimateShortfall(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "groq")
+	ctx := WithAmbientProviderCredentials(context.Background(), true)
+	s := &RouterService{modelBreakers: map[string]*modelBreakerState{}, providerAttempts: map[providerID]int64{}, providerBalance: map[providerID]int64{}, quota: NewQuotaLedger(), quotaCooldowns: map[string]time.Time{}}
+	attempt := modelAttempt{Profile: "coding", Provider: providerGroq, Model: "openai/gpt-oss-120b"}
+
+	// Estimate (14,716 tokens, matching providerQuotaEstimate's forced Groq
+	// output assumption) exceeds Groq's unconfirmed 8,000 TPM bootstrap
+	// default, the exact scenario that permanently excluded Groq before this
+	// fix.
+	ranked := s.quotaRankAndReserve(ctx, []modelAttempt{attempt}, "groq", QuotaEstimate{Requests: 1, Tokens: 10620, InputTokens: 10620})
+	if len(ranked) != 1 || ranked[0].Provider != providerGroq {
+		t.Fatalf("unconfirmed estimate shortfall must not be dropped by reservation: ranked=%+v", ranked)
+	}
+	if !ranked[0].QuotaTicket.Valid() {
+		t.Fatal("surviving candidate must carry a valid reservation ticket")
+	}
+	s.quota.Release(ranked[0].QuotaTicket, time.Now())
+}
+
 type countingDailyQuotaTransport struct{ calls int }
 
 func (t *countingDailyQuotaTransport) RoundTrip(*http.Request) (*http.Response, error) {
