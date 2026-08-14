@@ -52,7 +52,29 @@ fi
 # The trade-off, stated: this verifies what is staged/committed, not unstaged
 # edits in your working tree. The manifest guards what enters the repository.
 generate() {
-  git ls-files -z "$ROOT" | xargs -0 sha256sum | LC_ALL=C sort
+  # Hash the INDEX content (git show ":$f"), never the file on disk. A checkout
+  # on Windows rewrites vendored text to CRLF, so hashing the working tree makes
+  # the manifest disagree with itself across platforms: generated on Windows it
+  # fails in Linux CI for every text file at once, which reads as mass tampering
+  # and hides a real one. The index is the same bytes everywhere.
+  # Serial by default. Concurrent `git show` invocations were measured failing
+  # sporadically on Windows, and a failed hash must never become a blank entry
+  # that looks like a legitimate manifest line: an integrity check that degrades
+  # quietly is worse than a slow one. VENDOR_MANIFEST_JOBS raises the batch
+  # count where forks are cheap; any empty hash aborts the run either way.
+  git ls-files -z "$ROOT" |
+    xargs -0 -P "${VENDOR_MANIFEST_JOBS:-1}" -n 32 bash -c '
+      set -euo pipefail
+      for f in "$@"; do
+        sum="$(git show ":$f" | sha256sum | cut -d" " -f1)"
+        if [[ -z "$sum" || "${#sum}" -ne 64 ]]; then
+          echo "vendor-manifest: could not hash $f" >&2
+          exit 1
+        fi
+        printf "%s  %s\n" "$sum" "$f"
+      done
+    ' _ |
+    LC_ALL=C sort
 }
 
 if [[ "${1:-}" == "--update" ]]; then
