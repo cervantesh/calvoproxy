@@ -11,6 +11,54 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-08-14
+
+### Fixed
+- **A provider that never got a fair first request stayed excluded forever.**
+  `quotaCanFit` and `ReserveAll` treated an *unconfirmed* bootstrap quota
+  estimate — a conservative published default, installed only until a real
+  provider response replaces it — exactly like a confirmed shortfall: a hard
+  block. For Groq's `coding` profile, the 8,000-tokens/minute bootstrap
+  default combined with the assumed 4,096-token output reservation exceeded
+  any moderate request, so Groq was excluded on the very first attempt,
+  before a single real request could ever reach it to confirm or correct the
+  estimate. The exclusion could therefore never heal itself. When the other
+  configured providers were also genuinely constrained (OpenRouter's daily
+  free-tier cap, Cerebras), the proxy fell through to `503 All configured
+  model providers are temporarily rate-limited for this request size...` even
+  though Groq's real account limits may have had headroom the whole time.
+  Only a *confirmed* (provider-header) shortfall is now a hard gate; an
+  unconfirmed estimate still ranks last so a provider with known headroom is
+  preferred, but it gets one real attempt instead of a permanent lockout.
+
+  That exception is **exactly one probe per window**, and the distinction
+  matters: some dimensions never become authoritative at all. Groq and Cerebras
+  publish RPD and TPM headers but never RPM or TPD, so those two buckets stay
+  estimates for their whole window while ordinary consumption still draws them
+  down. An unbounded exception would therefore stop being a bootstrap
+  concession and become a permanent hole — every later request passing a limit
+  that was configured precisely to keep the proxy under the provider's ceiling,
+  until reset, trading a local decision for an upstream `429`. The probe is
+  spent when a reservation against the bucket settles, because that proves a
+  real request reached the provider; a released reservation does not spend it,
+  since a request that never completed confirms nothing. A window reset grants
+  a fresh probe.
+- **An API key naming this proxy is treated as "no key", not as a credential.**
+  A desktop client was configured with the API key `calvoproxy-local`, meaning
+  "there is nothing here, use your own key" — the same intent as the `dummy`
+  placeholder the config file already documents. The proxy could not tell that
+  apart from a real credential, so it honoured it, forwarded it upstream, and
+  the provider answered `401 Missing Authentication header` while a perfectly
+  good stored credential sat unused. From the outside this reads as the proxy
+  being broken, because the one thing the error never says is "the key YOU sent
+  was rejected".
+
+  Any key beginning with `calvoproxy` now joins `""`, `dummy` and the
+  scheme-only `Bearer` case in the placeholder set. Naming this proxy in a
+  credential field states the opposite of a credential, and no provider issues
+  keys that start with it, so honouring the intent cannot shadow a real token.
+  The rule anchors at the start: `sk-or-v1-calvoproxy` is still a credential.
+
 ## [0.19.0] — 2026-08-14
 
 ### Added
@@ -44,35 +92,6 @@ out — see v0.7.1.
   model health.
 
 ### Fixed
-- **A provider that never got a fair first request stayed excluded forever.**
-  `quotaCanFit` and `ReserveAll` treated an *unconfirmed* bootstrap quota
-  estimate — a conservative published default, installed only until a real
-  provider response replaces it — exactly like a confirmed shortfall: a hard
-  block. For Groq's `coding` profile, the 8,000-tokens/minute bootstrap
-  default combined with the assumed 4,096-token output reservation exceeded
-  any moderate request, so Groq was excluded on the very first attempt,
-  before a single real request could ever reach it to confirm or correct the
-  estimate. The exclusion could therefore never heal itself. When the other
-  configured providers were also genuinely constrained (OpenRouter's daily
-  free-tier cap, Cerebras), the proxy fell through to `503 All configured
-  model providers are temporarily rate-limited for this request size...` even
-  though Groq's real account limits may have had headroom the whole time.
-  Only a *confirmed* (provider-header) shortfall is now a hard gate; an
-  unconfirmed estimate still ranks last so a provider with known headroom is
-  preferred, but it gets one real attempt instead of a permanent lockout.
-
-  That exception is **exactly one probe per window**, and the distinction
-  matters: some dimensions never become authoritative at all. Groq and Cerebras
-  publish RPD and TPM headers but never RPM or TPD, so those two buckets stay
-  estimates for their whole window while ordinary consumption still draws them
-  down. An unbounded exception would therefore stop being a bootstrap
-  concession and become a permanent hole — every later request passing a limit
-  that was configured precisely to keep the proxy under the provider's ceiling,
-  until reset, trading a local decision for an upstream `429`. The probe is
-  spent when a reservation against the bucket settles, because that proves a
-  real request reached the provider; a released reservation does not spend it,
-  since a request that never completed confirms nothing. A window reset grants
-  a fresh probe.
 - **Provider-specific OpenAI-compatible adapters.** Cerebras and Groq now
   receive normalized payloads for their supported fields, including safe
   handling of OpenCode reasoning history. An unsupported provider field now
@@ -1047,7 +1066,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.1
 [0.19.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.0
 [0.18.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.18.0
 [0.15.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.15.0

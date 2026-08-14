@@ -42,12 +42,24 @@ var profileChatPathPattern = regexp.MustCompile(`^/v1/([^/]+)/chat/completions$`
 // Matching the scheme word itself is safe: it is not a credential any provider
 // issues, and a real token that happened to be the word "bearer" would already
 // be indistinguishable from this at the wire level.
+//
+// The fourth case is anything naming this proxy — measured, again, on a live
+// client: a desktop app was configured with the API key `calvoproxy-local`,
+// meaning "there is no key here, use your own". The proxy could not tell that
+// apart from a credential, forwarded it, and the provider answered 401. The
+// user then has every reason to believe the proxy is broken, because the one
+// thing the error does not say is "the key YOU sent was rejected".
+//
+// A caller naming this proxy in the credential field is stating the opposite
+// of a credential, and no provider issues keys that begin with it, so honouring
+// the intent costs nothing and cannot shadow a real token.
 func placeholderAPIKey(apiKey string) bool {
-	switch strings.ToLower(strings.TrimSpace(apiKey)) {
+	normalized := strings.ToLower(strings.TrimSpace(apiKey))
+	switch normalized {
 	case "", "dummy", "bearer":
 		return true
 	}
-	return false
+	return strings.HasPrefix(normalized, "calvoproxy")
 }
 
 func resolveAPIKey(r *http.Request) string {
