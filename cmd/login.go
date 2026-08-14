@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cervantesh/calvoproxy/internal/secretstore"
 )
 
 const (
@@ -336,11 +338,11 @@ func runLogin(args []string) int {
 			fmt.Fprintln(os.Stderr, "token exchange failed:", err)
 			return 1
 		}
-		if err := storeAPIKey(key); err != nil {
+		if err := storeManagedOpenRouterKey(ctx, key); err != nil {
 			fmt.Fprintln(os.Stderr, "store key:", err)
 			return 1
 		}
-		fmt.Printf("Logged in. Stored key %s at %s\n", maskKey(key), keyFilePath())
+		fmt.Printf("Logged in. Stored key %s in the encrypted provider vault.\n", maskKey(key))
 		return 0
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "login timed out — no authorization received.")
@@ -360,16 +362,16 @@ func loginKeyStdin() int {
 		fmt.Fprintln(os.Stderr, "expected an OpenRouter key (sk-or-…) on stdin")
 		return 1
 	}
-	if err := storeAPIKey(key); err != nil {
+	if err := storeManagedOpenRouterKey(context.Background(), key); err != nil {
 		fmt.Fprintln(os.Stderr, "store key:", err)
 		return 1
 	}
-	fmt.Printf("Stored key %s at %s\n", maskKey(key), keyFilePath())
+	fmt.Printf("Stored key %s in the encrypted provider vault.\n", maskKey(key))
 	return 0
 }
 
 func runLogout() int {
-	if err := deleteAPIKey(); err != nil {
+	if err := deleteManagedOpenRouterKey(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "logout:", err)
 		return 1
 	}
@@ -382,8 +384,9 @@ func runWhoami() int {
 		fmt.Printf("Key configured via OPENROUTER_API_KEY (env): %s\n", maskKey(envKey))
 		return 0
 	}
-	if k := storedAPIKey(); k != "" {
-		fmt.Printf("Key configured via login file (%s): %s\n", keyFilePath(), maskKey(k))
+	if k, ok := managedProviderCredential(secretstore.ProviderOpenRouter); ok {
+		defer clear(k)
+		fmt.Printf("Key configured via encrypted provider vault: %s\n", maskKey(string(k)))
 		return 0
 	}
 	fmt.Println("No API key configured. Run `calvoproxy login`, or set OPENROUTER_API_KEY.")

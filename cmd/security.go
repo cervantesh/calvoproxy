@@ -12,6 +12,53 @@ import (
 // env OpenRouter key for a keyless request). Set once in main() before serving.
 var bindHost string
 
+// adminPolicy is intentionally derived once at startup.  A public bind must
+// never turn administrative endpoints into an unauthenticated control plane
+// simply because an operator omitted PROXY_ADMIN_TOKEN.
+type adminPolicy struct {
+	public       bool
+	token        string
+	requireToken bool
+}
+
+var currentAdminPolicy adminPolicy
+
+func configureAdminPolicy(host string) {
+	bindHost = host
+	token := strings.TrimSpace(os.Getenv("PROXY_ADMIN_TOKEN"))
+	currentAdminPolicy = adminPolicy{
+		public:       !isLoopbackHost(host),
+		token:        token,
+		requireToken: !isLoopbackHost(host) || envTrue("PROXY_ADMIN_REQUIRE_TOKEN"),
+	}
+}
+
+func envTrue(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p adminPolicy) disabled() bool { return p.requireToken && p.token == "" }
+
+// activeAdminPolicy also makes handler-level construction safe in tests and
+// embedders that use newMux without running main first. Production still
+// configures the policy once at startup.
+func activeAdminPolicy() adminPolicy {
+	p := currentAdminPolicy
+	if p.token == "" {
+		p.token = strings.TrimSpace(os.Getenv("PROXY_ADMIN_TOKEN"))
+	}
+	if bindHost != "" {
+		p.public = !isLoopbackHost(bindHost)
+		p.requireToken = p.public || envTrue("PROXY_ADMIN_REQUIRE_TOKEN")
+	}
+	return p
+}
+
 // isLoopbackHost reports whether a bind host is loopback-only (safe to treat as
 // private). Empty, 0.0.0.0 and :: mean "all interfaces" → public. A hostname is
 // resolved; if every resolved IP is loopback it's private, otherwise public.

@@ -671,11 +671,19 @@ func classifyTransportError(err error) *attemptError {
 
 func classifyHTTPError(statusCode int, responseBody string) *attemptError {
 	classification := cervoretry.ClassifyHTTPStatus(statusCode, responseBody)
-	message := classification.Message
-	if statusCode == http.StatusTooManyRequests {
-		if quotaMessage, ok := openRouterDailyFreeQuotaMessage(responseBody); ok {
-			message = quotaMessage
-		}
+	// Provider response bodies often contain request fragments, account details
+	// or credentials. Keep them only long enough for classification; every
+	// observable error uses this closed, safe vocabulary instead.
+	message := "upstream unavailable"
+	switch {
+	case statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity:
+		message = "request rejected"
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+		message = "provider authentication failed"
+	case statusCode == http.StatusTooManyRequests:
+		message = "rate limited"
+	case statusCode == http.StatusGatewayTimeout || statusCode == http.StatusRequestTimeout:
+		message = "timeout"
 	}
 	return &attemptError{
 		StatusCode:      classification.StatusCode,
