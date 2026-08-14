@@ -1,7 +1,9 @@
 services:
   calvoproxy:
     # Use the published image:
-    image: ghcr.io/cervantesh/calvoproxy:latest
+    # Pin a published release by immutable digest. Set CALVOPROXY_IMAGE to a
+    # newer tag+digest together (never to :latest).
+    image: "${CALVOPROXY_IMAGE:?set CALVOPROXY_IMAGE to ghcr.io/cervantesh/calvoproxy:<tag>@sha256:<digest>}"
     # ...or build locally instead (comment out `image:` above and uncomment):
     # build: .
     container_name: calvoproxy
@@ -17,7 +19,7 @@ services:
       #    container's OPENROUTER_API_KEY. Leave it unset unless the port is only
       #    reachable by people you'd hand the key to; otherwise clients must send
       #    their own Authorization header.
-      PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:-}"
+      PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN for a public container}"
       PROXY_ALLOW_ENV_KEY_PUBLIC: "${PROXY_ALLOW_ENV_KEY_PUBLIC:-}"
     volumes:
       # Learned reliability scores. Without this the container relearns which
@@ -30,6 +32,13 @@ services:
     # on-failure (not unless-stopped): a clean idle self-shutdown exits 0 and
     # must NOT be auto-restarted into a loop; a crash (non-zero) still restarts.
     restart: on-failure
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:mode=1777
     healthcheck:
       # /ready (not /health): stays open and internals-free even when
       # PROXY_ADMIN_TOKEN gates /health, so the healthcheck won't false-fail.

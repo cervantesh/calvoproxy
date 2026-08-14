@@ -10,15 +10,15 @@ import (
 
 // admissionControl caps the number of concurrent in-flight proxy requests so a
 // burst can't blow past upstream rate limits (or exhaust local resources) and
-// cascade the whole fallback chain into 503s. Disabled by default
-// (PROXY_MAX_CONCURRENT unset/0) — an unbounded proxy, unchanged behaviour.
+// cascade the whole fallback chain into 503s. It defaults to 128; explicitly
+// set PROXY_MAX_CONCURRENT=0 only for trusted local development.
 type admissionControl struct {
 	sem     chan struct{} // nil ⇒ disabled
 	timeout time.Duration
 }
 
 func newAdmissionControl() *admissionControl {
-	max := envInt("PROXY_MAX_CONCURRENT", 0)
+	max := envInt("PROXY_MAX_CONCURRENT", 128)
 	if max <= 0 {
 		return &admissionControl{} // disabled
 	}

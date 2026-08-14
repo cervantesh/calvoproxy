@@ -1,4 +1,5 @@
-FROM golang:1.26-alpine AS builder
+# golang:1.26-alpine3.22 (pinned by manifest digest, not mutable tag).
+FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 AS builder
 WORKDIR /app
 # VERSION is stamped into the binary so it can report itself and detect updates.
 ARG VERSION=dev
@@ -8,8 +9,10 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     go build -mod=vendor -ldflags "-X main.version=${VERSION}" -o calvoproxy ./cmd
 
-FROM alpine:latest
-RUN apk add --no-cache ca-certificates
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S -g 65532 calvoproxy \
+    && adduser -S -D -H -u 65532 -G calvoproxy calvoproxy
 WORKDIR /app
 COPY --from=builder /app/calvoproxy .
 # Editable model chains — override by mounting your own over /app/model-policy.json.
@@ -51,7 +54,9 @@ ENV CALVOPROXY_CONTAINER=1
 # recreation. No VOLUME directive here on purpose — it would litter an anonymous
 # volume per `docker run`; docker-compose.yml declares a named one instead.
 ENV PROXY_SCORE_FILE=/data/scores.json
-RUN mkdir -p /data && chmod 1777 /data
+ENV HOME=/data
+RUN mkdir -p /data && chown -R 65532:65532 /app /data && chmod 0700 /data
 # OPENROUTER_API_KEY must be supplied at runtime:
 #   docker run -e OPENROUTER_API_KEY=sk-or-v1-... -p 8080:8080 calvoproxy
+USER 65532:65532
 CMD ["./calvoproxy"]

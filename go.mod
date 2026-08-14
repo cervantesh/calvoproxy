@@ -2,6 +2,8 @@ module github.com/cervantesh/calvoproxy
 
 go 1.26.5
 
+toolchain go1.26.6
+
 require (
 	github.com/cervantesh/cervo-compress v0.0.0-20260805105237-61a3f522f7e8
 	github.com/cervantesh/cervo-contracts v0.0.0-00010101000000-000000000000

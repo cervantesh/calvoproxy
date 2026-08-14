@@ -140,6 +140,18 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	defer span.End()
 	ctx = withTraceOptIn(ctx, r)
 
+	// Admission happens before reading the body. This deliberately makes a
+	// slow client consume a bounded slot instead of allowing an unbounded number
+	// of readers to exhaust memory or file descriptors before admission applies.
+	if release, ok := s.admission.acquire(ctx); ok {
+		defer release()
+	} else {
+		s.counters.admissionRejected.Add(1)
+		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
+		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
+		return
+	}
+
 	// Bound the request body before reading it into memory, so an oversized or
 	// malicious payload can't OOM the process. Configurable via
 	// PROXY_MAX_BODY_BYTES (default 10 MiB).
@@ -147,18 +159,6 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Request body too large or unreadable", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	// Admission control: cap concurrent in-flight requests (PROXY_MAX_CONCURRENT)
-	// so a burst waits briefly instead of stampeding the upstream past its rate
-	// limits and collapsing the whole chain to 503. Disabled by default.
-	if release, ok := s.admission.acquire(ctx); ok {
-		defer release()
-	} else {
-		s.counters.admissionRejected.Add(1)
-		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
-		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
 		return
 	}
 

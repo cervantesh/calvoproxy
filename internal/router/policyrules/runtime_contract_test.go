@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 	cervorules "github.com/cervantesh/cervo-rules/v3/core"
 	cervoruntime "github.com/cervantesh/cervo-rules/v3/runtime"
-	"github.com/cervantesh/calvoproxy/internal/router/policyvocab"
 )
 
 func TestGeneratedRuntimePolicyContract(t *testing.T) {

@@ -122,3 +122,33 @@ func managedProviderConfigured(provider secretstore.Provider) bool {
 	clear(secret)
 	return ok
 }
+
+func storeManagedOpenRouterKey(ctx context.Context, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("OpenRouter key is empty")
+	}
+	store := initializeManagedCredentials(ctx)
+	if store == nil {
+		return errors.New("encrypted provider vault is unavailable")
+	}
+	keyBytes := []byte(key)
+	defer clear(keyBytes)
+	if err := store.Set(ctx, secretstore.ProviderOpenRouter, keyBytes); err != nil {
+		return err
+	}
+	stored, ok, err := store.Get(ctx, secretstore.ProviderOpenRouter)
+	defer clear(stored)
+	if err != nil || !ok || subtle.ConstantTimeCompare(stored, keyBytes) != 1 {
+		return errors.New("could not verify OpenRouter credential in encrypted provider vault")
+	}
+	return nil
+}
+
+func deleteManagedOpenRouterKey(ctx context.Context) error {
+	store := initializeManagedCredentials(ctx)
+	if store == nil {
+		return errors.New("encrypted provider vault is unavailable")
+	}
+	return store.Delete(ctx, secretstore.ProviderOpenRouter)
+}
