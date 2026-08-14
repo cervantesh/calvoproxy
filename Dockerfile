@@ -1,5 +1,9 @@
-# golang:1.26-alpine3.22 (pinned by manifest digest, not mutable tag).
-FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 AS builder
+# golang:1.26.6-alpine (pinned by manifest digest, not mutable tag). go.mod
+# requires >=1.26.5 (toolchain 1.26.6, for GO-2026-6089/90/91/6218/5972/5026);
+# alpine3.22 has not republished a matching patch, so this also moves the
+# builder's Alpine base from 3.22 to 3.24 -- the runtime stage below stays on
+# 3.22, since only the builder needs the newer Go.
+FROM golang:1.26.6-alpine@sha256:1a9c10cf505a9e6b1e96ea77ebdbfe79a0f10380181faf88bc3b51d7e4315fae AS builder
 WORKDIR /app
 # VERSION is stamped into the binary so it can report itself and detect updates.
 ARG VERSION=dev
