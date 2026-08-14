@@ -464,3 +464,55 @@ func TestQuotaHoldReleasesAdmissionSlotDuringWait(t *testing.T) {
 		t.Fatalf("holder should reacquire its slot and complete successfully after the probe released it, got %d", holderCode)
 	}
 }
+
+// TestQuotaHoldFailsFastWhenAdmissionCannotReacquire covers the other side of
+// the release-then-reacquire fix: if capacity is gone by the time a held
+// request wakes up (another burst took the lone slot while this one was
+// parked), it must fail fast with a distinct capacity message rather than
+// hang or fall through to the quota message — capacity, not quota, is the
+// reason it isn't being served.
+func TestQuotaHoldFailsFastWhenAdmissionCannotReacquire(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	t.Setenv("PROXY_MAX_CONCURRENT", "1")
+	t.Setenv("PROXY_ADMISSION_TIMEOUT_SECONDS", "1")
+	transport := &admissionProbeTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}},
+		Aliases:        map[string]string{"coding": "coding"},
+	})
+
+	setup := newHeaderSnapshotRecorder()
+	svc.RouteRequest(setup, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if setup.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup request should fail and install the local quota cooldown, got %d", setup.Code)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var holderRec *headerSnapshotRecorder
+	go func() {
+		defer wg.Done()
+		holderRec = newHeaderSnapshotRecorder()
+		svc.RouteRequest(holderRec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	}()
+
+	// Give the holder time to release its slot into holdForQuotaReset's sleep.
+	time.Sleep(400 * time.Millisecond)
+
+	// Steal the lone slot directly and sit on it well past both the holder's
+	// remaining ~1.7s wait and its 1s reacquire timeout, so reacquire must fail.
+	stolenRelease, ok := svc.admission.acquire(context.Background())
+	if !ok {
+		t.Fatal("could not steal the admission slot for the test setup")
+	}
+	defer stolenRelease()
+
+	wg.Wait()
+	if holderRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("holder should fail once capacity is unavailable at reacquire time, got %d body=%s", holderRec.Code, holderRec.Body.String())
+	}
+	if !strings.Contains(holderRec.Body.String(), "capacity") {
+		t.Fatalf("failure should report capacity, not the quota-reset message, got: %s", holderRec.Body.String())
+	}
+}
