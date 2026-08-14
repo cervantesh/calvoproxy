@@ -231,6 +231,12 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		if !ok {
 			return
 		}
+		// Keep the local-runtime framing on the shared request before each
+		// provider-specific attempt is normalized. This is intentionally after
+		// authorization: the guard is a prompt addition, not a policy fact.
+		// Anthropic Messages forbids role:"system" entries in messages; its
+		// system instruction belongs in the top-level system field.
+		injectLocalAgentGuardrailForMessages(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
 		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
 		return
@@ -269,6 +275,9 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	// Tool-calling agents need the same local-machine guardrail on the normal
+	// chat wire as on the Anthropic messages wire.
+	injectLocalAgentGuardrail(reqBody)
 	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
 }
 
@@ -328,7 +337,6 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		}
 	}
 	afterCaps := len(attemptsToTry)
-	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
 		if cstat.applied() {
 			reqBody = compressed
@@ -337,22 +345,86 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	}
 	quotaEstimate := estimateRequestQuota(reqBody)
 	contextEstimate := estimateRequestContext(reqBody)
-	beforeContext := len(availableModels)
-	availableModels, contextExcluded := s.filterContextFit(availableModels, contextEstimate)
-	if beforeContext > 0 && len(availableModels) == 0 && contextExcluded == beforeContext {
+	var availableModels []modelAttempt
+	holdBudget := quotaHoldBudget()
+	for {
+		breakerAvailable := s.filterAvailableAttempts(attemptsToTry)
+		beforeContext := len(breakerAvailable)
+		var contextExcluded int
+		breakerAvailable, contextExcluded = s.filterContextFit(breakerAvailable, contextEstimate)
+		if beforeContext > 0 && len(breakerAvailable) == 0 && contextExcluded == beforeContext {
+			failTrace(ctx, w, outcomeAllCooling)
+			writeJSONError(w, http.StatusUnprocessableEntity,
+				"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
+			return
+		}
+		beforeQuota := len(breakerAvailable)
+		// Balance providers by their predicted normalized quota pressure. The
+		// primary reservation is atomic across request/token windows; models are
+		// interleaved across providers before MaxAttempts truncation so fallbacks
+		// cannot accidentally lose all provider diversity.
+		availableModels = s.quotaRankAndReserve(ctx, breakerAvailable, apiKey, quotaEstimate)
+		traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
+		if len(availableModels) > 0 {
+			break
+		}
+		// Nothing can run RIGHT NOW — but "now" is the operative word: the
+		// common blocker for a large agent request is a minute-window token
+		// bucket, which refills within 60s. Before refusing, park the request
+		// until the earliest quota reset and re-run the whole gate (breakers,
+		// context, quota).
+		//
+		// Only worth it when quota is the ACTIVE blocker: breakerAvailable is
+		// the set that already survived the breaker/context gates, so
+		// beforeQuota > 0 means quota ranking is what removed every remaining
+		// candidate. If beforeQuota == 0, nothing survived breaker/context at
+		// all — a quota reset would not help, and computing it over the full
+		// planned chain (attemptsToTry) could find a stale/unrelated reset on
+		// an attempt that was already excluded for being unhealthy, parking
+		// the request for a wait that does nothing but delay the same 503.
+		// The hold is further bounded by quotaHoldBudget and the request
+		// deadline, so a daily-quota exhaustion or an unknown wait still
+		// refuses immediately below.
+		if beforeQuota > 0 {
+			holdWait := s.quotaRetryAfterForAttempts(ctx, breakerAvailable, apiKey, quotaEstimate, time.Now())
+			if holdWait > 0 && holdWait <= holdBudget && s.holdForQuotaReset(ctx, holdWait) {
+				holdBudget -= holdWait + quotaHoldSettle
+				continue
+			}
+		}
+		breakerWait := s.retryAfterForAttempts(attemptsToTry)
+		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
+		wait := breakerWait
+		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
+			wait = quotaWait
+		}
+		// Tell the client WHEN to come back: the soonest cooldown expiry across
+		// the planned chain. Without this, clients retry immediately and amplify
+		// the outage they're already suffering.
+		// Counted separately from calvoproxy_chain_failed_total on purpose: the
+		// chain never ran, so there is no attempt to attribute a failure to.
+		// Folding it in would report "the chain failed" for requests the chain
+		// never saw, and hide the one condition an operator can act on directly —
+		// every model open or cooling at once.
+		s.counters.allModelsCooling.Add(1)
+		if wait > 0 {
+			secs := int(wait.Seconds())
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		}
+		message := "All models are temporarily rate-limited or unhealthy. Cooling down before retry."
+		if quotaMessage := s.dailyFreeQuotaReasonForAttempts(attemptsToTry); quotaMessage != "" {
+			message = quotaMessage
+		} else if quotaWait > 0 {
+			message = "All configured model providers are temporarily rate-limited for this request size. Retrying after the earliest quota reset; your request was not sent upstream. Compact the conversation or start a new session if this repeats."
+		}
 		failTrace(ctx, w, outcomeAllCooling)
-		writeJSONError(w, http.StatusUnprocessableEntity,
-			"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
+		writeJSONError(w, http.StatusServiceUnavailable, message)
 		return
 	}
-	beforeQuota := len(availableModels)
-	// Balance providers by their predicted normalized quota pressure. The
-	// primary reservation is atomic across request/token windows; models are
-	// interleaved across providers before MaxAttempts truncation so fallbacks
-	// cannot accidentally lose all provider diversity.
-	availableModels = s.quotaRankAndReserve(ctx, availableModels, apiKey, quotaEstimate)
-	traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
-	if len(availableModels) > 0 && availableModels[0].QuotaTicket.Valid() {
+	if availableModels[0].QuotaTicket.Valid() {
 		defer s.quotaLedger().Release(availableModels[0].QuotaTicket, time.Now())
 	}
 	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
@@ -370,40 +442,6 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		slog.String("policy_reason", decision.Reason),
 		slog.Any("availableRoute", availableModels),
 	)
-
-	if len(availableModels) == 0 {
-		// Tell the client WHEN to come back: the soonest cooldown expiry across
-		// the planned chain. Without this, clients retry immediately and amplify
-		// the outage they're already suffering.
-		// Counted separately from calvoproxy_chain_failed_total on purpose: the
-		// chain never ran, so there is no attempt to attribute a failure to.
-		// Folding it in would report "the chain failed" for requests the chain
-		// never saw, and hide the one condition an operator can act on directly —
-		// every model open or cooling at once.
-		s.counters.allModelsCooling.Add(1)
-		breakerWait := s.retryAfterForAttempts(attemptsToTry)
-		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
-		wait := breakerWait
-		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
-			wait = quotaWait
-		}
-		if wait > 0 {
-			secs := int(wait.Seconds())
-			if secs < 1 {
-				secs = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(secs))
-		}
-		message := "All models are temporarily rate-limited or unhealthy. Cooling down before retry."
-		if quotaMessage := s.dailyFreeQuotaReasonForAttempts(attemptsToTry); quotaMessage != "" {
-			message = quotaMessage
-		} else if quotaWait > 0 {
-			message = "All configured model providers are temporarily rate-limited. Retrying after the earliest quota reset; your request was not sent upstream."
-		}
-		failTrace(ctx, w, outcomeAllCooling)
-		writeJSONError(w, http.StatusServiceUnavailable, message)
-		return
-	}
 
 	perAttempt := s.config.RequestTimeout
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {

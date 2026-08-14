@@ -19,7 +19,6 @@ const (
 	capEmbedding         cervorules.Operation = policyvocab.OperationEmbedding
 
 	serviceCervoCore     cervorules.Target = policyvocab.TargetCervoCore
-	serviceCervoBridge   cervorules.Target = policyvocab.TargetCervoBridge
 	serviceCervoVaultAPI cervorules.Target = policyvocab.TargetCervoVaultAPI
 	serviceCrashitoBrain cervorules.Target = policyvocab.TargetCrashitoBrain
 	serviceCervoMedia    cervorules.Target = policyvocab.TargetCervoMedia

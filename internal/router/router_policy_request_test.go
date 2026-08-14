@@ -1,6 +1,12 @@
 package router
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestRequestBodyForAttempt_StripsOpenCodeReasoningForDirectProviders(t *testing.T) {
 	body := map[string]interface{}{
@@ -131,6 +137,87 @@ func TestInjectLocalAgentGuardrail_OnlyWhenToolsAndIdempotent(t *testing.T) {
 	injectLocalAgentGuardrail(withTools)
 	if got := len(withTools["messages"].([]interface{})); got != 3 {
 		t.Fatalf("second inject must stay bookended at 3 messages, got %d", got)
+	}
+}
+
+func TestInjectLocalAgentGuardrailForMessagesPreservesStructuredSystem(t *testing.T) {
+	body := map[string]interface{}{
+		"tools": []interface{}{map[string]interface{}{"type": "custom"}},
+		"system": []interface{}{
+			map[string]interface{}{"type": "text", "text": "keep this Anthropic system prompt"},
+		},
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "list files"},
+		},
+	}
+	injectLocalAgentGuardrailForMessages(body)
+
+	system, ok := body["system"].([]interface{})
+	if !ok || len(system) != 2 {
+		t.Fatalf("structured Anthropic system must remain blocks with guardrail, got %#v", body["system"])
+	}
+	if !textBlockContains(system[0], localAgentGuardrailMarker) || !textBlockContains(system[1], "keep this Anthropic system prompt") {
+		t.Fatalf("structured system content was not preserved: %#v", system)
+	}
+	messages := body["messages"].([]interface{})
+	if len(messages) != 1 || messages[0].(map[string]interface{})["role"] != "user" {
+		t.Fatalf("Anthropic messages must not gain system-role entries: %#v", messages)
+	}
+
+	injectLocalAgentGuardrailForMessages(body)
+	if got := len(body["system"].([]interface{})); got != 2 {
+		t.Fatalf("structured system guardrail must be idempotent, got %#v", body["system"])
+	}
+}
+
+func TestRouteInjectsLocalAgentGuardrailOnBothChatWires(t *testing.T) {
+	for _, path := range []string{"/v1/chat/completions", "/v1/messages"} {
+		t.Run(path, func(t *testing.T) {
+			var sent map[string]interface{}
+			svc := newTestService(t, &http.Client{Transport: &captureTransport{onBody: func(raw string) {
+				if err := json.Unmarshal([]byte(raw), &sent); err != nil {
+					t.Fatalf("decode upstream body: %v", err)
+				}
+			}}}, policyConfig{
+				DefaultProfile: "coding",
+				Profiles:       map[string][]string{"coding": {"tool-model:free"}},
+				Aliases:        map[string]string{"default": "coding", "coding": "coding"},
+			})
+			svc.capabilities = newCapabilityIndex(map[string][]string{"tool-model:free": {"tools"}})
+
+			req := trustedRequest(http.MethodPost, path, `{"tools":[{"type":"function","function":{"name":"list_files"}}],"messages":[{"role":"user","content":"list files"}]}`)
+			svc.RouteRequest(httptest.NewRecorder(), req, "test-key")
+			if sent == nil {
+				t.Fatal("request never reached upstream")
+			}
+			messages, _ := sent["messages"].([]interface{})
+			if path == "/v1/messages" {
+				if len(messages) != 1 {
+					t.Fatalf("Anthropic messages must not gain system-role entries: %#v", messages)
+				}
+				if system, _ := sent["system"].(string); !strings.Contains(system, localAgentGuardrailMarker) {
+					t.Fatalf("Anthropic system field missing guardrail: %#v", sent)
+				}
+				for _, raw := range messages {
+					if msg, ok := raw.(map[string]interface{}); ok && msg["role"] == "system" {
+						t.Fatalf("Anthropic messages must not contain role system: %#v", messages)
+					}
+				}
+			} else {
+				if len(messages) < 3 {
+					t.Fatalf("guardrail was not injected: %#v", sent["messages"])
+				}
+				first := messages[0].(map[string]interface{})
+				last := messages[len(messages)-1].(map[string]interface{})
+				if !messageTextContains(first["content"], localAgentGuardrailMarker) || !messageTextContains(last["content"], localAgentGuardrailMarker) {
+					t.Fatalf("missing guardrail bookends: %#v", messages)
+				}
+			}
+			encoded, _ := json.Marshal(sent)
+			if !strings.Contains(string(encoded), localAgentGuardrailMarker) {
+				t.Fatal("upstream request omitted local runtime marker")
+			}
+		})
 	}
 }
 

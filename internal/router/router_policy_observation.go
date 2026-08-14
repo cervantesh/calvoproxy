@@ -76,16 +76,6 @@ func policyDecisionObservationFields(req cervorules.Request, decision policyDeci
 	return fields
 }
 
-func decisionLogAttrs(req cervorules.Request, decision policyDecision) []any {
-	event := newPolicyTelemetryEvent(req, decision, generatedPolicyMetadata(), nil, 0)
-	attrs := event.LogAttrs()
-	out := make([]any, 0, len(attrs))
-	for _, attr := range attrs {
-		out = append(out, attr)
-	}
-	return out
-}
-
 func newPolicyTelemetryEvent(req cervorules.Request, decision policyDecision, metadata cervoruntime.PolicyMetadata, err error, duration time.Duration) PolicyTelemetryEvent {
 	if metadata.Name == "" {
 		metadata = generatedPolicyMetadata()

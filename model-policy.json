@@ -3,7 +3,8 @@
   "Profiles": {
     "coding": [
       "gpt-oss-120b",
-      "openai/gpt-oss-120b"
+      "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b:free"
     ],
     "reasoning": [
       "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -34,7 +35,9 @@
   "ProviderProfiles": {
     "coding": [
       { "Provider": "cerebras", "Model": "gpt-oss-120b" },
-      { "Provider": "groq", "Model": "openai/gpt-oss-120b" }
+      { "Provider": "groq", "Model": "openai/gpt-oss-120b" },
+      { "Provider": "openrouter", "Model": "openai/gpt-oss-20b:free" },
+      { "Provider": "ollama", "Model": "qwen3:14b" }
     ],
     "reasoning": [
       { "Provider": "openrouter", "Model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
@@ -104,6 +107,9 @@
     "groq": {
       "openai/gpt-oss-120b": { "ContextTokens": 131072, "OutputReserveTokens": 16384 },
       "llama-3.1-8b-instant": { "ContextTokens": 131072, "OutputReserveTokens": 8192 }
+    },
+    "ollama": {
+      "qwen3:14b": { "ContextTokens": 32768, "OutputReserveTokens": 4096 }
     }
   },
   "Capabilities": {
@@ -120,6 +126,9 @@
       "tools"
     ],
     "openai/gpt-oss-120b": [
+      "tools"
+    ],
+    "qwen3:14b": [
       "tools"
     ],
     "llama-3.1-8b-instant": [

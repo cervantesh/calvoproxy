@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cervantesh/calvoproxy/internal/app"
 	"github.com/cervantesh/calvoproxy/internal/dashboard"
 	"github.com/cervantesh/calvoproxy/internal/router"
 	"github.com/cervantesh/calvoproxy/internal/secretstore"
@@ -63,14 +64,14 @@ func requirePostAPIKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 
 	apiKey := resolveAPIKey(r)
-	if apiKey == "" && !ambientDirectProviderConfigured(r.Context()) {
+	if apiKey == "" && !ambientDirectProviderConfigured() {
 		http.Error(w, "API Key required", http.StatusUnauthorized)
 		return "", false
 	}
 	return apiKey, true
 }
 
-func ambientDirectProviderConfigured(ctx context.Context) bool {
+func ambientDirectProviderConfigured() bool {
 	if boundToPublicInterface() && !allowEnvKeyOnPublicBind() {
 		return false
 	}
@@ -351,6 +352,8 @@ func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
 	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"executor_error\"} %d\n", c.ChainFailedExecutorError)
 	fmt.Fprintln(w, "# HELP calvoproxy_all_models_cooling_total Requests refused before the chain ran because every planned model was open or cooling down\n# TYPE calvoproxy_all_models_cooling_total counter")
 	fmt.Fprintf(w, "calvoproxy_all_models_cooling_total %d\n", c.AllModelsCooling)
+	fmt.Fprintln(w, "# HELP calvoproxy_quota_hold_total Requests parked in-proxy until the earliest quota/cooldown reset instead of being refused\n# TYPE calvoproxy_quota_hold_total counter")
+	fmt.Fprintf(w, "calvoproxy_quota_hold_total %d\n", c.QuotaHeld)
 
 	// Two per-model latencies that must never be summed together. Both are
 	// sampled only on streaming attempts that are not last in the chain, so
@@ -497,11 +500,6 @@ func main() {
 	srv.WriteTimeout = 0
 	srv.ReadTimeout = 0
 
-	// Run the server; report its exit to main so we can shut down in-band and,
-	// crucially, WAIT for the drain to finish before the process exits.
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- srv.ListenAndServe() }()
-
 	// SIGINT/SIGTERM (e.g. `docker stop`) and idle both trigger the same drain.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -515,29 +513,22 @@ func main() {
 
 	slog.Info("CalvoProxy Smart Proxy running", "host", host, "port", port, "grpc_port", grpcPort)
 
-	var reason string
-	select {
-	case err := <-srvErr:
-		cancelGRPC()
-		if err != nil && err != http.ErrServerClosed {
-			// Return (don't log.Fatal) so the deferred telemetry/OTel shutdown
-			// still runs and flushes before the process exits.
-			slog.Error("HTTP server exited with error", "error", err)
-			exitCode = 1
+	shutdown := make(chan string, 1)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			shutdown <- "signal:" + sig.String()
+		case <-idleCh:
+			shutdown <- "idle"
 		}
-		return
-	case sig := <-sigCh:
-		reason = "signal:" + sig.String()
-	case <-idleCh:
-		reason = "idle"
-	}
+	}()
 
-	slog.Info("CalvoProxy shutting down", "reason", reason)
-	cancelGRPC() // GracefulStop the gRPC server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx) // blocks until in-flight requests drain
-	slog.Info("CalvoProxy stopped")
+	if err := app.New(srv, cancelGRPC, 30*time.Second, slog.Default()).Run(shutdown); err != nil {
+		// Return (don't log.Fatal) so the deferred telemetry/OTel shutdown still
+		// runs and flushes before the process exits.
+		slog.Error("HTTP server exited with error", "error", err)
+		exitCode = 1
+	}
 }
 
 func envOrDefault(key, def string) string {

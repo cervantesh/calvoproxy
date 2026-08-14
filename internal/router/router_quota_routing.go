@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"math"
 	"net/http"
 	"sort"
@@ -13,6 +14,43 @@ import (
 )
 
 const quotaFreePool = "free"
+
+// quotaHoldSettle pads every in-proxy hold past the computed reset instant:
+// provider windows are second-granular and clocks disagree slightly, so waking
+// exactly at the reset would re-read a still-empty bucket about half the time.
+const quotaHoldSettle = 150 * time.Millisecond
+
+// quotaHoldBudget is the total wall-clock a single request may spend parked
+// inside the proxy waiting for quota/cooldown resets, instead of immediately
+// returning the 503 + Retry-After it previously returned. The common blocker
+// for a large agent request is a minute-window token bucket, so the default
+// covers one full minute-window rollover with margin. Set to 0 to disable
+// holding and restore fail-fast behaviour.
+func quotaHoldBudget() time.Duration {
+	return time.Duration(envInt("PROXY_QUOTA_HOLD_MAX_MS", 75_000)) * time.Millisecond
+}
+
+// holdForQuotaReset parks the request until the earliest known quota/cooldown
+// reset, so a client that hits a full window recovers by itself instead of
+// being told to retry. Returns false when the hold must not happen: the request
+// deadline cannot absorb the wait (waiting would burn the whole budget and
+// still fail), or the client went away while parked.
+func (s *RouterService) holdForQuotaReset(ctx context.Context, wait time.Duration) bool {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait+quotaHoldSettle+2*time.Second {
+		return false
+	}
+	s.counters.quotaHeld.Add(1)
+	slog.InfoContext(ctx, "[CalvoProxy] ⏳ All providers quota-blocked for this request; holding until the earliest reset",
+		slog.Duration("wait", wait+quotaHoldSettle))
+	timer := time.NewTimer(wait + quotaHoldSettle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 
 // credentialQuotaScope prevents one API key/account from inheriting another
 // key's exhausted bucket after rotation. Only a short one-way fingerprint is

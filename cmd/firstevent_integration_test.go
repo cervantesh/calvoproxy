@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,30 @@ import (
 
 	"github.com/cervantesh/calvoproxy/internal/router"
 )
+
+// writeTwoAttemptCodingPolicy makes fallback tests independent from the
+// operator's installed model-policy.json. These tests prove the transition from
+// one OpenRouter attempt to the next, so an ambient Ollama/direct-provider
+// attempt would make their timing and attempt-count assertions meaningless.
+func writeTwoAttemptCodingPolicy(t *testing.T) {
+	t.Helper()
+	policy := `{
+  "DefaultProfile": "coding",
+  "Profiles": {
+    "coding": ["first/model:free", "second/model:free"]
+  },
+  "Aliases": {
+    "default": "coding",
+    "coding": "coding"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "model-policy.json")
+	if err := os.WriteFile(path, []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXY_MODEL_POLICY_FILE", path)
+	t.Setenv("PROXY_CAPABILITY_AUTODERIVE", "false")
+}
 
 // TestFirstEventBudget_AdvancesChainAndStillAnswers is the end-to-end proof that
 // abandoning a queued model actually falls through to the next one rather than
@@ -30,6 +56,7 @@ import (
 func TestFirstEventBudget_AdvancesChainAndStillAnswers(t *testing.T) {
 	t.Setenv("PROXY_STREAM_FIRST_BYTE_TIMEOUT", "1")
 	t.Setenv("PROXY_SCORING_ENABLED", "false") // keep the chain in policy order
+	writeTwoAttemptCodingPolicy(t)
 	bindHost = "127.0.0.1"
 
 	var calls atomic.Int64
@@ -187,6 +214,7 @@ func TestUpstream400AdvancesToTheNextModel(t *testing.T) {
 // caller believed it had the first.
 func TestServedModelHeadersRevealFallback(t *testing.T) {
 	t.Setenv("PROXY_SCORING_ENABLED", "false")
+	writeTwoAttemptCodingPolicy(t)
 	bindHost = "127.0.0.1"
 
 	var calls atomic.Int64

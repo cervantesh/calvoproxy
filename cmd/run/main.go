@@ -34,7 +34,6 @@ const (
 	lbPort         = 8080
 	backendStart   = 8081
 	stateFile      = "calvoproxy-backends.json"
-	maxBackends    = 3
 	healthTimeout  = 10 * time.Second
 	maxFailures    = 3 // consecutive health check failures before replacement
 	healthInterval = 5 * time.Second
@@ -126,7 +125,7 @@ func runLoadBalancer(args []string) {
 
 	// Health check loop
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(healthInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -325,12 +324,6 @@ func (b *Backend) isHealthy() bool {
 	return b.healthy
 }
 
-func (b *Backend) failureCount() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.failures
-}
-
 func (b *Backend) shouldReplace() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -350,12 +343,6 @@ func (b *Backend) markReplacing() bool {
 func (b *Backend) incConn()   { atomic.AddInt32(&b.connections, 1) }
 func (b *Backend) decConn()   { atomic.AddInt32(&b.connections, -1) }
 func (b *Backend) conns() int { return int(atomic.LoadInt32(&b.connections)) }
-
-func (b *Backend) getPort() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.port
-}
 
 type LoadBalancer struct {
 	backends []*Backend

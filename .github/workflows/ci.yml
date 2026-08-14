@@ -19,7 +19,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          # Pinned to an exact patch, not a floating "1.26": govulncheck checks
+          # the stdlib bundled in the toolchain that actually runs, and a
+          # stdlib CVE gets fixed by a patch release. A floating minor version
+          # depends on setup-go's manifest having already picked up that patch,
+          # which lags the actual release — go1.26.6 fixed 6 stdlib CVEs
+          # (GO-2026-6089/6090/6091/5972/5026/6218) still present in 1.26.5.
+          go-version: "1.26.6"
       - name: Build (offline, vendored)
         run: GOPROXY=off go build -mod=vendor ./...
       - name: Test
@@ -31,6 +37,13 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Dependency vulnerability scan
+        # Keep the scanner outside the vendored application graph, then inspect
+        # the exact source and versions that the build uses. Pin the tool so a
+        # future scanner release cannot change CI policy without review.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
       - name: Vendored dependency integrity
         # The cervo-* modules have NO go.sum entries and no reachable upstream
         # (third_party/ is not in this repo). This manifest is the only thing
@@ -85,7 +98,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.26.6"
       - name: Build native macOS binary
         env:
           CGO_ENABLED: "1"

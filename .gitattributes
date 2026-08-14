@@ -10,6 +10,13 @@ vendor/** -text
 # Shell scripts must be LF or they will not run on Linux, where CI runs them.
 *.sh text eol=lf
 
+# gofmt refuses to touch a file whose line endings aren't LF, so a Windows
+# checkout (where `text=auto` alone checks out CRLF) makes gofmt -l flag every
+# .go file as unformatted even when nothing was actually changed. Forcing LF
+# here — the same fix already applied to *.sh — keeps `go/gofmt` usable on any
+# platform and matches what's already stored in the repo (blobs are LF).
+*.go text eol=lf
+
 # Checksums and coverage floors are compared line by line across platforms.
 *.sha256 text eol=lf
 scripts/coverage-floors.txt text eol=lf
