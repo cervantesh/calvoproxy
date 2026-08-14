@@ -348,22 +348,22 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	var availableModels []modelAttempt
 	holdBudget := quotaHoldBudget()
 	for {
-		availableModels = s.filterAvailableAttempts(attemptsToTry)
-		beforeContext := len(availableModels)
+		breakerAvailable := s.filterAvailableAttempts(attemptsToTry)
+		beforeContext := len(breakerAvailable)
 		var contextExcluded int
-		availableModels, contextExcluded = s.filterContextFit(availableModels, contextEstimate)
-		if beforeContext > 0 && len(availableModels) == 0 && contextExcluded == beforeContext {
+		breakerAvailable, contextExcluded = s.filterContextFit(breakerAvailable, contextEstimate)
+		if beforeContext > 0 && len(breakerAvailable) == 0 && contextExcluded == beforeContext {
 			failTrace(ctx, w, outcomeAllCooling)
 			writeJSONError(w, http.StatusUnprocessableEntity,
 				"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
 			return
 		}
-		beforeQuota := len(availableModels)
+		beforeQuota := len(breakerAvailable)
 		// Balance providers by their predicted normalized quota pressure. The
 		// primary reservation is atomic across request/token windows; models are
 		// interleaved across providers before MaxAttempts truncation so fallbacks
 		// cannot accidentally lose all provider diversity.
-		availableModels = s.quotaRankAndReserve(ctx, availableModels, apiKey, quotaEstimate)
+		availableModels = s.quotaRankAndReserve(ctx, breakerAvailable, apiKey, quotaEstimate)
 		traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
 		if len(availableModels) > 0 {
 			break
@@ -372,21 +372,31 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		// common blocker for a large agent request is a minute-window token
 		// bucket, which refills within 60s. Before refusing, park the request
 		// until the earliest quota reset and re-run the whole gate (breakers,
-		// context, quota). Quota ONLY: a quota reset is a scheduled fact worth
-		// waiting for, while a breaker cooldown means the model is unhealthy —
-		// waiting out a breaker would trade a fast, honest 503 for a slow retry
-		// against something still likely broken. The hold is further bounded by
-		// quotaHoldBudget and by the request deadline, so a daily-quota
-		// exhaustion or an unknown wait still refuses immediately below.
+		// context, quota).
+		//
+		// Only worth it when quota is the ACTIVE blocker: breakerAvailable is
+		// the set that already survived the breaker/context gates, so
+		// beforeQuota > 0 means quota ranking is what removed every remaining
+		// candidate. If beforeQuota == 0, nothing survived breaker/context at
+		// all — a quota reset would not help, and computing it over the full
+		// planned chain (attemptsToTry) could find a stale/unrelated reset on
+		// an attempt that was already excluded for being unhealthy, parking
+		// the request for a wait that does nothing but delay the same 503.
+		// The hold is further bounded by quotaHoldBudget and the request
+		// deadline, so a daily-quota exhaustion or an unknown wait still
+		// refuses immediately below.
+		if beforeQuota > 0 {
+			holdWait := s.quotaRetryAfterForAttempts(ctx, breakerAvailable, apiKey, quotaEstimate, time.Now())
+			if holdWait > 0 && holdWait <= holdBudget && s.holdForQuotaReset(ctx, holdWait) {
+				holdBudget -= holdWait + quotaHoldSettle
+				continue
+			}
+		}
 		breakerWait := s.retryAfterForAttempts(attemptsToTry)
 		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
 		wait := breakerWait
 		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
 			wait = quotaWait
-		}
-		if quotaWait > 0 && quotaWait <= holdBudget && s.holdForQuotaReset(ctx, quotaWait) {
-			holdBudget -= quotaWait + quotaHoldSettle
-			continue
 		}
 		// Tell the client WHEN to come back: the soonest cooldown expiry across
 		// the planned chain. Without this, clients retry immediately and amplify
