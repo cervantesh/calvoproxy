@@ -44,6 +44,22 @@ out — see v0.7.1.
   model health.
 
 ### Fixed
+- **A provider that never got a fair first request stayed excluded forever.**
+  `quotaCanFit` and `ReserveAll` treated an *unconfirmed* bootstrap quota
+  estimate — a conservative published default, installed only until a real
+  provider response replaces it — exactly like a confirmed shortfall: a hard
+  block. For Groq's `coding` profile, the 8,000-tokens/minute bootstrap
+  default combined with the assumed 4,096-token output reservation exceeded
+  any moderate request, so Groq was excluded on the very first attempt,
+  before a single real request could ever reach it to confirm or correct the
+  estimate. The exclusion could therefore never heal itself. When the other
+  configured providers were also genuinely constrained (OpenRouter's daily
+  free-tier cap, Cerebras), the proxy fell through to `503 All configured
+  model providers are temporarily rate-limited for this request size...` even
+  though Groq's real account limits may have had headroom the whole time.
+  Only a *confirmed* (provider-header) shortfall is now a hard gate; an
+  unconfirmed estimate still ranks last so a provider with known headroom is
+  preferred, but it gets one real attempt instead of a permanent lockout.
 - **Provider-specific OpenAI-compatible adapters.** Cerebras and Groq now
   receive normalized payloads for their supported fields, including safe
   handling of OpenCode reasoning history. An unsupported provider field now
