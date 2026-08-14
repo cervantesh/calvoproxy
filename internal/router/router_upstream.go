@@ -150,7 +150,16 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		quotaObservations := s.observeAndSettleQuota(ticket, attempt, providerKey, resp.StatusCode, resp.Header, respBytes, estimate.Tokens, time.Now())
 		settled = true
 		providerQuotaExhausted := false
-		quotaLimited := resp.StatusCode == http.StatusTooManyRequests
+		// 413 is this provider's capacity saying the request doesn't fit its
+		// current window — Groq returns it (not 429) for a TPM overrun, e.g.
+		// "tokens per minute (TPM): Limit 8000, Requested 23162". That is an
+		// account-specific rate constraint, not a verdict on the request: a
+		// different provider's TPM budget, or Groq's own next window, may take
+		// it fine. Treating it as quota-limited (SkipModel, not terminal) applies
+		// the same "who refused" rule already used for 429 instead of ending the
+		// whole fallback chain on the first provider whose per-minute budget is
+		// too small for this request.
+		quotaLimited := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestEntityTooLarge
 		for _, observation := range quotaObservations {
 			if observation.RetryAfter > providerRetryAfter {
 				providerRetryAfter = observation.RetryAfter
