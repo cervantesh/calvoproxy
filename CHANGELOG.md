@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.19.2] — 2026-08-14
+
 ### Fixed
 - **A `413` from one provider no longer kills the whole chain.** `413` is a
   statement about a provider's own ceiling, never about the request, but it was
@@ -1080,7 +1082,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.19.2...HEAD
+[0.19.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.2
 [0.19.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.1
 [0.19.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.0
 [0.18.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.18.0
