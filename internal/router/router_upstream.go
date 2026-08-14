@@ -150,7 +150,16 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		quotaObservations := s.observeAndSettleQuota(ticket, attempt, providerKey, resp.StatusCode, resp.Header, respBytes, estimate.Tokens, time.Now())
 		settled = true
 		providerQuotaExhausted := false
-		quotaLimited := resp.StatusCode == http.StatusTooManyRequests
+		// 413 is this provider's capacity saying the request doesn't fit its
+		// current window — Groq returns it (not 429) for a TPM overrun, e.g.
+		// "tokens per minute (TPM): Limit 8000, Requested 23162". That is an
+		// account-specific rate constraint, not a verdict on the request: a
+		// different provider's TPM budget, or Groq's own next window, may take
+		// it fine. Treating it as quota-limited (SkipModel, not terminal) applies
+		// the same "who refused" rule already used for 429 instead of ending the
+		// whole fallback chain on the first provider whose per-minute budget is
+		// too small for this request.
+		quotaLimited := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestEntityTooLarge
 		for _, observation := range quotaObservations {
 			if observation.RetryAfter > providerRetryAfter {
 				providerRetryAfter = observation.RetryAfter
@@ -202,23 +211,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 		// provider_name) still terminates as it must — a bad key is bad for
 		// every model, and burning the chain would hide the one error that
 		// matters.
-		// 413 belongs to the same family, and more obviously so: it is a
-		// statement about THIS provider's ceiling, never about the request.
-		// Measured on 2026-08-14, a daily cron briefing died on:
-		//   413 "Request too large for model `openai/gpt-oss-120b` ... on
-		//        tokens per minute (TPM): Limit 8000, Requested 18711"
-		// An ordinary agent request — tool schemas plus a short prompt — cannot
-		// fit an 8k-per-minute window at all, so that provider could never have
-		// served it, while the OpenRouter and Cerebras models in the same chain
-		// have windows several times larger. 413 was terminal, so the chain
-		// stopped there and the job had failed every day since.
-		//
-		// Advancing costs the same as the 400 case: at most K fast rejections
-		// when the request really is too big for everyone, and the client still
-		// ends up with the error.
-		if resp.StatusCode == http.StatusBadRequest ||
-			resp.StatusCode == http.StatusRequestEntityTooLarge ||
-			isProviderRelayedError(string(respBytes)) {
+		if resp.StatusCode == http.StatusBadRequest || isProviderRelayedError(string(respBytes)) {
 			attErr.SkipModel = true
 			slog.WarnContext(ctx, "[CalvoProxy] upstream rejected the request; trying the next model",
 				slog.String("model", attempt.Model),
