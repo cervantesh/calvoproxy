@@ -11,6 +11,54 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.19.3] — 2026-08-14
+
+### Removed
+- **The gRPC transport is gone.** `cmd/grpc.go`, its tests, the generated
+  `gen/proto/proxyv1` package and `proto/calvoproxy/` are removed; the proxy is
+  HTTP-only. `cmd/run` still reserves a port and exports `GRPC_PORT`, and still
+  reports `GRPCPort` in its JSON status: nothing reads it now, but that field
+  may have external consumers, so retiring it is deliberately a separate call.
+
+### Fixed
+- **A `413` no longer punishes the model that reported it.** v0.19.2 made a
+  `413` advance the chain instead of ending it, which was the larger half of
+  the problem. It still counted as that model's failure, though: the score was
+  penalised and the breaker could open. But `413 ... tokens per minute (TPM):
+  Limit 8000, Requested 18711` says nothing about the model's health — it is a
+  one-minute window, and the same model serves the same request fine a moment
+  later. A handful of those in a row degraded routing until a chain ran out of
+  candidates, and then even a two-word prompt failed with a `413` the client
+  could not compress its way out of. `413` is now treated as quota-limited, the
+  same family as `429`: it advances, and it leaves the model's reputation
+  alone.
+- **The vendored-dependency manifest is platform-independent again.** Widening
+  it from the `cervo-*` modules to all of `vendor/` also switched it from
+  hashing index content to hashing the files on disk. A checkout on Windows
+  rewrites vendored text to CRLF, so a manifest generated there disagreed with
+  Linux CI for every text file at once — which reads as mass tampering and
+  would bury a real one. It hashes index bytes again, which are identical
+  everywhere, keeping the wider scope.
+
+### Security
+- **A public bind no longer leaves the admin surface open.** Omitting
+  `PROXY_ADMIN_TOKEN` while bound off-loopback used to publish the
+  administrative endpoints unauthenticated; that combination is now refused
+  rather than silently trusted. Admission control also defaults to 128
+  concurrent requests instead of disabled, so a burst cannot stampede the
+  upstream by default.
+- **The legacy plaintext login file is migration-only.** After the vault
+  rollout it is never a routing credential, on loopback or anywhere else.
+- **Upstream error text is no longer echoed.** Provider response bodies can
+  carry request fragments, account details or credentials. They are still used
+  for classification, but what the client observes is a closed vocabulary
+  (`rate limited`, `provider authentication failed`, `request rejected`,
+  `timeout`, `upstream unavailable`).
+
+### Added
+- **`cmd/keepalive-launcher`** — a small supervisor for keeping the proxy
+  running.
+
 ## [0.19.2] — 2026-08-14
 
 ### Fixed
