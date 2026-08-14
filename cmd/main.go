@@ -352,6 +352,8 @@ func writeRouterMetrics(w http.ResponseWriter, c router.RouterCounters) {
 	fmt.Fprintf(w, "calvoproxy_chain_failed_total{reason=\"executor_error\"} %d\n", c.ChainFailedExecutorError)
 	fmt.Fprintln(w, "# HELP calvoproxy_all_models_cooling_total Requests refused before the chain ran because every planned model was open or cooling down\n# TYPE calvoproxy_all_models_cooling_total counter")
 	fmt.Fprintf(w, "calvoproxy_all_models_cooling_total %d\n", c.AllModelsCooling)
+	fmt.Fprintln(w, "# HELP calvoproxy_quota_hold_total Requests parked in-proxy until the earliest quota/cooldown reset instead of being refused\n# TYPE calvoproxy_quota_hold_total counter")
+	fmt.Fprintf(w, "calvoproxy_quota_hold_total %d\n", c.QuotaHeld)
 
 	// Two per-model latencies that must never be summed together. Both are
 	// sampled only on streaming attempts that are not last in the chain, so

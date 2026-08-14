@@ -153,14 +153,20 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	// Admission control: cap concurrent in-flight requests (PROXY_MAX_CONCURRENT)
 	// so a burst waits briefly instead of stampeding the upstream past its rate
 	// limits and collapsing the whole chain to 503. Disabled by default.
-	if release, ok := s.admission.acquire(ctx); ok {
-		defer release()
-	} else {
+	//
+	// The held slot is passed into dispatchChain as an admissionHold: a quota
+	// hold there releases it for the duration of its sleep and reacquires it
+	// before actually dispatching, so a large, merely-waiting request cannot
+	// pin a scarce slot for up to PROXY_QUOTA_HOLD_MAX_MS and starve smaller
+	// requests that would otherwise fit inside the same admission window.
+	admission := &admissionHold{ctrl: s.admission}
+	if !admission.acquire(ctx) {
 		s.counters.admissionRejected.Add(1)
 		w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
 		writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT). Retry shortly.")
 		return
 	}
+	defer admission.release()
 
 	if strings.Contains(r.URL.Path, "embeddings") {
 		// This proxy exists to route FREE models, and /v1/embeddings cannot honor
@@ -238,7 +244,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		// system instruction belongs in the top-level system field.
 		injectLocalAgentGuardrailForMessages(msgBody)
 		slog.InfoContext(ctx, "[CalvoProxy] 🚀 Anthropic /messages via model chain")
-		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools))
+		s.dispatchChain(ctx, w, decision, msgBody, apiKey, category, requestedModel, stream, messagesPath, capsRequired(hasImages, hasTools), admission)
 		return
 	}
 
@@ -278,14 +284,14 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	// Tool-calling agents need the same local-machine guardrail on the normal
 	// chat wire as on the Anthropic messages wire.
 	injectLocalAgentGuardrail(reqBody)
-	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools))
+	s.dispatchChain(ctx, w, decision, reqBody, apiKey, category, requestedModel, stream, "", capsRequired(hasImages, hasTools), admission)
 }
 
 // dispatchChain runs a request through the model chain: plan → filter (breaker) →
 // rank (score) → truncate → fallback. Shared by /chat/completions and /messages;
 // opPath is "" for chat (default) or messagesPath to send each attempt to the
 // Anthropic /messages endpoint with the same resilience machinery.
-func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string) {
+func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter, decision policyDecision, reqBody map[string]interface{}, apiKey, category, requestedModel string, stream bool, opPath string, required []string, admission *admissionHold) {
 	ctx = withTrace(ctx, newRouteTrace(category))
 	traceFrom(ctx).recordPolicy(decision.RuleID, decision.Reason, requestedModel, decision.PolicySteps)
 	defer s.finishTrace(ctx)
@@ -337,7 +343,6 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		}
 	}
 	afterCaps := len(attemptsToTry)
-	availableModels := s.filterAvailableAttempts(attemptsToTry)
 	if compressed, cstat, cerr := safeCompress(category, reqBody); cerr == nil {
 		if cstat.applied() {
 			reqBody = compressed
@@ -346,41 +351,78 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	}
 	quotaEstimate := estimateRequestQuota(reqBody)
 	contextEstimate := estimateRequestContext(reqBody)
-	beforeContext := len(availableModels)
-	availableModels, contextExcluded := s.filterContextFit(availableModels, contextEstimate)
-	if beforeContext > 0 && len(availableModels) == 0 && contextExcluded == beforeContext {
-		failTrace(ctx, w, outcomeAllCooling)
-		writeJSONError(w, http.StatusUnprocessableEntity,
-			"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
-		return
-	}
-	beforeQuota := len(availableModels)
-	// Balance providers by their predicted normalized quota pressure. The
-	// primary reservation is atomic across request/token windows; models are
-	// interleaved across providers before MaxAttempts truncation so fallbacks
-	// cannot accidentally lose all provider diversity.
-	availableModels = s.quotaRankAndReserve(ctx, availableModels, apiKey, quotaEstimate)
-	traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
-	if len(availableModels) > 0 && availableModels[0].QuotaTicket.Valid() {
-		defer s.quotaLedger().Release(availableModels[0].QuotaTicket, time.Now())
-	}
-	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
-		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
-	}
-	traceFrom(ctx).recordChain(planned, afterCaps, len(availableModels), required)
-
-	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
-		slog.String("category", category),
-		slog.String("op_path", opPath),
-		slog.String("policy_target", string(decision.Target)),
-		slog.String("executor", string(decision.Executor)),
-		slog.String("rule_id", decision.RuleID),
-		slog.String("audit_class", string(decision.AuditClass)),
-		slog.String("policy_reason", decision.Reason),
-		slog.Any("availableRoute", availableModels),
-	)
-
-	if len(availableModels) == 0 {
+	var availableModels []modelAttempt
+	holdBudget := quotaHoldBudget()
+	for {
+		breakerAvailable := s.filterAvailableAttempts(attemptsToTry)
+		beforeContext := len(breakerAvailable)
+		var contextExcluded int
+		breakerAvailable, contextExcluded = s.filterContextFit(breakerAvailable, contextEstimate)
+		if beforeContext > 0 && len(breakerAvailable) == 0 && contextExcluded == beforeContext {
+			failTrace(ctx, w, outcomeAllCooling)
+			writeJSONError(w, http.StatusUnprocessableEntity,
+				"Request context exceeds every eligible model's safe window. Compact the conversation or start a new session.")
+			return
+		}
+		beforeQuota := len(breakerAvailable)
+		// Balance providers by their predicted normalized quota pressure. The
+		// primary reservation is atomic across request/token windows; models are
+		// interleaved across providers before MaxAttempts truncation so fallbacks
+		// cannot accidentally lose all provider diversity.
+		availableModels = s.quotaRankAndReserve(ctx, breakerAvailable, apiKey, quotaEstimate)
+		traceFrom(ctx).recordQuotaExclusions(beforeQuota - len(availableModels))
+		if len(availableModels) > 0 {
+			break
+		}
+		// Nothing can run RIGHT NOW — but "now" is the operative word: the
+		// common blocker for a large agent request is a minute-window token
+		// bucket, which refills within 60s. Before refusing, park the request
+		// until the earliest quota reset and re-run the whole gate (breakers,
+		// context, quota).
+		//
+		// Only worth it when quota is the ACTIVE blocker: breakerAvailable is
+		// the set that already survived the breaker/context gates, so
+		// beforeQuota > 0 means quota ranking is what removed every remaining
+		// candidate. If beforeQuota == 0, nothing survived breaker/context at
+		// all — a quota reset would not help, and computing it over the full
+		// planned chain (attemptsToTry) could find a stale/unrelated reset on
+		// an attempt that was already excluded for being unhealthy, parking
+		// the request for a wait that does nothing but delay the same 503.
+		// The hold is further bounded by quotaHoldBudget and the request
+		// deadline, so a daily-quota exhaustion or an unknown wait still
+		// refuses immediately below.
+		if beforeQuota > 0 {
+			holdWait := s.quotaRetryAfterForAttempts(ctx, breakerAvailable, apiKey, quotaEstimate, time.Now())
+			if holdWait > 0 && holdWait <= holdBudget {
+				// Give up the admission slot for the sleep: PROXY_MAX_CONCURRENT
+				// (when enabled) is scarce, and a request that is merely waiting
+				// on a scheduled quota reset — not doing any work — must not pin
+				// one for up to holdBudget and starve smaller requests that would
+				// otherwise fit the same window right now.
+				admission.release()
+				held := s.holdForQuotaReset(ctx, holdWait)
+				if held && !admission.reacquire(ctx) {
+					// Held out the quota wait, but capacity is gone now that we
+					// no longer hold a priority slot for it — a distinct failure
+					// from the quota one, so report it as such.
+					s.counters.admissionRejected.Add(1)
+					w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
+					failTrace(ctx, w, outcomeAdmissionAfterHold)
+					writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT) after waiting for quota. Retry shortly.")
+					return
+				}
+				if held {
+					holdBudget -= holdWait + quotaHoldSettle
+					continue
+				}
+			}
+		}
+		breakerWait := s.retryAfterForAttempts(attemptsToTry)
+		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
+		wait := breakerWait
+		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
+			wait = quotaWait
+		}
 		// Tell the client WHEN to come back: the soonest cooldown expiry across
 		// the planned chain. Without this, clients retry immediately and amplify
 		// the outage they're already suffering.
@@ -390,12 +432,6 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		// never saw, and hide the one condition an operator can act on directly —
 		// every model open or cooling at once.
 		s.counters.allModelsCooling.Add(1)
-		breakerWait := s.retryAfterForAttempts(attemptsToTry)
-		quotaWait := s.quotaRetryAfterForAttempts(ctx, attemptsToTry, apiKey, quotaEstimate, time.Now())
-		wait := breakerWait
-		if wait <= 0 || (quotaWait > 0 && quotaWait < wait) {
-			wait = quotaWait
-		}
 		if wait > 0 {
 			secs := int(wait.Seconds())
 			if secs < 1 {
@@ -413,6 +449,24 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		writeJSONError(w, http.StatusServiceUnavailable, message)
 		return
 	}
+	if availableModels[0].QuotaTicket.Valid() {
+		defer s.quotaLedger().Release(availableModels[0].QuotaTicket, time.Now())
+	}
+	if decision.RetryPolicy.MaxAttempts > 0 && len(availableModels) > decision.RetryPolicy.MaxAttempts {
+		availableModels = availableModels[:decision.RetryPolicy.MaxAttempts]
+	}
+	traceFrom(ctx).recordChain(planned, afterCaps, len(availableModels), required)
+
+	slog.InfoContext(ctx, "[CalvoProxy] 🏷️ Resolving Route",
+		slog.String("category", category),
+		slog.String("op_path", opPath),
+		slog.String("policy_target", string(decision.Target)),
+		slog.String("executor", string(decision.Executor)),
+		slog.String("rule_id", decision.RuleID),
+		slog.String("audit_class", string(decision.AuditClass)),
+		slog.String("policy_reason", decision.Reason),
+		slog.Any("availableRoute", availableModels),
+	)
 
 	perAttempt := s.config.RequestTimeout
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -242,6 +244,9 @@ func (t *countingBareQuotaTransport) RoundTrip(*http.Request) (*http.Response, e
 }
 
 func TestBare429PublishesDefaultRetryAfterAndBlocksImmediateResend(t *testing.T) {
+	// This test verifies the fail-fast refusal itself, so the in-proxy hold
+	// (which would otherwise ride out the 2s cooldown and resend) is disabled.
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "0")
 	transport := &countingBareQuotaTransport{}
 	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
 		DefaultProfile: "coding",
@@ -265,5 +270,252 @@ func TestBare429PublishesDefaultRetryAfterAndBlocksImmediateResend(t *testing.T)
 	}
 	if transport.calls != 1 {
 		t.Fatalf("cooldown should prevent the immediate resend, got %d upstream calls", transport.calls)
+	}
+}
+
+// recoveringQuotaTransport fails the first call with a bare 429 (which installs
+// the default local cooldown) and serves the second call, so a held request can
+// prove it recovered without any client-side retry.
+type recoveringQuotaTransport struct{ calls int }
+
+func (t *recoveringQuotaTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	if t.calls == 1 {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)),
+	}, nil
+}
+
+func TestQuotaHoldRidesOutCooldownAndRecoversWithoutClientRetry(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	transport := &recoveringQuotaTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}},
+		Aliases:        map[string]string{"coding": "coding"},
+	})
+
+	first := newHeaderSnapshotRecorder()
+	svc.RouteRequest(first, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if transport.calls != 1 {
+		t.Fatalf("first request should reach upstream exactly once, got %d", transport.calls)
+	}
+
+	// The bare 429 installed a ~2s local cooldown. The second request must be
+	// parked in-proxy past that cooldown and then succeed on its own.
+	start := time.Now()
+	second := newHeaderSnapshotRecorder()
+	svc.RouteRequest(second, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if second.Code != http.StatusOK {
+		t.Fatalf("held request should recover with 200, got %d body=%s", second.Code, second.Body.String())
+	}
+	if transport.calls != 2 {
+		t.Fatalf("recovery needs exactly one more upstream call, got %d", transport.calls)
+	}
+	if waited := time.Since(start); waited < time.Second {
+		t.Fatalf("second request did not actually wait out the cooldown (took %v)", waited)
+	}
+	if held := svc.Counters().QuotaHeld; held < 1 {
+		t.Fatalf("hold was not counted: QuotaHeld=%d", held)
+	}
+}
+
+// TestQuotaHoldSkipsWhenBreakerNotQuotaIsTheBlocker guards against holding for
+// a quota reset that cannot possibly help: the only configured model is
+// breaker-open (unhealthy), so nothing survives even the breaker/context gate
+// before quota is ever consulted. If the hold decision were computed over the
+// full planned chain (attemptsToTry) instead of the breaker-healthy subset, a
+// stale quota observation on that same excluded model would still report a
+// positive wait and park the request for it — burning most of the hold budget
+// only to hit the same breaker-open 503 afterwards.
+func TestQuotaHoldSkipsWhenBreakerNotQuotaIsTheBlocker(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	transport := &countingBareQuotaTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		// A second, healthy profile keeps the proxy's overall readiness gate
+		// (healthFacts: "is ANY known model available") open, so the request
+		// actually reaches dispatchChain's hold decision instead of being
+		// rejected upstream for global unavailability — this test targets the
+		// per-chain breaker-vs-quota logic, not the readiness gate.
+		Profiles: map[string][]string{"coding": {"only:free"}, "simple": {"healthy:free"}},
+		Aliases:  map[string]string{"coding": "coding", "simple": "simple"},
+	})
+	attempt := modelAttempt{Profile: "coding", Provider: providerOpenRouter, Model: "only:free"}
+	now := time.Now()
+	svc.modelBreakers[svc.breakerKey(attempt)] = &modelBreakerState{OpenUntil: now.Add(30 * time.Second)}
+	// A quota observation whose reset comfortably fits inside holdBudget, so
+	// quotaRetryAfterForAttempts over the FULL chain reports a positive
+	// (bogus) wait for this already-breaker-excluded model that a buggy
+	// implementation would happily wait out.
+	svc.quotaLedger().Observe(
+		QuotaBucketKey{Provider: string(providerOpenRouter), Scope: credentialQuotaScope("free_pool", "openrouter-secret"), ModelOrPool: quotaFreePool, Dimension: QuotaDimensionRequests, Window: QuotaWindowDay},
+		QuotaObservation{Limit: 50, Remaining: 0, ResetAt: now.Add(3 * time.Second), Source: QuotaSourceProviderHeader, Confidence: QuotaConfidenceAuthoritative},
+		now,
+	)
+
+	start := time.Now()
+	rec := newHeaderSnapshotRecorder()
+	svc.RouteRequest(rec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("breaker-open request should fail fast with 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("breaker-open request should fail immediately, not hold for an unrelated quota reset: took %v", elapsed)
+	}
+	if transport.calls != 0 {
+		t.Fatalf("breaker-open model must never be dialed, got %d calls", transport.calls)
+	}
+	if held := svc.Counters().QuotaHeld; held != 0 {
+		t.Fatalf("must not count a hold when breaker, not quota, is the blocker: QuotaHeld=%d", held)
+	}
+}
+
+// admissionProbeTransport answers "only:free" with a 429 on its first call and
+// 200 afterward (installing the default local quota cooldown, same as
+// countingBareQuotaTransport), and answers "healthy:free" with 200 always —
+// so a single shared http.Client can drive both the holding request and the
+// concurrent probe request used to check whether its admission slot froze.
+type admissionProbeTransport struct {
+	mu           sync.Mutex
+	onlyFreeCall int
+}
+
+func (t *admissionProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	if bytes.Contains(body, []byte(`"model":"only:free"`)) {
+		t.mu.Lock()
+		t.onlyFreeCall++
+		first := t.onlyFreeCall == 1
+		t.mu.Unlock()
+		if first {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"rate limited"}`))}, nil
+		}
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`))}, nil
+}
+
+// TestQuotaHoldReleasesAdmissionSlotDuringWait guards against a second bug an
+// automated review caught on top of the quota-hold feature: with
+// PROXY_MAX_CONCURRENT enabled, the admission slot is acquired once at the
+// top of RouteRequestWithProvider and held for the whole handler by default —
+// including, without this fix, the entire quota-hold sleep. A large request
+// that is merely waiting on a scheduled quota reset would then pin a scarce
+// slot for up to the hold budget and starve smaller requests that could be
+// served immediately. With only ONE admission slot configured, this test
+// starts a request that will hold for quota, and while it is asleep, fires a
+// second request on an unrelated healthy chain — which must be admitted and
+// served, proving the first request's hold released its slot.
+func TestQuotaHoldReleasesAdmissionSlotDuringWait(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	t.Setenv("PROXY_MAX_CONCURRENT", "1")
+	t.Setenv("PROXY_ADMISSION_TIMEOUT_SECONDS", "1")
+	transport := &admissionProbeTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}, "simple": {"healthy:free"}},
+		Aliases:        map[string]string{"coding": "coding", "simple": "simple"},
+	})
+
+	// The quota-hold loop only fires when NO attempt survives the routing gate
+	// up front — a fresh model with no prior quota observation always gets
+	// dispatched and fails on its own upstream 429 via executeFallbacks, which
+	// does not feed back into the hold loop within the same request. So a
+	// first, throwaway request is needed to install the local quota cooldown
+	// before the actual holder request can ever reach holdForQuotaReset.
+	first := newHeaderSnapshotRecorder()
+	svc.RouteRequest(first, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup request should fail and install the local quota cooldown, got %d", first.Code)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	holderCode := 0
+	go func() {
+		defer wg.Done()
+		rec := newHeaderSnapshotRecorder()
+		svc.RouteRequest(rec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+		holderCode = rec.Code
+	}()
+
+	// Give the holder time to find only:free already cooling down from the
+	// setup request and enter holdForQuotaReset's sleep — well before it wakes.
+	time.Sleep(400 * time.Millisecond)
+
+	probeRec := newHeaderSnapshotRecorder()
+	svc.RouteRequest(probeRec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"simple","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if probeRec.Code != http.StatusOK {
+		t.Fatalf("probe request on an unrelated healthy chain should be admitted while the first request is only sleeping for a quota reset, got %d body=%s", probeRec.Code, probeRec.Body.String())
+	}
+
+	wg.Wait()
+	if holderCode != http.StatusOK {
+		t.Fatalf("holder should reacquire its slot and complete successfully after the probe released it, got %d", holderCode)
+	}
+}
+
+// TestQuotaHoldFailsFastWhenAdmissionCannotReacquire covers the other side of
+// the release-then-reacquire fix: if capacity is gone by the time a held
+// request wakes up (another burst took the lone slot while this one was
+// parked), it must fail fast with a distinct capacity message rather than
+// hang or fall through to the quota message — capacity, not quota, is the
+// reason it isn't being served.
+func TestQuotaHoldFailsFastWhenAdmissionCannotReacquire(t *testing.T) {
+	t.Setenv("PROXY_QUOTA_HOLD_MAX_MS", "10000")
+	t.Setenv("PROXY_MAX_CONCURRENT", "1")
+	t.Setenv("PROXY_ADMISSION_TIMEOUT_SECONDS", "1")
+	transport := &admissionProbeTransport{}
+	svc := newTestService(t, &http.Client{Transport: transport}, policyConfig{
+		DefaultProfile: "coding",
+		Profiles:       map[string][]string{"coding": {"only:free"}},
+		Aliases:        map[string]string{"coding": "coding"},
+	})
+
+	setup := newHeaderSnapshotRecorder()
+	svc.RouteRequest(setup, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	if setup.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup request should fail and install the local quota cooldown, got %d", setup.Code)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var holderRec *headerSnapshotRecorder
+	go func() {
+		defer wg.Done()
+		holderRec = newHeaderSnapshotRecorder()
+		svc.RouteRequest(holderRec, trustedRequest(http.MethodPost, "/v1/chat/completions", `{"model":"coding","messages":[{"role":"user","content":"hi"}]}`), "openrouter-secret")
+	}()
+
+	// Give the holder time to release its slot into holdForQuotaReset's sleep.
+	time.Sleep(400 * time.Millisecond)
+
+	// Steal the lone slot directly and sit on it well past both the holder's
+	// remaining ~1.7s wait and its 1s reacquire timeout, so reacquire must fail.
+	stolenRelease, ok := svc.admission.acquire(context.Background())
+	if !ok {
+		t.Fatal("could not steal the admission slot for the test setup")
+	}
+	defer stolenRelease()
+
+	wg.Wait()
+	if holderRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("holder should fail once capacity is unavailable at reacquire time, got %d body=%s", holderRec.Code, holderRec.Body.String())
+	}
+	if !strings.Contains(holderRec.Body.String(), "capacity") {
+		t.Fatalf("failure should report capacity, not the quota-reset message, got: %s", holderRec.Body.String())
+	}
+	if route := holderRec.Header().Get("X-Calvoproxy-Route"); !strings.Contains(route, "o=admission_after_hold") {
+		t.Fatalf("route trace should attribute this to admission capacity, not model health/quota, got: %s", route)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,6 +59,58 @@ func (a *admissionControl) retryAfterSeconds() int {
 		return 1
 	}
 	return int(a.timeout / time.Second)
+}
+
+// admissionHold tracks one request's admission slot across a release/reacquire
+// cycle. A quota hold (see dispatchChain) can give the slot up for the
+// duration of its sleep so a large, merely-waiting request doesn't starve
+// smaller ones that would otherwise fit inside the same admission window —
+// but the handler's deferred release() must stay safe to call regardless of
+// whether the slot is currently held, released, or was never held at all.
+type admissionHold struct {
+	ctrl *admissionControl
+	mu   sync.Mutex
+	free func() // no-op zero value; set while held
+	held bool
+}
+
+// acquire claims the initial slot for the request. Mirrors admissionControl's
+// own ok=false-on-timeout/ctx-done contract.
+func (h *admissionHold) acquire(ctx context.Context) bool {
+	release, ok := h.ctrl.acquire(ctx)
+	if !ok {
+		return false
+	}
+	h.mu.Lock()
+	h.free, h.held = release, true
+	h.mu.Unlock()
+	return true
+}
+
+// release gives up the slot if currently held; a no-op otherwise, so it is
+// always safe to call — including from the handler's top-level defer after a
+// quota hold already released it without a matching reacquire.
+func (h *admissionHold) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.held {
+		h.held = false
+		h.free()
+	}
+}
+
+// reacquire claims a fresh slot after a prior release, blocking up to the
+// same admission timeout as the original acquire. A no-op returning true if
+// the slot was never released (e.g. admission control is disabled, so acquire
+// always succeeds immediately and there is nothing to give back mid-request).
+func (h *admissionHold) reacquire(ctx context.Context) bool {
+	h.mu.Lock()
+	held := h.held
+	h.mu.Unlock()
+	if held {
+		return true
+	}
+	return h.acquire(ctx)
 }
 
 // parseRetryAfter interprets an HTTP Retry-After header value, which is either a

@@ -124,6 +124,7 @@ before exit.
 | `PROXY_GROQ_RPD` / `PROXY_GROQ_RPM` | model default / `30` | Groq request-window bootstrap (`1000` RPD for gpt-oss, `14400` for llama-3.1-8b) |
 | `PROXY_GROQ_TPM` / `PROXY_GROQ_TPD` | model default | Groq token-window bootstrap; documented model defaults are used until headers arrive |
 | `PROXY_QUOTA_LATENCY_BUDGET_MS` | `1000` | Within the 5-point quota-pressure band, demote a target whose established first-token mean exceeds the faster target by this amount |
+| `PROXY_QUOTA_HOLD_MAX_MS` | `75000` | When every provider is quota-blocked for a request, park it in-proxy until the earliest quota reset (typically a minute window) and retry routing, instead of failing with `503`. Total hold budget per request; bounded also by the request deadline. `0` restores fail-fast. Breaker cooldowns (unhealthy models) are never waited out |
 | `PROXY_SCORE_FILE` | `<user-config-dir>/calvoproxy/scores.json` | Where learned scores are persisted across restarts. Set to `off` to disable persistence |
 | `PROXY_SCORE_MAX_AGE_SECONDS` | `86400` (24 h) | Discard a persisted score file (and individual entries) older than this |
 | `PROXY_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a model's circuit opens |
