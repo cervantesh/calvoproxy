@@ -22,6 +22,16 @@ const (
 	// no "Provider returned error", no provider_name.
 	realAccountAuth401 = `{"error":{"message":"No auth credentials found","code":401}}`
 
+	// Groq refusing an ordinary agent request outright: the account's
+	// tokens-per-minute window is smaller than a single call with tool
+	// schemas attached, so no amount of waiting or retrying helps — only a
+	// provider with a larger window can serve it. Captured 2026-08-14 from a
+	// daily cron job that had failed on this every run.
+	realGroqTPM413 = `{"error":{"message":"Request too large for model ` + "`openai/gpt-oss-120b`" +
+		` in organization ` + "`org_01km2d6qfwegmt0pkr9y55xb7b`" + ` service tier ` + "`on_demand`" +
+		` on tokens per minute (TPM): Limit 8000, Requested 18711, please reduce your message size and try again.",` +
+		`"type":"tokens","code":"rate_limit_exceeded"}}`
+
 	realDailyFreeQuota429 = `{"error":{"message":"Rate limit exceeded: free-models-per-day-high-balance. ","code":429,` +
 		`"metadata":{"headers":{"X-RateLimit-Limit":"1000","X-RateLimit-Remaining":"0",` +
 		`"X-RateLimit-Reset":"1786233600000"},"limit_source":"openrouter_free_tier_daily",` +
@@ -144,6 +154,15 @@ func TestProviderRelayedError_ChainBehaviour(t *testing.T) {
 		{
 			name:   "400 relayed from a provider advances", // the 64-tool case
 			status: http.StatusBadRequest, body: realToolCap400,
+			wantCalls: 2, wantClient: http.StatusOK,
+		},
+		{
+			// The 2026-08-14 cron incident. A provider whose per-minute token
+			// window (8k) is smaller than one agent request (18.7k) can never
+			// serve it, but the next model in the chain has a window several
+			// times larger. This was terminal, so a daily job failed every run.
+			name:   "413 from a provider's token ceiling advances",
+			status: http.StatusRequestEntityTooLarge, body: realGroqTPM413,
 			wantCalls: 2, wantClient: http.StatusOK,
 		},
 		{

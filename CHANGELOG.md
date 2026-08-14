@@ -11,6 +11,20 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+- **A `413` from one provider no longer kills the whole chain.** `413` is a
+  statement about a provider's own ceiling, never about the request, but it was
+  terminal — so the first provider too small for a request ended it, with every
+  larger model in the chain untried. Measured on a daily cron briefing: Groq
+  answered `Request too large ... tokens per minute (TPM): Limit 8000,
+  Requested 18711`. An ordinary agent call — tool schemas plus a short prompt —
+  cannot fit an 8k-per-minute window at all, so that provider could never have
+  served it, while the OpenRouter and Cerebras models in the same chain have
+  windows several times larger. The job had failed every run since. `413` now
+  advances the chain, exactly like the `400` "at most 64 tools are allowed"
+  case it shares a cause with: a limit that belongs to one upstream, not to
+  the request.
+
 ## [0.19.1] — 2026-08-14
 
 ### Fixed
