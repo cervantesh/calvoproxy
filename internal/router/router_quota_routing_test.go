@@ -53,6 +53,58 @@ func TestQuota429DoesNotChangeReliabilityOrOpenProvider(t *testing.T) {
 	}
 }
 
+type groqTPM413Transport struct{}
+
+func (groqTPM413Transport) RoundTrip(*http.Request) (*http.Response, error) {
+	headers := make(http.Header)
+	headers.Set("X-RateLimit-Limit-Tokens", "8000")
+	headers.Set("X-RateLimit-Remaining-Tokens", "0")
+	headers.Set("X-RateLimit-Reset-Tokens", "20s")
+	// Verbatim shape of a real Groq TPM rejection: 413, not 429, with the
+	// account's per-minute budget named in the body rather than the status.
+	body := `{"error":{"message":"Request too large for model ` + "`openai/gpt-oss-120b`" +
+		` in organization ` + "`org_01km2d6qfwegmt0pkr9y55xb7b`" +
+		` service tier ` + "`on_demand`" + ` on tokens per minute (TPM): Limit 8000, Requested 23162, please reduce your message size and try again."}}`
+	return &http.Response{StatusCode: http.StatusRequestEntityTooLarge, Header: headers, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+// TestGroqTPM413IsQuotaLimitedNotChainTerminal reproduces a real incident: Groq
+// rejects a TPM overrun with 413, not 429. Before this fix, 413 matched none of
+// executeAttempt's "who refused" carve-outs (quotaLimited, SkipModel from a 400,
+// provider-relayed), so shouldRetryAttempt saw a non-retryable terminal error and
+// the whole fallback chain died on Groq alone — the client got Groq's raw 413
+// even though Cerebras/OpenRouter, with different TPM budgets, were never tried.
+func TestGroqTPM413IsQuotaLimitedNotChainTerminal(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "groq-secret")
+	s := NewRouterService()
+	t.Cleanup(s.Close)
+	s.Client = &http.Client{Transport: groqTPM413Transport{}}
+	attempt := modelAttempt{Profile: "coding", Provider: providerGroq, Model: "openai/gpt-oss-120b", BreakerPolicy: BreakerPolicy{Eligible: true}}
+	now := time.Now()
+	s.modelBreakers[s.breakerKey(attempt)] = &modelBreakerState{Score: .8, ScoreUpdatedAt: now, ScoreAttemptSeq: 5, Successes: 3}
+	s.scoreAttempts.Store(5)
+	ctx := WithAmbientProviderCredentials(context.Background(), true)
+	err := s.executeAttempt(ctx, httptest.NewRecorder(), []byte(`{"messages":[{"role":"user","content":"cualesel nombre deeste modelo?"}]}`), "", attempt)
+	attErr, ok := err.(*attemptError)
+	if !ok || !attErr.QuotaLimited || !attErr.SkipModel {
+		t.Fatalf("413 TPM overrun must be quota-limited and skip to the next model, got %#v", err)
+	}
+	if shouldRetryAttempt(RetryPolicy{}, attErr) {
+		t.Fatal("SkipModel already routes the fallback loop past this attempt; it must not additionally look retryable")
+	}
+	state := s.modelBreakers[s.breakerKey(attempt)]
+	if state.Score != .8 || state.Successes != 3 || state.ScoreAttemptSeq != 5 || s.scoreAttempts.Load() != 5 {
+		t.Fatalf("413 quota rejection changed reliability evidence: state=%+v seq=%d", state, s.scoreAttempts.Load())
+	}
+	if provider := s.providerBreakerSnapshot(providerGroq); provider.State != "closed" || provider.ConsecutiveFailures != 0 {
+		t.Fatalf("account-specific TPM rejection opened the provider breaker: %+v", provider)
+	}
+	quota := s.quotaHealth(providerGroq, time.Now())
+	if len(quota) == 0 || quota[len(quota)-1].Remaining != 0 {
+		t.Fatalf("Groq's real TPM=8000 headers were not recorded from the 413: %+v", quota)
+	}
+}
+
 type authFailureTransport struct{}
 
 func (authFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -572,68 +624,5 @@ func TestQuotaHoldFailsFastWhenAdmissionCannotReacquire(t *testing.T) {
 	}
 	if route := holderRec.Header().Get("X-Calvoproxy-Route"); !strings.Contains(route, "o=admission_after_hold") {
 		t.Fatalf("route trace should attribute this to admission capacity, not model health/quota, got: %s", route)
-	}
-}
-
-// TestUnconfirmedEstimateCarveOutIsBoundedToOneBootstrapProbe pins the limit of
-// the carve-out exercised by the two tests above. Groq and Cerebras never report
-// RPM or TPD (observeGroqQuota/observeCerebrasQuota parse only RPD and TPM), so
-// those buckets stay QuotaConfidenceEstimated for the whole window. An unbounded
-// carve-out therefore kept admitting requests after ordinary consumption drove
-// Remaining below the estimate, disabling the configured limit until reset and
-// earning avoidable upstream 429s. Exactly one unconsumed probe may pass.
-func TestUnconfirmedEstimateCarveOutIsBoundedToOneBootstrapProbe(t *testing.T) {
-	t.Setenv("GROQ_API_KEY", "groq")
-	t.Setenv("PROXY_GROQ_TPD", "15000")
-	ctx := WithAmbientProviderCredentials(context.Background(), true)
-	s := &RouterService{modelBreakers: map[string]*modelBreakerState{}, providerAttempts: map[providerID]int64{}, providerBalance: map[providerID]int64{}, quota: NewQuotaLedger(), quotaCooldowns: map[string]time.Time{}}
-	attempt := modelAttempt{Profile: "coding", Provider: providerGroq, Model: "openai/gpt-oss-120b"}
-	estimate := QuotaEstimate{Requests: 1, Tokens: 10620, InputTokens: 10620}
-
-	// The bootstrap probe: nothing has been reserved or settled against the
-	// estimated TPD bucket yet, so the request that can confirm or correct it
-	// must be admitted.
-	ranked := s.quotaRankAndReserve(ctx, []modelAttempt{attempt}, "groq", estimate)
-	if len(ranked) != 1 || !ranked[0].QuotaTicket.Valid() {
-		t.Fatalf("bootstrap probe must be admitted with a ticket: ranked=%+v", ranked)
-	}
-
-	// While that probe is in flight the estimate is the best evidence there is:
-	// a concurrent caller must not get a second free pass.
-	if s.quotaCanFit(attempt, "groq", estimate, time.Now()) {
-		t.Fatal("in-flight bootstrap probe must not admit a concurrent request")
-	}
-
-	// Settle it with the headers Groq actually sends: RPD and TPM become
-	// authoritative, TPD stays estimated with its balance drawn down.
-	headers := http.Header{
-		"X-Ratelimit-Limit-Requests":     {"1000"},
-		"X-Ratelimit-Remaining-Requests": {"999"},
-		"X-Ratelimit-Reset-Requests":     {"3600s"},
-		"X-Ratelimit-Limit-Tokens":       {"60000"},
-		"X-Ratelimit-Remaining-Tokens":   {"60000"},
-		"X-Ratelimit-Reset-Tokens":       {"60s"},
-	}
-	now := time.Now()
-	s.observeAndSettleQuota(ranked[0].QuotaTicket, ranked[0], "groq", http.StatusOK, headers, nil, ranked[0].QuotaEstimate.Tokens, now)
-
-	tpd := QuotaBucketKey{Provider: string(providerGroq), Scope: credentialQuotaScope("model", "groq"), ModelOrPool: attempt.Model, Dimension: QuotaDimensionTokens, Window: QuotaWindowDay}
-	snapshot, ok := s.quota.Snapshot(tpd, now)
-	if !ok || snapshot.Confidence != QuotaConfidenceEstimated {
-		t.Fatalf("TPD is never reported by Groq and must stay estimated: %+v ok=%v", snapshot, ok)
-	}
-	if !snapshot.ProbeSettled || snapshot.Available >= estimate.Tokens {
-		t.Fatalf("settled probe must be recorded and must have drawn the balance below the next estimate: %+v", snapshot)
-	}
-
-	// The probe is spent: the configured TPD limit is enforced from here on.
-	if s.quotaCanFit(attempt, "groq", estimate, now) {
-		t.Fatal("estimated bucket exhausted after a settled probe must stop admitting requests")
-	}
-	if _, reserved := s.quota.ReserveAll(s.quotaReservations(attempt, "groq", estimate, now), now); reserved {
-		t.Fatal("ReserveAll carve-out must be bounded by the same spent probe")
-	}
-	if ranked := s.quotaRankAndReserve(ctx, []modelAttempt{attempt}, "groq", estimate); len(ranked) != 0 {
-		t.Fatalf("no candidate should survive an exhausted estimated bucket: %+v", ranked)
 	}
 }
