@@ -198,6 +198,33 @@ func TestProviderSpecificEstimateAndEveryQuotaDimensionGate(t *testing.T) {
 	}
 }
 
+func TestQuotaCanFitDoesNotHardBlockOnUnconfirmedEstimate(t *testing.T) {
+	s := &RouterService{modelBreakers: map[string]*modelBreakerState{}, providerAttempts: map[providerID]int64{}, providerBalance: map[providerID]int64{}, quota: NewQuotaLedger(), quotaCooldowns: map[string]time.Time{}}
+	attempt := modelAttempt{Profile: "coding", Provider: providerGroq, Model: "openai/gpt-oss-120b"}
+	now := time.Now()
+	scope := credentialQuotaScope("model", "groq")
+	tpm := QuotaBucketKey{Provider: string(providerGroq), Scope: scope, ModelOrPool: attempt.Model, Dimension: QuotaDimensionTokens, Window: QuotaWindowMinute}
+
+	// A bootstrap default the request estimate exceeds must not veto the
+	// attempt forever: the request that would confirm or correct it can never
+	// be sent otherwise. See quotaCanFit and ensureBootstrapQuota.
+	s.quota.Observe(tpm, QuotaObservation{Limit: 8000, Remaining: 8000, ResetAt: now.Add(time.Minute), Source: QuotaSourceConfig, Confidence: QuotaConfidenceEstimated}, now)
+	if !s.quotaCanFit(attempt, "groq", QuotaEstimate{Requests: 1, Tokens: 14000}, now) {
+		t.Fatal("unconfirmed estimated shortfall must not hard-block; it should stay a last resort, not a permanent veto")
+	}
+
+	// Once a real provider header confirms the same bucket, a genuine
+	// shortfall must still hard-block as before.
+	s.quota.Observe(tpm, QuotaObservation{Limit: 20000, Remaining: 20000, ResetAt: now.Add(time.Minute), Source: QuotaSourceProviderHeader, Confidence: QuotaConfidenceAuthoritative}, now)
+	if !s.quotaCanFit(attempt, "groq", QuotaEstimate{Requests: 1, Tokens: 14000}, now) {
+		t.Fatal("authoritative bucket with headroom should still fit")
+	}
+	s.quota.Observe(tpm, QuotaObservation{Limit: 8000, Remaining: 0, ResetAt: now.Add(time.Minute), Source: QuotaSourceProviderHeader, Confidence: QuotaConfidenceAuthoritative}, now)
+	if s.quotaCanFit(attempt, "groq", QuotaEstimate{Requests: 1, Tokens: 14000}, now) {
+		t.Fatal("confirmed shortfall must still hard-block")
+	}
+}
+
 type countingDailyQuotaTransport struct{ calls int }
 
 func (t *countingDailyQuotaTransport) RoundTrip(*http.Request) (*http.Response, error) {
