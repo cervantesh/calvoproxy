@@ -515,4 +515,7 @@ func TestQuotaHoldFailsFastWhenAdmissionCannotReacquire(t *testing.T) {
 	if !strings.Contains(holderRec.Body.String(), "capacity") {
 		t.Fatalf("failure should report capacity, not the quota-reset message, got: %s", holderRec.Body.String())
 	}
+	if route := holderRec.Header().Get("X-Calvoproxy-Route"); !strings.Contains(route, "o=admission_after_hold") {
+		t.Fatalf("route trace should attribute this to admission capacity, not model health/quota, got: %s", route)
+	}
 }

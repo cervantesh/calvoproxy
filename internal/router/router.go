@@ -407,7 +407,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 					// from the quota one, so report it as such.
 					s.counters.admissionRejected.Add(1)
 					w.Header().Set("Retry-After", strconv.Itoa(s.admission.retryAfterSeconds()))
-					failTrace(ctx, w, outcomeAllCooling)
+					failTrace(ctx, w, outcomeAdmissionAfterHold)
 					writeJSONError(w, http.StatusServiceUnavailable, "Server at capacity (PROXY_MAX_CONCURRENT) after waiting for quota. Retry shortly.")
 					return
 				}

@@ -188,6 +188,14 @@ const (
 	outcomeCapsNone    = "caps_none"
 	outcomeAllCooling  = "all_cooling"
 	outcomeChainFailed = "chain_failed"
+	// outcomeAdmissionAfterHold: a quota hold's own gates (breaker, context,
+	// quota) all resolved — the request would have proceeded — but the
+	// admission slot released for the hold's sleep couldn't be reclaimed
+	// afterward. Distinct from outcomeAllCooling so the trace and Retry-After
+	// attribute this to PROXY_MAX_CONCURRENT capacity, not model health/quota;
+	// folding it into all_cooling would misdirect diagnostics exactly when
+	// admission contention is the actual cause.
+	outcomeAdmissionAfterHold = "admission_after_hold"
 )
 
 type traceCtxKey struct{}
