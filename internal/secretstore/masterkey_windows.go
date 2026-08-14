@@ -146,7 +146,7 @@ func copyBlob(blob dataBlob) []byte {
 
 func nonzeroSyscallError(err error) error {
 	if err == nil || errors.Is(err, syscall.Errno(0)) {
-		return errors.New("Windows returned an unspecified error")
+		return errors.New("windows returned an unspecified error")
 	}
 	return err
 }
