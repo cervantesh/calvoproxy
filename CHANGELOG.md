@@ -11,12 +11,69 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-08-14
+
+### Added
+- **Quota-blocked requests are held, not refused.** When every configured
+  provider is rate-limited *for a request's size*, the router now parks the
+  request until the earliest known quota reset — typically a minute-window
+  token bucket — re-runs the whole routing gate, and dispatches normally. The
+  client sees a slower success instead of a `503` it has to retry by hand. This
+  came out of a real failure: an agent client surfaced
+  "All configured model providers are temporarily rate-limited for this request
+  size" mid-session, and the only advice the proxy could give was "compact the
+  conversation or start a new session".
+
+  The hold is deliberately narrow. It waits **only** on quota, never on a
+  breaker cooldown: a quota reset is a scheduled fact worth waiting for, while
+  an open breaker means the model is unhealthy, and waiting that out would
+  trade a fast, honest `503` for a slow retry against something still broken.
+  It is bounded by `PROXY_QUOTA_HOLD_MAX_MS` (default `75000`, one
+  minute-window rollover with margin; `0` restores the previous fail-fast
+  behaviour) and by the request deadline, so a daily-quota exhaustion still
+  refuses immediately. Held requests are counted by
+  `calvoproxy_quota_hold_total`.
+
+  A quota hold also **releases its admission slot** while it sleeps and
+  reclaims it before dispatching. Without that, a large request doing nothing
+  but waiting would pin one of the scarce `PROXY_MAX_CONCURRENT` slots for up
+  to the whole hold budget and reject smaller requests that fit the same
+  window right now — a capacity failure caused by a request using no capacity.
+  If the slot cannot be reclaimed, the refusal says so, under its own
+  `admission_after_hold` route-trace outcome rather than being misfiled as
+  model health.
+
 ### Fixed
 - **Provider-specific OpenAI-compatible adapters.** Cerebras and Groq now
   receive normalized payloads for their supported fields, including safe
   handling of OpenCode reasoning history. An unsupported provider field now
   advances the fallback chain to another provider instead of stopping the
   request.
+- **A scheme-only `Authorization` header no longer defeats the stored
+  credential.** A desktop client with its API-key setting left blank sends
+  `Authorization: Bearer` — scheme, no token. That does not arrive as an empty
+  string: Go trims the trailing space, the bearer-prefix test then fails, and
+  the literal word `Bearer` came back *as if it were the key*. Being non-empty,
+  it skipped the ambient/vault/login-file fallback entirely and was forwarded
+  upstream, which answered `401 Missing Authentication header` — while a
+  perfectly good stored credential sat unused. Such a header is now treated as
+  no credential at all, alongside the `dummy` case that already existed for the
+  same reason. A real token still wins over the ambient key, including one that
+  merely contains the word.
+- **`gofmt` is usable again on a Windows checkout.** `.gitattributes` forced
+  `eol=lf` for `*.sh` but left `*.go` on `text=auto`, so a Windows clone got
+  CRLF and `gofmt -l` flagged all 169 non-vendor Go files as unformatted with
+  zero real changes — which meant the repo's own pre-commit gate could not pass
+  on a clean tree.
+
+### Changed
+- **The CI Go toolchain is pinned to an exact patch.** `go-version: "1.26"`
+  resolved to whatever patch `setup-go`'s manifest had cached, which lagged the
+  actual release; with `GOTOOLCHAIN=local` that is the toolchain that actually
+  runs, and `govulncheck` measures the stdlib inside it. The floating pin left
+  six patched stdlib CVEs reported against every pull request — blocking merges
+  for a reason unrelated to any of them. Now pinned to `1.26.6` in both the CI
+  and release workflows.
 
 ## [0.18.0] — 2026-08-09
 
@@ -961,7 +1018,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.19.0
 [0.18.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.18.0
 [0.15.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.15.0
 [0.14.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.14.0
