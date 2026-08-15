@@ -136,11 +136,33 @@ func (s *RouterService) providerCredential(ctx context.Context, attempt modelAtt
 			key = "local"
 		}
 	default:
-		// Existing OpenRouter/OpenAI/Anthropic/Ollama routes retain their
-		// request-key behavior. Crucially, direct-provider keys never enter it.
-		key = strings.TrimSpace(openRouterRequestKey)
+		// Allowlist, not fallback: the caller's OpenRouter request key may only
+		// ever travel to OpenRouter. An attempt with no explicit provider
+		// inherits the operator-configured default executor, so it qualifies
+		// only while that default is still OpenRouter. Every other provider
+		// (openai, anthropic, ...) must supply its own configured credential;
+		// without one it returns ("", false) and filterConfiguredAttempts drops
+		// the attempt, instead of sending an sk-or-... key to an unrelated
+		// third-party upstream. Direct-provider keys likewise never enter here.
+		if s.credentialProvider(attempt) == providerOpenRouter {
+			key = strings.TrimSpace(openRouterRequestKey)
+		}
 	}
 	return key, key != ""
+}
+
+// credentialProvider resolves the provider that will actually receive this
+// attempt. It mirrors normalizedProvider (an empty Provider inherits the
+// operator's default executor) but tolerates a nil receiver, because the
+// package-level providerCredential helper calls through (*RouterService)(nil).
+func (s *RouterService) credentialProvider(attempt modelAttempt) providerID {
+	if attempt.Provider != "" {
+		return attempt.Provider
+	}
+	if s == nil {
+		return providerOpenRouter
+	}
+	return s.defaultPolicyProvider()
 }
 
 func (s *RouterService) resolvedAmbientProviderCredential(provider providerID) string {

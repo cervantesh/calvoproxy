@@ -142,26 +142,27 @@ type attemptError struct {
 func (e *attemptError) Error() string { return e.Message }
 
 type RouterService struct {
-	Client           HTTPDoer
-	SideEffects      SideEffectExtractor
-	Transformer      ResponseTransformer
-	AttemptPlanner   ModelAttemptPlanner
-	TargetResolver   AttemptTargetResolver
-	Fallbacks        FallbackExecutor
-	PolicyEngine     cervorules.Engine
-	config           breakerConfig
-	policyMu         sync.RWMutex // guards policy + modelPolicy for hot-reload
-	policy           policyConfig
-	providerProfiles providerProfiles
-	contextWindows   contextWindowIndex
-	modelPolicy      *cervomodelpolicy.Policy
-	modelWarnings    []cervomodelpolicy.ValidationIssue
-	modelStrict      bool
-	runtimeConfig    ruleRuntimeConfig
-	policyMetadata   cervoruntime.PolicyMetadata
-	breakerMu        sync.RWMutex
-	modelBreakers    map[string]*modelBreakerState
-	providerBreakers map[providerID]*modelBreakerState
+	Client            HTTPDoer
+	SideEffects       SideEffectExtractor
+	Transformer       ResponseTransformer
+	AttemptPlanner    ModelAttemptPlanner
+	TargetResolver    AttemptTargetResolver
+	Fallbacks         FallbackExecutor
+	PolicyEngine      cervorules.Engine
+	config            breakerConfig
+	policyMu          sync.RWMutex // guards policy + modelPolicy for hot-reload
+	policy            policyConfig
+	providerProfiles  providerProfiles
+	reasoningProfiles reasoningProfiles
+	contextWindows    contextWindowIndex
+	modelPolicy       *cervomodelpolicy.Policy
+	modelWarnings     []cervomodelpolicy.ValidationIssue
+	modelStrict       bool
+	runtimeConfig     ruleRuntimeConfig
+	policyMetadata    cervoruntime.PolicyMetadata
+	breakerMu         sync.RWMutex
+	modelBreakers     map[string]*modelBreakerState
+	providerBreakers  map[providerID]*modelBreakerState
 	// providerAttempts is the durable global consumption clock used to balance
 	// which healthy provider starts each request. It counts real upstream calls
 	// (plus the primary reservation made atomically by the scheduler).
@@ -245,6 +246,11 @@ type FallbackExecution struct {
 	// ReserveQuota atomically claims quota for a fallback at the instant a
 	// streaming attempt reaches its first-event fail-fast boundary.
 	ReserveQuota func(modelAttempt) (QuotaTicket, bool)
+	// BuildRequestBody renders the per-attempt wire body (provider
+	// normalization plus reasoning-effort injection). Injected rather than
+	// called directly because the executor has no RouterService. A nil value
+	// falls back to provider normalization alone.
+	BuildRequestBody func(context.Context, map[string]interface{}, modelAttempt) map[string]interface{}
 	// OnSuccess observes the route that actually produced the response. It runs
 	// only after a complete non-stream response or a cleanly completed stream.
 	OnSuccess func(modelAttempt)
