@@ -339,11 +339,18 @@ func TestBuildModelAttemptsFromDecision_ExpandsExecutorFallbacks(t *testing.T) {
 	}
 }
 
+// The executor fallback chain must retry the next provider after a retryable
+// upstream failure. The primary executor here is a provider with its OWN
+// configured credential: an executor that has no credential of its own (openai,
+// anthropic) is dropped by the credential gate rather than being handed the
+// caller's OpenRouter key — see
+// TestProviderCredentialNeverLeaksOpenRouterKeyToDirectProviders.
 func TestRouteRequestWithProvider_RetriesProviderFallback(t *testing.T) {
+	t.Setenv("CEREBRAS_API_KEY", "cerebras-secret")
 	transport := &sequenceTransport{statuses: []int{http.StatusBadGateway, http.StatusOK}}
 	svc := NewRouterService()
 	svc.Client = &http.Client{Transport: transport}
-	decision := allowedTestDecision(providerOpenAI, Limits{})
+	decision := allowedTestDecision(providerCerebras, Limits{})
 	decision.FallbackExecutors = []cervorules.Executor{providerOpenRouter}
 	decision.RetryPolicy = RetryPolicy{MaxAttempts: 2, RetryHTTPStatuses: []int{http.StatusBadGateway}}
 	svc.runtimeConfig = normalizeRuleConfig(ruleRuntimeConfig{RetryPolicy: decision.RetryPolicy})
@@ -357,6 +364,7 @@ func TestRouteRequestWithProvider_RetriesProviderFallback(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
 	req.Header.Set("X-Cervo-Capability", string(capChatCompletion))
 	req.Header.Set("X-Cervo-User", "cervantes")
+	req = req.WithContext(WithAmbientProviderCredentials(req.Context(), true))
 	rec := httptest.NewRecorder()
 
 	svc.RouteRequestWithProvider(rec, req, "test-key", "")
@@ -367,7 +375,7 @@ func TestRouteRequestWithProvider_RetriesProviderFallback(t *testing.T) {
 	if len(transport.urls) != 2 {
 		t.Fatalf("expected two upstream attempts, got %+v", transport.urls)
 	}
-	if !strings.Contains(transport.urls[0], "api.openai.com") || !strings.Contains(transport.urls[1], "openrouter.ai") {
-		t.Fatalf("expected openai then openrouter URLs, got %+v", transport.urls)
+	if !strings.Contains(transport.urls[0], "api.cerebras.ai") || !strings.Contains(transport.urls[1], "openrouter.ai") {
+		t.Fatalf("expected cerebras then openrouter URLs, got %+v", transport.urls)
 	}
 }
