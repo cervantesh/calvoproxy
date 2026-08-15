@@ -132,6 +132,12 @@
     "skillsearch": "low",
     "titlegen": "low"
   },
+  "Timeouts": {
+    "titlegen": 15,
+    "skillsearch": 15,
+    "extract": 60,
+    "compact": 60
+  },
   "Aliases": {
     "default": "coding",
     "coding": "coding",
