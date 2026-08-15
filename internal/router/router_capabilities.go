@@ -30,6 +30,13 @@ import (
 const (
 	capVision = "vision"
 	capTools  = "tools"
+	// capReasoning / capReasoningEffort gate reasoning-effort injection. They are
+	// derived from the same supported_parameters list as capTools, so enabling a
+	// profile-level effort can never hand a parameter to a model that would
+	// reject it. capReasoningEffort is the narrower flat OpenAI-style field;
+	// capReasoning is OpenRouter's normalized reasoning object.
+	capReasoning       = "reasoning"
+	capReasoningEffort = "reasoning_effort"
 )
 
 type capabilityIndex struct {
@@ -223,8 +230,13 @@ func fetchOpenRouterCapabilities(ctx context.Context) (map[string]map[string]boo
 			}
 		}
 		for _, p := range m.SupportedParameters {
-			if strings.EqualFold(p, "tools") {
+			switch {
+			case strings.EqualFold(p, "tools"):
 				set[capTools] = true
+			case strings.EqualFold(p, capReasoning):
+				set[capReasoning] = true
+			case strings.EqualFold(p, capReasoningEffort):
+				set[capReasoningEffort] = true
 			}
 		}
 		out[m.ID] = set

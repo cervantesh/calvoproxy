@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"strconv"
 	"strings"
 )
@@ -41,8 +42,32 @@ func clampRequestMaxTokens(reqBody map[string]interface{}, maximum int) {
 // mutating the shared request used by later fallbacks. OpenAI-compatible APIs
 // are deliberately treated as contracts, not as one identical schema: Groq
 // and Cerebras each reject a different subset of optional OpenCode fields.
+//
+// The reasoning effort is resolved per ATTEMPT rather than once per request:
+// a chain can span models with different reasoning support, so the same request
+// may legitimately carry a flat reasoning_effort to one model, a reasoning
+// object to the next, and nothing at all to a model that supports neither.
 func requestBodyForAttempt(reqBody map[string]interface{}, attempt modelAttempt) map[string]interface{} {
 	return adapterForProvider(attempt.Provider).NormalizeRequest(reqBody)
+}
+
+func (s *RouterService) requestBodyForAttempt(ctx context.Context, reqBody map[string]interface{}, attempt modelAttempt) map[string]interface{} {
+	body := requestBodyForAttempt(reqBody, attempt)
+	if !bodyCarriesReasoning(reqBody) {
+		if effort, ok := s.resolveReasoningEffort(ctx, attempt.Profile); ok {
+			applyReasoningEffort(body, effort, attempt.Model, s.capabilityIndexOrNil())
+		}
+	}
+	return body
+}
+
+// capabilityIndexOrNil keeps the reasoning path safe on a zero-value service,
+// which several tests and the package-level helpers construct directly.
+func (s *RouterService) capabilityIndexOrNil() *capabilityIndex {
+	if s == nil {
+		return nil
+	}
+	return s.capabilities
 }
 
 // localAgentGuardrailMarker is the unique prefix of the system message we inject
