@@ -11,6 +11,39 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-08-15
+
+### Fixed
+- **The compaction and extraction chains returned chain-of-thought instead of a
+  summary.** Two of the models v0.20.0 put at the head of those chains write
+  their reasoning into `content`, not only into the `reasoning` field.
+  `nvidia/nemotron-3.5-lightning:free` answered a one-sentence summary request
+  with "Here's a thinking process: 1. **Analyze the Request:** …", and
+  `nvidia/nemotron-3-nano-30b-a3b:free` with "Hmm, the user wants a one-sentence
+  summary… Let me unpack this." — the latter exhausting a 300-token budget
+  without ever emitting the summary. For a compaction role that is worse than a
+  failure, because the model's deliberation is folded into the very history it
+  was asked to shrink.
+
+  Neither effort control nor a hypothetical `exclude` option addresses this:
+  `compact` already runs at `low` effort, and the text is *duplicated* into
+  `content` rather than confined to the reasoning field, so suppressing the
+  reasoning block would leave the transcript untouched. It is a model-selection
+  problem, so it is fixed in the chains rather than in code.
+
+  `extract` and `compact` now lead with `google/gemma-4-26b-a4b-it:free` and
+  `nvidia/nemotron-3-super-120b-a12b:free`, both observed answering cleanly.
+  `nemotron-3-nano-30b` leaves those two profiles entirely and stays in `bulk`,
+  where a verbose answer costs nothing. `lightning` keeps its role as the
+  >262K-context escape hatch but moves last, which loses nothing: `filterContextFit`
+  excludes every shorter-window model on an oversized request, so it is still
+  reached by elimination exactly when it is the only candidate — and never for an
+  ordinary compaction.
+
+  Only the shipped policy changed; there is no code difference from v0.20.0. An
+  operator running their own `model-policy.json` can apply the same reordering
+  and reload with `POST /admin/reload` instead of upgrading.
+
 ## [0.20.0] — 2026-08-14
 
 ### Fixed
