@@ -154,6 +154,7 @@ type RouterService struct {
 	policy            policyConfig
 	providerProfiles  providerProfiles
 	reasoningProfiles reasoningProfiles
+	profileTimeouts   profileTimeouts
 	contextWindows    contextWindowIndex
 	modelPolicy       *cervomodelpolicy.Policy
 	modelWarnings     []cervomodelpolicy.ValidationIssue

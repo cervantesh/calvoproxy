@@ -82,6 +82,7 @@ func NewRouterService() *RouterService {
 		policy:            providerPolicy,
 		providerProfiles:  providerProfiles,
 		reasoningProfiles: loadReasoningProfiles(),
+		profileTimeouts:   loadProfileTimeouts(),
 		contextWindows:    loadContextWindows(),
 		modelPolicy:       modelPolicy,
 		modelWarnings:     modelRuntime.Warnings,
@@ -479,6 +480,10 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 	if decision.Timeout > 0 && decision.Timeout < perAttempt {
 		perAttempt = decision.Timeout
 	}
+	// A profile may be less patient than the global configuration: a session
+	// title has no business waiting as long as a coding turn. The override can
+	// only shrink what the global config and the policy decision already allow.
+	perAttempt = s.attemptTimeoutForProfile(category, perAttempt)
 	err := s.executeFallbacks(ctx, w, FallbackExecution{
 		RequestBody:       reqBody,
 		APIKey:            apiKey,
@@ -766,6 +771,7 @@ func (s *RouterService) setModelPolicyConfig(policy policyConfig) {
 	s.policy = normalized
 	s.providerProfiles = nil
 	s.reasoningProfiles = nil
+	s.profileTimeouts = nil
 	s.modelPolicy = mp
 	s.policyMu.Unlock()
 }
@@ -779,6 +785,21 @@ func (s *RouterService) getProviderProfiles() providerProfiles {
 func (s *RouterService) setProviderProfiles(profiles providerProfiles) {
 	s.policyMu.Lock()
 	s.providerProfiles = cloneProviderProfiles(profiles)
+	s.policyMu.Unlock()
+}
+
+func (s *RouterService) getProfileTimeouts() profileTimeouts {
+	if s == nil {
+		return nil
+	}
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return cloneProfileTimeouts(s.profileTimeouts)
+}
+
+func (s *RouterService) setProfileTimeouts(timeouts profileTimeouts) {
+	s.policyMu.Lock()
+	s.profileTimeouts = cloneProfileTimeouts(timeouts)
 	s.policyMu.Unlock()
 }
 
@@ -808,6 +829,7 @@ func (s *RouterService) ReloadModelPolicy() error {
 	s.setModelPolicyConfig(runtime.Config)
 	s.setProviderProfiles(loadProviderProfiles())
 	s.setReasoningProfiles(loadReasoningProfiles())
+	s.setProfileTimeouts(loadProfileTimeouts())
 	s.policyMu.Lock()
 	s.contextWindows = loadContextWindows()
 	s.modelWarnings = runtime.Warnings
