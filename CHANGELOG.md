@@ -11,6 +11,76 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-14
+
+### Fixed
+- **The caller's OpenRouter key could be sent to OpenAI or Anthropic.**
+  `providerCredential` resolved credentials with a `default:` branch that handed
+  the request key to every provider it did not explicitly recognise. Cerebras,
+  Groq and Ollama had their own cases; `providerOpenAI` and `providerAnthropic`
+  did not, so they fell through — and the target resolver sends exactly those two
+  to `api.openai.com` and `api.anthropic.com`. Because `defaults.executor` is
+  operator-configurable and the policy vocabulary accepts both names, setting it
+  to `openai` was enough to present an `sk-or-…` credential to an unrelated third
+  party. That is the precise outcome the comment above the branch promised could
+  not happen. Credential resolution is now an allowlist: only OpenRouter — and
+  the empty provider, resolved through the default executor — receives the
+  request key, and anything else yields no credential so the attempt is dropped
+  before it is sent. The empty-provider case matters on its own, because quota
+  routing rewrites a blank provider to the default executor *after* the
+  credential filter has run.
+
+### Added
+- **The proxy can decide how hard a model thinks.** Reasoning parameters were
+  always forwarded, so a client that knew what it wanted could set them itself;
+  what was missing was the proxy deciding. A profile is a statement of intent —
+  "this is the reasoning chain", "this is the cheap bulk chain" — and the amount
+  of thinking that intent deserves belongs with the profile rather than being
+  repeated in every client. Effort now resolves through four layers, highest
+  first: the caller's own body, the `X-Cervo-Reasoning` header (or `?reasoning=`),
+  the per-profile default in the new `Reasoning` section of `model-policy.json`,
+  and finally `PROXY_REASONING_EFFORT`. An explicit caller opinion is never
+  overridden — the operator default decides for clients that did not decide, it
+  does not overrule ones that did. With nothing configured no reasoning parameter
+  is sent at all, so behaviour is unchanged on upgrade.
+
+  Injection is capability-gated. The capability index already downloaded
+  `supported_parameters` from the OpenRouter catalogue and kept only `tools`; it
+  now also derives `reasoning` and `reasoning_effort`. Models advertising the flat
+  field receive `reasoning_effort`, the rest receive OpenRouter's normalised
+  `reasoning` object, and a model advertising neither is left untouched — so
+  enabling a profile default cannot turn a working free model into a `400`.
+  Effort is resolved per *attempt* rather than once per request, because one chain
+  can span models with different reasoning support.
+
+- **Profiles for agent subsystems.** `extract`, `compact`, `skillsearch` and
+  `titlegen` cover page summarisation, context compaction, skill matching and
+  session titles — work that previously all fell back to the main model. Vision
+  and skill-usage review deliberately reuse the existing `vision` and `critic`
+  chains, so they add no new models and no new circuit breakers. Each chain is
+  five targets deep across three or four providers, because four OpenRouter models
+  are not four independent fallbacks: they share one daily free pool and one
+  20 rpm ceiling, so the whole OpenRouter portion of a chain dies at once. The two
+  highest-frequency profiles therefore take their second hop on a different
+  provider entirely, and both start on Ollama so a per-turn subsystem call costs
+  no shared quota.
+
+### Changed
+- **Every Ollama slot standardises on one model.** On an 8 GB card, `qwen3:14b`
+  measures 5.7 GB in VRAM against 3.7 GB on CPU and takes about 10.7 s to load,
+  and only one model fits at a time — so a chain that mixed two local models paid
+  a reload on every alternation. It is also a thinking model: given a short
+  `max_tokens` budget it spends the whole allowance reasoning and returns empty
+  content, which makes it unusable for short-output roles like title generation.
+
+### Removed
+- **`inclusionai/ling-3.0-flash:free` is gone from the shipped policy.** It no
+  longer exists in the OpenRouter catalogue — only the paid variant remains — yet
+  it stood first in the `bulk` chain, so every bulk request opened by failing
+  against a nonexistent model and burning a fallback hop before reaching one that
+  answers. Removed from all four of its locations in both the external and the
+  embedded policy.
+
 ## [0.19.3] — 2026-08-14
 
 ### Removed
