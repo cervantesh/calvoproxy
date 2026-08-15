@@ -159,6 +159,47 @@ func TestProviderCredentialUsesDynamicResolverWithoutCrossProviderLeak(t *testin
 	}
 }
 
+// The caller's OpenRouter key (sk-or-...) must never be handed to a direct
+// third-party upstream. DefaultAttemptTargetResolver sends providerOpenAI to
+// api.openai.com and providerAnthropic to api.anthropic.com, so these providers
+// have to fail closed unless they carry their own configured credential.
+func TestProviderCredentialNeverLeaksOpenRouterKeyToDirectProviders(t *testing.T) {
+	ctx := WithAmbientProviderCredentials(context.Background(), true)
+	svc := NewRouterService()
+	t.Cleanup(svc.Close)
+
+	for _, provider := range []providerID{providerOpenAI, providerAnthropic} {
+		if got, ok := providerCredential(ctx, modelAttempt{Provider: provider}, "sk-or-caller-key"); ok || got != "" {
+			t.Errorf("provider %s received the caller OpenRouter key: %q, ok=%v", provider, got, ok)
+		}
+		if got, ok := svc.providerCredential(ctx, modelAttempt{Provider: provider}, "sk-or-caller-key"); ok || got != "" {
+			t.Errorf("service provider %s received the caller OpenRouter key: %q, ok=%v", provider, got, ok)
+		}
+		attempts := []modelAttempt{{Profile: "coding", Provider: provider, Model: "m"}}
+		if filtered := svc.filterConfiguredAttempts(ctx, attempts, "sk-or-caller-key", chatCompletionsPath); len(filtered) != 0 {
+			t.Errorf("unconfigured provider %s survived the credential gate: %+v", provider, filtered)
+		}
+	}
+
+	// An operator-configured default executor must not resurrect the leak via
+	// attempts that carry no explicit provider.
+	leaky := NewRouterService()
+	t.Cleanup(leaky.Close)
+	leaky.runtimeConfig.DefaultExecutor = providerOpenAI
+	if got, ok := leaky.providerCredential(ctx, modelAttempt{}, "sk-or-caller-key"); ok || got != "" {
+		t.Errorf("default executor openai leaked the caller OpenRouter key: %q, ok=%v", got, ok)
+	}
+
+	// The default path (no explicit provider, no configured default executor)
+	// still resolves to OpenRouter and keeps the request key.
+	if got, ok := svc.providerCredential(ctx, modelAttempt{}, "sk-or-caller-key"); !ok || got != "sk-or-caller-key" {
+		t.Errorf("default OpenRouter attempt lost its request key: %q, ok=%v", got, ok)
+	}
+	if got, ok := providerCredential(ctx, modelAttempt{}, "sk-or-caller-key"); !ok || got != "sk-or-caller-key" {
+		t.Errorf("nil-receiver default attempt lost its request key: %q, ok=%v", got, ok)
+	}
+}
+
 type multiProviderQuotaTransport struct {
 	calls []providerCall
 }

@@ -74,25 +74,26 @@ func NewRouterService() *RouterService {
 		// whole-request deadline. Header arrival is bounded by the transport's
 		// ResponseHeaderTimeout; non-stream attempts get a per-attempt context
 		// deadline in the fallback loop; streams get an idle timeout instead.
-		Client:           &http.Client{Transport: transport},
-		SideEffects:      sideEffectsFromEnv(),
-		TargetResolver:   DefaultAttemptTargetResolver{},
-		PolicyEngine:     policyEngine,
-		config:           config,
-		policy:           providerPolicy,
-		providerProfiles: providerProfiles,
-		contextWindows:   loadContextWindows(),
-		modelPolicy:      modelPolicy,
-		modelWarnings:    modelRuntime.Warnings,
-		modelStrict:      modelRuntime.Strict,
-		runtimeConfig:    runtimeConfig,
-		policyMetadata:   generatedPolicyMetadata(),
-		modelBreakers:    make(map[string]*modelBreakerState),
-		providerBreakers: make(map[providerID]*modelBreakerState),
-		providerAttempts: make(map[providerID]int64),
-		providerBalance:  make(map[providerID]int64),
-		quota:            NewQuotaLedger(),
-		quotaCooldowns:   make(map[string]time.Time),
+		Client:            &http.Client{Transport: transport},
+		SideEffects:       sideEffectsFromEnv(),
+		TargetResolver:    DefaultAttemptTargetResolver{},
+		PolicyEngine:      policyEngine,
+		config:            config,
+		policy:            providerPolicy,
+		providerProfiles:  providerProfiles,
+		reasoningProfiles: loadReasoningProfiles(),
+		contextWindows:    loadContextWindows(),
+		modelPolicy:       modelPolicy,
+		modelWarnings:     modelRuntime.Warnings,
+		modelStrict:       modelRuntime.Strict,
+		runtimeConfig:     runtimeConfig,
+		policyMetadata:    generatedPolicyMetadata(),
+		modelBreakers:     make(map[string]*modelBreakerState),
+		providerBreakers:  make(map[providerID]*modelBreakerState),
+		providerAttempts:  make(map[providerID]int64),
+		providerBalance:   make(map[providerID]int64),
+		quota:             NewQuotaLedger(),
+		quotaCooldowns:    make(map[string]time.Time),
 		affinity: newAffinityStore(randomAffinitySecret(),
 			time.Duration(envInt("PROXY_AFFINITY_TTL_SECONDS", 86400))*time.Second,
 			envInt("PROXY_AFFINITY_MAX_ENTRIES", 8192)),
@@ -224,6 +225,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 		hasTools := hasRequestTools(msgBody)
 		hasImages := hasImageContent(messagesRaw)
 		category := s.determineProfile(r, messagesRaw, provider, hasTools)
+		ctx = withRequestReasoningEffort(ctx, r)
 		requestedModel, _ := msgBody["model"].(string)
 		if s.rejectUnknownProfile(w, requestedModel) {
 			return
@@ -264,6 +266,7 @@ func (s *RouterService) RouteRequestWithProvider(w http.ResponseWriter, r *http.
 	hasTools := hasRequestTools(reqBody)
 	hasImages := hasImageContent(messagesRaw)
 	category := s.determineProfile(r, messagesRaw, provider, hasTools)
+	ctx = withRequestReasoningEffort(ctx, r)
 	requestedModel, _ := reqBody["model"].(string)
 	if s.rejectUnknownProfile(w, requestedModel) {
 		return
@@ -483,6 +486,7 @@ func (s *RouterService) dispatchChain(ctx context.Context, w http.ResponseWriter
 		RetryPolicy:       decision.RetryPolicy,
 		Stream:            stream,
 		PerAttemptTimeout: perAttempt,
+		BuildRequestBody:  s.requestBodyForAttempt,
 	})
 	if err == nil {
 		return
@@ -761,6 +765,7 @@ func (s *RouterService) setModelPolicyConfig(policy policyConfig) {
 	s.policyMu.Lock()
 	s.policy = normalized
 	s.providerProfiles = nil
+	s.reasoningProfiles = nil
 	s.modelPolicy = mp
 	s.policyMu.Unlock()
 }
@@ -777,6 +782,21 @@ func (s *RouterService) setProviderProfiles(profiles providerProfiles) {
 	s.policyMu.Unlock()
 }
 
+func (s *RouterService) getReasoningProfiles() reasoningProfiles {
+	if s == nil {
+		return nil
+	}
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return cloneReasoningProfiles(s.reasoningProfiles)
+}
+
+func (s *RouterService) setReasoningProfiles(profiles reasoningProfiles) {
+	s.policyMu.Lock()
+	s.reasoningProfiles = cloneReasoningProfiles(profiles)
+	s.policyMu.Unlock()
+}
+
 // ReloadModelPolicy re-reads the model policy (embedded default < model-policy.json
 // < env) and atomically swaps it in, so free-model chains can be updated without
 // a full restart. Refuses to swap in a policy that fails strict validation.
@@ -787,6 +807,7 @@ func (s *RouterService) ReloadModelPolicy() error {
 	}
 	s.setModelPolicyConfig(runtime.Config)
 	s.setProviderProfiles(loadProviderProfiles())
+	s.setReasoningProfiles(loadReasoningProfiles())
 	s.policyMu.Lock()
 	s.contextWindows = loadContextWindows()
 	s.modelWarnings = runtime.Warnings

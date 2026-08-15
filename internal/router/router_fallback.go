@@ -133,7 +133,13 @@ func (e DefaultFallbackExecutor) Execute(ctx context.Context, w http.ResponseWri
 			continue
 		}
 		slog.DebugContext(ctx, "[CalvoProxy] Executing attempt", slog.String("profile", attempt.Profile), slog.String("model", attempt.Model))
-		requestBody := requestBodyForAttempt(execution.RequestBody, attempt)
+		buildBody := execution.BuildRequestBody
+		if buildBody == nil {
+			buildBody = func(_ context.Context, body map[string]interface{}, a modelAttempt) map[string]interface{} {
+				return requestBodyForAttempt(body, a)
+			}
+		}
+		requestBody := buildBody(ctx, execution.RequestBody, attempt)
 		requestBody["model"] = attempt.Model
 		upBytes, _ := json.Marshal(requestBody)
 		attempt.AttemptIndex = attemptIndex + 1
