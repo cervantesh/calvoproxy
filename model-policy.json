@@ -34,15 +34,13 @@
       "google/gemma-4-26b-a4b-it:free",
       "nvidia/nemotron-3-super-120b-a12b:free",
       "gpt-oss-120b",
-      "qwen2.5:7b",
-      "nvidia/nemotron-3.5-lightning:free"
+      "qwen2.5:7b"
     ],
     "compact": [
       "nvidia/nemotron-3-super-120b-a12b:free",
       "google/gemma-4-26b-a4b-it:free",
       "gpt-oss-120b",
-      "qwen2.5:7b",
-      "nvidia/nemotron-3.5-lightning:free"
+      "qwen2.5:7b"
     ],
     "skillsearch": [
       "qwen2.5:7b",
@@ -100,15 +98,13 @@
       { "Provider": "openrouter", "Model": "google/gemma-4-26b-a4b-it:free" },
       { "Provider": "openrouter", "Model": "nvidia/nemotron-3-super-120b-a12b:free" },
       { "Provider": "cerebras", "Model": "gpt-oss-120b" },
-      { "Provider": "ollama", "Model": "qwen2.5:7b" },
-      { "Provider": "openrouter", "Model": "nvidia/nemotron-3.5-lightning:free" }
+      { "Provider": "ollama", "Model": "qwen2.5:7b" }
     ],
     "compact": [
       { "Provider": "openrouter", "Model": "nvidia/nemotron-3-super-120b-a12b:free" },
       { "Provider": "openrouter", "Model": "google/gemma-4-26b-a4b-it:free" },
       { "Provider": "cerebras", "Model": "gpt-oss-120b" },
-      { "Provider": "ollama", "Model": "qwen2.5:7b" },
-      { "Provider": "openrouter", "Model": "nvidia/nemotron-3.5-lightning:free" }
+      { "Provider": "ollama", "Model": "qwen2.5:7b" }
     ],
     "skillsearch": [
       { "Provider": "ollama", "Model": "qwen2.5:7b" },
