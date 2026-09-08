@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.3] — 2026-09-08
+
 ### Fixed
 
 - **The keepalive launcher no longer clamps completions to 1024 tokens.** That
@@ -1287,7 +1289,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.3...HEAD
+[0.20.3]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.3
 [0.20.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.2
 [0.20.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.1
 [0.20.0]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.0
