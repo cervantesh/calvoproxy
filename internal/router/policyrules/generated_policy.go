@@ -265,10 +265,10 @@ func factIntegerValue(req cervorules.Request, name string, bounds factIntegerBou
 // and which leaf decided it, so a trace step can name the reason.
 type ruleMatcher func(ctx context.Context, e generatedEngine, req cervorules.Request, f factFrame) (bool, string, error)
 
-// body_bytes gt 10485760
+// body_bytes gt 67108864
 func matchRule0DenyOversizedBody(ctx context.Context, e generatedEngine, req cervorules.Request, f factFrame) (bool, string, error) {
-	if f.factBodyBytes > 10485760 {
-		return true, "body_bytes gt 10485760", nil
+	if f.factBodyBytes > 67108864 {
+		return true, "body_bytes gt 67108864", nil
 	}
 	return false, "", nil
 }

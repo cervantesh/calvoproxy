@@ -11,6 +11,33 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The request-body cap no longer pre-empts the context check.** `MaxBytesReader`
+  runs at the top of the handler; `estimateRequestContext` / `filterContextFit`
+  run ~200 lines later. A body over the old 10 MiB default was therefore rejected
+  with a bare `413` before the proxy could apply the limit that actually matters
+  and answer the far more useful `422 "Request context exceeds every eligible
+  model's safe window. Compact the conversation or start a new session."`
+
+  Observed 2026-09-07: a Hermes session crossed 10 MiB on accumulated base64
+  tool-result imagery while sitting at **17% of its token budget**. Bytes and
+  tokens are different axes — base64 is heavy in bytes and light in tokens — so
+  no byte cap derived from a context window would have caught it either. The
+  byte cap is now what it should always have been: a transport guard against a
+  broken or hostile client, defaulted to 64 MiB (in line with the 25 MiB
+  response cap) rather than a de-facto conversation limit. Token enforcement is
+  unchanged and still lives where it belongs.
+
+  `PROXY_MAX_BODY_BYTES` still overrides, including back down to the old value.
+
+  The policy layer carried its own `deny-oversized-body` threshold at the same
+  10 MiB, evaluated by `authorizeOperationalRoute` *before* the chain runs.
+  Raising only the transport cap therefore changed nothing — the `413` simply
+  became a `403`. Both thresholds now move together, and a regression test
+  asserts the property rather than either constant: a body the transport admits
+  must survive the policy. Caught in review on the first cut of this change.
+
 ## [0.20.1] — 2026-08-15
 
 ### Fixed

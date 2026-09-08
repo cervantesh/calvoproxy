@@ -14,7 +14,7 @@ import (
 // pin what that bought: the number now decides something, and it decides it
 // from the file PolicyHash covers.
 
-const policyBodyLimit = 10 << 20 // must equal deny-oversized-body in policy-rules.yaml
+const policyBodyLimit = 64 << 20 // must equal deny-oversized-body in policy-rules.yaml
 
 func bodyOfSize(n int) []byte {
 	body := make([]byte, n)
@@ -94,7 +94,7 @@ func TestThresholdDoesNotReachTheUnGatedTraceChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("un-gated view does not marshal: %v", err)
 	}
-	if strings.Contains(string(ungated), "10485760") {
+	if strings.Contains(string(ungated), "67108864") {
 		t.Fatalf("the policy threshold reached the un-gated channel: %s", ungated)
 	}
 
