@@ -11,6 +11,31 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The keepalive launcher no longer clamps completions to 1024 tokens.** That
+  ceiling is why an oversized Hermes session could not recover: context
+  compaction has to summarise the conversation, the summary itself hit
+  `finish_reason=length`, and an incomplete summary frees nothing — so the
+  session died of overflow after three attempts. Measured 2026-09-08: all three
+  profiles returned exactly 1024 output tokens regardless of the client's
+  `max_tokens`. Now 8192, still under the 16384 `OutputReserveTokens` the chain's
+  models declare. Verified after the change: 4096 requested returns 3019 tokens
+  and `finish_reason=stop` — the answer ends on its own instead of being cut.
+
+### Changed
+
+- **The launcher now serves both callers, retiring `ensure-calvoproxy.ps1`.** The
+  script survived only because Hermes' `on_session_start` hook writes a JSON
+  payload to stdin and hangs if nobody reads it; that is ten lines of Go, drained
+  conditionally so the Task Scheduler path — which sends no stdin — cannot block
+  on a read that never returns.
+
+  Two launchers carrying the same hand-copied environment table had already cost
+  something: the completion clamp was raised in the `.ps1` and nothing changed,
+  because the binary is what actually starts the proxy.
+
+
 ## [0.20.2] — 2026-09-07
 
 ### Fixed
