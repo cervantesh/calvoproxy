@@ -4,13 +4,21 @@
 // -WindowStyle Hidden en powershell.exe, que crea la consola visible y luego
 // la oculta).
 //
-// El .ps1 original sigue existiendo y lo sigue usando el hook on_session_start
-// de Hermes (que necesita leer el JSON del hook por stdin); este binario es
-// solo para el disparador de Task Scheduler, que nunca manda stdin.
+// Sirve a los DOS llamadores, de modo que ensure-calvoproxy.ps1 ya no hace
+// falta: el disparador de Task Scheduler (que nunca manda stdin) y el hook
+// on_session_start de Hermes (que envia su JSON por stdin y se queda esperando
+// si nadie lo lee). El drenaje es condicional por la misma razon que en el .ps1:
+// leer stdin incondicionalmente bloquea para siempre bajo Task Scheduler, que
+// fue como la tarea acabo atascada en "Running" con el proxy caido.
+//
+// Tener dos lanzadores con la misma tabla de variables copiada a mano ya costo
+// una: PROXY_MAX_COMPLETION_TOKENS se subio en el .ps1 y el proceso siguio
+// arrancando con el valor viejo, porque quien lo lanza es este binario.
 package main
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -49,7 +57,14 @@ func buildChildEnv() []string {
 	env["PORT"] = port
 	env["GRPC_PORT"] = "19090"
 	env["OTEL_ENABLED"] = "false"
-	env["PROXY_MAX_COMPLETION_TOKENS"] = "1024"
+	// 8192, no 1024. Con 1024 la compactacion de contexto de Hermes no cabia en
+	// su propio resumen: el resumen salia truncado con finish_reason=length, y sin
+	// resumen completo no podia reducir nada, asi que la sesion moria por
+	// desbordamiento tras tres intentos. Medido 2026-09-08: los tres perfiles
+	// cortaban en exactamente 1024 tokens de salida pidiera lo que pidiera el
+	// cliente. Sigue por debajo del OutputReserveTokens de 16384 que declaran los
+	// modelos principales de la cadena.
+	env["PROXY_MAX_COMPLETION_TOKENS"] = "8192"
 	env["PROXY_TOOL_RESULT_LIMIT"] = "8192"
 	env["PROXY_OLLAMA_URL"] = "http://127.0.0.1:11434"
 	env["PROXY_REQUEST_TIMEOUT_SECONDS"] = "90"
@@ -64,7 +79,23 @@ func buildChildEnv() []string {
 	return out
 }
 
+// drainStdinIfRedirected consume el payload del hook y nada mas. Solo cuando
+// stdin viene redirigido: bajo Task Scheduler no hay nadie escribiendo y una
+// lectura incondicional no termina nunca.
+func drainStdinIfRedirected() {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return
+	}
+	if fi.Mode()&os.ModeCharDevice != 0 {
+		return // consola: nadie va a escribir
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
 func main() {
+	drainStdinIfRedirected()
+
 	if portOpen("127.0.0.1:" + port) {
 		return // ya está arriba, nada que hacer
 	}
