@@ -31,6 +31,13 @@ out — see v0.7.1.
 
   `PROXY_MAX_BODY_BYTES` still overrides, including back down to the old value.
 
+  The policy layer carried its own `deny-oversized-body` threshold at the same
+  10 MiB, evaluated by `authorizeOperationalRoute` *before* the chain runs.
+  Raising only the transport cap therefore changed nothing — the `413` simply
+  became a `403`. Both thresholds now move together, and a regression test
+  asserts the property rather than either constant: a body the transport admits
+  must survive the policy. Caught in review on the first cut of this change.
+
 ## [0.20.1] — 2026-08-15
 
 ### Fixed

@@ -26,7 +26,7 @@ func chatWith(metadata map[string]string) cervorules.Request {
 
 func TestOversizedBodyIsDeniedByThePolicysOwnThreshold(t *testing.T) {
 	result, err := defaultEngine(t).DecideWithOptions(context.Background(),
-		chatWith(map[string]string{"body_bytes": "10485761"}),
+		chatWith(map[string]string{"body_bytes": "67108865"}),
 		cervorules.NewDecisionOptions(cervorules.WithTrace(true)))
 	if err != nil {
 		t.Fatalf("decide: %v", err)
@@ -54,7 +54,7 @@ func TestOversizedBodyIsDeniedByThePolicysOwnThreshold(t *testing.T) {
 
 func TestBodyAtTheThresholdIsAllowed(t *testing.T) {
 	result, err := defaultEngine(t).Decide(context.Background(),
-		chatWith(map[string]string{"body_bytes": "10485760"}))
+		chatWith(map[string]string{"body_bytes": "67108864"}))
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -68,8 +68,8 @@ func TestBodyAtTheThresholdIsAllowed(t *testing.T) {
 func TestTheThresholdBoundaryBelongsToTheAllowedSide(t *testing.T) {
 	for raw, wantAllow := range map[string]bool{
 		"10485759": true,
-		"10485760": true,
-		"10485761": false,
+		"67108864": true,
+		"67108865": false,
 	} {
 		result, err := defaultEngine(t).Decide(context.Background(),
 			chatWith(map[string]string{"body_bytes": raw}))

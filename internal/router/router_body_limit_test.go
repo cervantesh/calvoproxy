@@ -51,3 +51,48 @@ func TestRequestBodyCapHonoursEnvOverride(t *testing.T) {
 	}
 	_ = os.Unsetenv("PROXY_MAX_BODY_BYTES")
 }
+
+// Regression for the gap that PR #120 shipped with and review caught: raising
+// the TRANSPORT cap alone changes nothing, because a second, independent limit
+// sits in front of it.
+//
+// authorizeOperationalRoute runs at router.go:195/239/279, before dispatchChain
+// at 254/295 and therefore before filterContextFit. The compiled policy carries
+// its own deny-oversized-body threshold, so a body between the old 10 MiB and
+// the new cap passed MaxBytesReader and was then refused by policy — the 413
+// simply became a 403, and the context-aware 422 was still unreachable.
+//
+// This asserts the property directly instead of the constant: a body the
+// transport now admits must survive the policy too.
+func TestPolicyAdmitsBodiesTheTransportCapNowAllows(t *testing.T) {
+	t.Setenv("PROXY_MAX_BODY_BYTES", "")
+
+	const oldTransportCap = 10 << 20
+	if maxRequestBodyBytes() <= oldTransportCap {
+		t.Skip("transport cap is back at or below the old default; nothing to admit")
+	}
+
+	// Comfortably past the old ceiling, comfortably inside the new one.
+	body := bodyOfSize(oldTransportCap + (1 << 20))
+
+	decision, ok, recorder := decideForBody(t, body)
+	if !ok {
+		t.Fatalf("policy refused a %d-byte body that the transport cap admits "+
+			"(status %d, reason %q). The transport default and the policy "+
+			"threshold have drifted apart, so raising one accomplishes nothing.",
+			len(body), recorder.Code, decision.Reason)
+	}
+}
+
+// The two limits must not drift again: a body one byte under the policy
+// threshold has to be admitted, and the policy threshold has to be at least the
+// transport cap, or the transport cap is decorative.
+func TestPolicyThresholdIsNotBelowTheTransportCap(t *testing.T) {
+	t.Setenv("PROXY_MAX_BODY_BYTES", "")
+
+	if policyBodyLimit < int(maxRequestBodyBytes()) {
+		t.Fatalf("policy threshold %d is below the transport cap %d: every "+
+			"request between them is refused by policy, so the transport cap "+
+			"never decides anything", policyBodyLimit, maxRequestBodyBytes())
+	}
+}
