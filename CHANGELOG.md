@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.2] — 2026-09-07
+
 ### Fixed
 
 - **The request-body cap no longer pre-empts the context check.** `MaxBytesReader`
