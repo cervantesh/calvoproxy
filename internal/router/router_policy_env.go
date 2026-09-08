@@ -50,14 +50,30 @@ func envValue(key string) string {
 }
 
 // maxRequestBodyBytes is the cap applied to incoming request bodies via
-// http.MaxBytesReader. Configurable with PROXY_MAX_BODY_BYTES; default 10 MiB.
+// http.MaxBytesReader. Configurable with PROXY_MAX_BODY_BYTES; default 64 MiB.
+//
+// This is a TRANSPORT guard against a broken or hostile client, not a context
+// limit. The context limit is enforced properly further down: RouteRequest
+// estimates the request's tokens and filterContextFit narrows the chain to
+// models whose window actually fits, answering 422 with "Request context
+// exceeds every eligible model's safe window" when none do.
+//
+// The old 10 MiB default pre-empted that. MaxBytesReader runs at the top of
+// the handler, long before the estimate, so an oversized body was rejected
+// with a bare 413 and the caller never learned which limit it hit or what to
+// do about it. Observed 2026-09-07: a Hermes session accumulated enough
+// base64 tool-result imagery to cross 10 MiB while sitting at 17% of its
+// TOKEN budget -- bytes and tokens are different axes, and only the token
+// axis has a meaningful ceiling here. Raised so legitimate multimodal
+// conversations reach the context-aware decision instead of dying at the door;
+// abuse protection is preserved, just at a bound real traffic does not hit.
 func maxRequestBodyBytes() int64 {
 	if raw := envValue("PROXY_MAX_BODY_BYTES"); raw != "" {
 		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 10 << 20
+	return 64 << 20
 }
 
 // maxResponseBytes caps how much of a NON-streaming upstream response we buffer
