@@ -11,6 +11,23 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A provider that answers `402 Payment Required` no longer ends the whole
+  chain.** 402 was missing from the account-failure set, so it fell through to
+  the retry policy, came back non-retryable, and terminated the fallback loop.
+  Observed 2026-09-09: Cerebras returned 402 on two scheduled runs and the chain
+  died on attempt 2 of 15 - Groq and twelve OpenRouter models were never tried,
+  and both of that day's cron jobs failed with `HTTP 402: upstream unavailable`.
+  Every one of those thirteen models answered normally when probed minutes
+  later. A billing refusal is a statement about one provider's account; the next
+  model authenticates and is billed separately. 402 now joins 401 and 403 in
+  marking the provider unavailable for the request, which skips its siblings and
+  lets the chain continue - the same treatment those two got after they caused
+  this same outage. `calvoproxy_chain_failed_total{reason="terminal"}` was 5
+  with `exhausted` at 0, which is the signature of this class of bug: the chain
+  never spent the options it had.
+
 ## [0.20.3] — 2026-09-08
 
 ### Fixed
