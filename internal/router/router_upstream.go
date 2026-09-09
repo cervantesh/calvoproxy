@@ -168,8 +168,22 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 				providerQuotaExhausted = true
 			}
 		}
-		providerAuthFailure := (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !isProviderRelayedError(string(respBytes))
-		if providerAuthFailure && attempt.Provider != providerOpenRouter {
+		// 401/403 (bad credential) and 402 (unpaid account) are all statements
+		// about ONE provider's account, not about the request. They belong
+		// together: each is fixed by acting on that provider, and none of them
+		// says anything about the next model, which authenticates and bills
+		// separately.
+		//
+		// 402 was missing here until 2026-09-09, when Cerebras started
+		// returning it. Falling through to shouldRetryAttempt made it terminal
+		// and killed the chain on attempt 2 of 15 — Groq and twelve OpenRouter
+		// models never ran, and both of that day's scheduled jobs failed with
+		// "402 upstream unavailable" while every one of those models was
+		// answering normally.
+		providerAccountFailure := (resp.StatusCode == http.StatusUnauthorized ||
+			resp.StatusCode == http.StatusForbidden ||
+			resp.StatusCode == http.StatusPaymentRequired) && !isProviderRelayedError(string(respBytes))
+		if providerAccountFailure && attempt.Provider != providerOpenRouter {
 			attErr.ProviderUnavailable = true
 		}
 		if quotaLimited {
@@ -229,7 +243,7 @@ func (s *RouterService) executeAttempt(ctx context.Context, w http.ResponseWrite
 				slog.String("model", attempt.Model))
 		}
 		recordTraceFailure(ctx, attempt, resp.StatusCode, traceKindFor(attErr), attErr.Message)
-		nonModelFailure := quotaLimited || providerAuthFailure
+		nonModelFailure := quotaLimited || providerAccountFailure
 		if !nonModelFailure {
 			s.penalizeScore(attempt, attErr.StatusCode)
 		}
