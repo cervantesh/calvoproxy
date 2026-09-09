@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.4] — 2026-09-09
+
 ### Fixed
 
 - **A provider that answers `402 Payment Required` no longer ends the whole
@@ -1306,7 +1308,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.3...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.4...HEAD
+[0.20.4]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.4
 [0.20.3]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.3
 [0.20.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.2
 [0.20.1]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.1
