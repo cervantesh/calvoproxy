@@ -54,6 +54,15 @@ func buildChildEnv() []string {
 		}
 	}
 	delete(env, "OPENROUTER_API_KEY")
+	// 2026-11-27: la clave buena de OpenRouter llega desde Bitwarden como
+	// CALVOPROXY_OPENROUTER_API_KEY (start-calvoproxy-bitwarden.vbs), con otro
+	// nombre para que el borrado de la variable vieja de arriba no la quite.
+	if key, ok := env["CALVOPROXY_OPENROUTER_API_KEY"]; ok {
+		delete(env, "CALVOPROXY_OPENROUTER_API_KEY")
+		if key != "" {
+			env["OPENROUTER_API_KEY"] = key
+		}
+	}
 	env["PORT"] = port
 	env["GRPC_PORT"] = "19090"
 	env["OTEL_ENABLED"] = "false"
