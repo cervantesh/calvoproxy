@@ -11,6 +11,20 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+### Security
+
+- **govulncheck is green again: Go 1.26.11 and patched dependencies.** The
+  quality gate (`scripts/verify.sh`, also the pre-commit hook) had started
+  failing on 16 reachable vulnerabilities, so no commit could pass it. The
+  toolchain moves from 1.26.6 to 1.26.11 (net/http, crypto/tls, crypto/x509,
+  net/textproto and html/template fixes) in `go.mod`, CI, release and the
+  Docker builder; OpenTelemetry goes 1.45.0 -> 1.47.0 (GO-2026-6974/6975),
+  `golang.org/x/net` 0.57.0 -> 0.60.0 and gRPC 1.83.0 -> 1.83.2 (GO-2026-6348;
+  1.83.2 rather than 1.83.1 because the otel exporter requires it).
+  The `cervo-*` vendored trees are byte-for-byte unchanged: `go mod vendor`
+  was run against a temporary `third_party/` rebuilt from `vendor/` itself,
+  and the vendor manifest still verifies.
+
 ## [0.20.4] — 2026-09-09
 
 ### Fixed

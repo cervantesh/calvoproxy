@@ -24,8 +24,10 @@ jobs:
           # stdlib CVE gets fixed by a patch release. A floating minor version
           # depends on setup-go's manifest having already picked up that patch,
           # which lags the actual release — go1.26.6 fixed 6 stdlib CVEs
-          # (GO-2026-6089/6090/6091/5972/5026/6218) still present in 1.26.5.
-          go-version: "1.26.6"
+          # (GO-2026-6089/6090/6091/5972/5026/6218) still present in 1.26.5,
+          # and go1.26.11 fixed 11 more in net/http, crypto/tls, crypto/x509,
+          # net/textproto and html/template that 1.26.6 still had.
+          go-version: "1.26.11"
       - name: Build (offline, vendored)
         run: GOPROXY=off go build -mod=vendor ./...
       - name: Test
@@ -106,7 +108,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.26.11"
       - name: Build native macOS binary
         env:
           CGO_ENABLED: "1"
