@@ -11,6 +11,8 @@ out — see v0.7.1.
 
 ## [Unreleased]
 
+## [0.20.5] — 2026-11-27
+
 ### Security
 
 - **govulncheck is green again: Go 1.26.11 and patched dependencies.** The
@@ -24,6 +26,16 @@ out — see v0.7.1.
   The `cervo-*` vendored trees are byte-for-byte unchanged: `go mod vendor`
   was run against a temporary `third_party/` rebuilt from `vendor/` itself,
   and the vendor manifest still verifies.
+
+### Fixed
+
+- **The keepalive launcher passes the Bitwarden OpenRouter key through.** It
+  drops any inherited `OPENROUTER_API_KEY`, because the old user variable held a
+  rejected key, and that also threw away the working key once it came from
+  Bitwarden. `start-calvoproxy-bitwarden.vbs` now hands the key over as
+  `CALVOPROXY_OPENROUTER_API_KEY`; the launcher maps it to `OPENROUTER_API_KEY`
+  for the proxy and never forwards the transport variable. Without it, the
+  stale key is still dropped.
 
 ## [0.20.4] — 2026-09-09
 
@@ -1322,7 +1334,8 @@ change to the running proxy.
 ### Added
 - First public release: open-source scaffolding, Docker, CI/release pipeline.
 
-[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.4...HEAD
+[Unreleased]: https://github.com/cervantesh/calvoproxy/compare/v0.20.5...HEAD
+[0.20.5]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.5
 [0.20.4]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.4
 [0.20.3]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.3
 [0.20.2]: https://github.com/cervantesh/calvoproxy/releases/tag/v0.20.2
